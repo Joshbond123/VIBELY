@@ -541,6 +541,9 @@ def _run_music_generation_job(job_id: str, payload: dict):
             })
         log(f"Job {job_id} completed ({actual_dur:.2f}s MP3)")
     except Exception as e:
+        try:
+            urllib.request.urlopen(urllib.request.Request('http://127.0.0.1:8188/interrupt',data=b'{}',headers={'Content-Type':'application/json'}),timeout=5).close()
+        except Exception: pass
         tb = traceback.format_exc()
         log(f"Job {job_id} FAILED: {e}\n{tb}")
         with JOBS_LOCK:

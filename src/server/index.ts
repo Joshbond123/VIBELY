@@ -1,4 +1,5 @@
 import crypto from 'crypto';
+import { generateSocialMetadata } from './socialMetadata.js';
 import cors from 'cors';
 import express from 'express';
 import fs from 'fs';
@@ -243,6 +244,16 @@ app.post('/api/videos/generate', async (req, res) => {
   } catch (err: any) {
     res.status(500).json({ ok: false, error: err?.message || String(err) });
   }
+});
+
+app.post('/api/videos/:id/social-metadata', async (req,res) => {
+  try {
+    const [row]=await query<any>("SELECT status FROM video_generations WHERE id=$1 AND deleted_at IS NULL",[req.params.id]);
+    if(!row || row.status!=='completed') {res.status(409).json({ok:false,error:'Completed video required'});return;}
+    await generateSocialMetadata(req.params.id,DATA_DIR);
+    const [result]=await query<any>('SELECT * FROM video_generations WHERE id=$1',[req.params.id]);
+    res.json({ok:true,video:formatVideoRow(result)});
+  } catch(e:any) {res.status(502).json({ok:false,error:e.message});}
 });
 
 app.delete('/api/videos/:id', async (req, res) => {

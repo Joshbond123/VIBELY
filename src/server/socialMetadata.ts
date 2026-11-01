@@ -42,6 +42,7 @@ export async function generateSocialMetadata(id: string, dataDir: string): Promi
     }
     if (!result) throw new Error(lastError || 'No vision model available');
     const tags=[...new Set<string>(result.hashtags.map((t:any)=>'#'+String(t).replace(/[^\p{L}\p{N}_]/gu,'')))].filter(x=>x.length>1).slice(0,12);
+    for(const platform of ['#TikTok','#InstagramReels']) if(!tags.some(t=>t.toLowerCase()===platform.toLowerCase())) tags.push(platform);
     if (tags.length<4) throw new Error('Insufficient relevant hashtags');
     await query(`UPDATE video_generations SET social_caption=$2, hashtags=$3::jsonb, caption_status='completed', caption_error=NULL, observed_content=$4, quality_notes=$5::jsonb, caption_model=$6 WHERE id=$1`,[id,result.caption.trim().slice(0,500),JSON.stringify(tags),result.observed_content,JSON.stringify(result.quality_notes || []),modelUsed]);
   } catch(e:any) {

@@ -720,6 +720,9 @@ def _run_multiscene_video_job_locked(job_id: str, payload: dict):
             })
         log(f"Multi-scene video job {job_id} COMPLETED ({final_dur:.2f}s seamless MP4 across {total_scenes} scenes)")
     except Exception as e:
+        try:
+            urllib.request.urlopen(urllib.request.Request('http://127.0.0.1:8188/interrupt',data=b'{}',headers={'Content-Type':'application/json'}),timeout=5).close()
+        except Exception: pass
         tb = traceback.format_exc()
         log(f"Video job {job_id} FAILED: {e}\n{tb}")
         with JOBS_LOCK:

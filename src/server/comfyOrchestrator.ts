@@ -260,6 +260,7 @@ export async function executeMusicGenerationOnComfyUI(params: {
     }
     const cj: any = await createResp.json();
     remoteJobId = cj.job_id;
+    if(params.parentVideoGenId) await query("UPDATE video_generations SET stage_timings=stage_timings || jsonb_build_array(jsonb_build_object('stage','music_submitted','at',NOW())) WHERE id=$1",[params.parentVideoGenId]);
     if (params.parentVideoGenId) {
       await query(
         `UPDATE video_generations SET comfyui_workflow = jsonb_set(COALESCE(comfyui_workflow, '{}'::jsonb), '{remote_music_job_id}', to_jsonb($2::text), true) WHERE id = $1`,
@@ -369,7 +370,7 @@ export async function executeMusicGenerationOnComfyUI(params: {
     );
   }
 
-  if (params.parentVideoGenId) await query('UPDATE video_generations SET music_track_id=$2 WHERE id=$1',[params.parentVideoGenId,trackId]);
+  if (params.parentVideoGenId) await query("UPDATE video_generations SET music_track_id=$2, stage_timings=stage_timings || jsonb_build_array(jsonb_build_object('stage','music_completed','at',NOW())) WHERE id=$1",[params.parentVideoGenId,trackId]);
   return { trackId, fileName, filePath, durationSec: actualDuration, comfyPromptId, workflow };
 }
 
@@ -441,6 +442,7 @@ export async function launchVideoGenerationPipeline(params: {
     [genId, params.triggerType, params.scheduleId || null, autoDeleteEnabled]
   );
 
+  await query("UPDATE video_generations SET stage_timings=jsonb_build_array(jsonb_build_object('stage','reasoning','at',NOW(),'progress',5)) WHERE id=$1",[genId]);
   ACTIVE_IN_MEMORY_JOBS.add(genId);
   // Run asynchronous full pipeline in background
   runFullPipelineBg(genId, params.dataDir, autoDeleteEnabled, params.forceSeriesId, params.scheduleId || null)
@@ -600,6 +602,7 @@ async function executeAndFinalizeH3Video(opts: {
     }
     const cj: any = await createVidResp.json();
     remoteVidJobId = cj.job_id;
+    await query("UPDATE video_generations SET stage_timings=stage_timings || jsonb_build_array(jsonb_build_object('stage','video_submitted','at',NOW())) WHERE id=$1",[genId]);
     await query(
       `UPDATE video_generations
        SET comfyui_workflow = COALESCE(comfyui_workflow,'{}'::jsonb) || $2::jsonb
@@ -620,7 +623,7 @@ async function executeAndFinalizeH3Video(opts: {
   const vidStart = Date.now();
   let videoPollErrors=0;
   let progressSignature=""; let lastProgressAt=Date.now();
-  while (Date.now() - vidStart < 50 * 60 * 1000) {
+  while (Date.now() - vidStart < 120 * 60 * 1000) {
     await new Promise((r) => setTimeout(r, 4000));
     const stResp = await workerFetch(`${videoEp.endpoint_url}/v1/video/jobs/${remoteVidJobId}`, {
       headers: { Authorization: `Bearer ${videoApiKey}` },
@@ -672,6 +675,8 @@ async function executeAndFinalizeH3Video(opts: {
     const music=await opts.musicPromise;
     musicFilePath=music.filePath;musicComfyPromptId=music.comfyPromptId;
     await query('UPDATE video_generations SET music_track_id=$2 WHERE id=$1',[genId,music.trackId]);
+  }
+  if (musicFilePath) {
     const muxed=path.join(videosDir,`${genId}_mux.mp4`);
     await execFileAsync('ffmpeg',['-y','-v','error','-i',videoFilePath,'-i',musicFilePath,'-map','0:v:0','-map','1:a:0','-c:v','copy','-c:a','aac','-b:a','192k','-af','apad','-t',String(totalDurationSec),'-movflags','+faststart',muxed],{timeout:120000});
     fs.renameSync(muxed,videoFilePath);
@@ -713,6 +718,9 @@ async function executeAndFinalizeH3Video(opts: {
     remote_video_job_id: remoteVidJobId,
     character_references: ['scarlett_ref_1.jpg', 'scarlett_ref_2.jpg', 'scarlett_ref_3.jpg'],
     scene_count: scenes.length,
+    native_resolution: [320,576],
+    sampling_steps:4,
+    render_metrics:{created_at:completedVidJob.created_at,completed_at:completedVidJob.completed_at,node_events:completedVidJob.node_events || []},
   };
 
   await query(
@@ -728,7 +736,9 @@ async function executeAndFinalizeH3Video(opts: {
          comfyui_workflow = $5::jsonb,
          comfyui_prompt_ids = $6::jsonb,
          expires_at = $7,
-         completed_at = NOW()
+         completed_at = NOW(),
+         last_activity_at = NOW(),
+         stage_timings=stage_timings || jsonb_build_array(jsonb_build_object('stage','completed','at',NOW(),'progress',100))
      WHERE id = $1`,
     [
       genId,
@@ -832,12 +842,15 @@ export async function recoverInFlightGenerations(dataDir: string): Promise<void>
 
   // Also recover any in-flight standalone music tracks
   const inflightMusic = await query<any>(
-    `SELECT * FROM music_tracks WHERE status = 'generating' AND created_at >= NOW() - INTERVAL '30 minutes'`
+    `SELECT * FROM music_tracks WHERE status = 'generating'`
   );
   for (const mrow of inflightMusic) {
     if (ACTIVE_IN_MEMORY_JOBS.has(mrow.id)) continue;
     const rjid = mrow.comfyui_workflow?.remote_music_job_id;
-    if (!rjid) continue;
+    if (!rjid) {
+      if(Date.now()-new Date(mrow.created_at).getTime()>10*60*1000) await query("UPDATE music_tracks SET status='failed',error_message='Music planning interrupted before worker submission; please retry' WHERE id=$1",[mrow.id]);
+      continue;
+    }
     ACTIVE_IN_MEMORY_JOBS.add(mrow.id);
     (async () => {
       try {
