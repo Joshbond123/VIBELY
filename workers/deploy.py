@@ -1,7 +1,7 @@
 """Deploy repository worker sources to PRIVATE Kaggle kernels from GitHub Actions.
 Secrets are injected at deployment time; never commit rendered worker files.
 """
-import ast, json, os, pathlib, subprocess, tempfile, sys
+import ast, json, os, pathlib, subprocess, tempfile, sys, time
 SPECS={
  'video':('joshbond123','vibely-minimax-h3-ref2va-server',['joshbond123/minimax-h3-ref2va-cache','joshbond123/scarlett-monroe-character-refs'],'KAGGLE_JOSHBOND_TOKEN','MINIMAX_H3_API_KEY'),
  'music':('happink','vibely-minimax-music-3-q4-0-gguf-server',['happink/minimax-music-3-q4-0-gguf-cache'],'KAGGLE_HAPPINK_TOKEN','MINIMAX_MUSIC3_API_KEY')}
@@ -14,9 +14,12 @@ for kind in ([sys.argv[1]] if len(sys.argv)>1 and sys.argv[1]!='all' else SPECS)
  compile(source,slug,'exec')
  with tempfile.TemporaryDirectory() as temp:
   p=pathlib.Path(temp);(p/'server.py').write_text(source)
-  (p/'kernel-metadata.json').write_text(json.dumps({'id':user+'/'+slug,'title':'VIBELY '+kind+' GPU worker','code_file':'server.py','language':'python','kernel_type':'script','is_private':'true','enable_gpu':'true','enable_internet':'true','enable_tpu':'false','dataset_sources':datasets,'competition_sources':[],'kernel_sources':[],'model_sources':[]}))
+  (p/'kernel-metadata.json').write_text(json.dumps({'id':user+'/'+slug,'title':('VIBELY MiniMax H3 Ref2VA Server' if kind=='video' else 'VIBELY MiniMax Music 3 Q4 0 GGUF Server'),'code_file':'server.py','language':'python','kernel_type':'script','is_private':'true','enable_gpu':'true','enable_internet':'true','enable_tpu':'false','dataset_sources':datasets,'competition_sources':[],'kernel_sources':[],'model_sources':[]}))
   env={**os.environ,'KAGGLE_USERNAME':user,'KAGGLE_KEY':values['KAGGLE_API_TOKEN'],'KAGGLE_API_TOKEN':values['KAGGLE_API_TOKEN']}
-  result=subprocess.run(['kaggle','kernels','push','-p',temp],env=env,capture_output=True,text=True)
+  for attempt in range(5):
+   result=subprocess.run(['kaggle','kernels','push','-p',temp],env=env,capture_output=True,text=True)
+   if result.returncode==0 or '409' not in result.stderr+result.stdout:break
+   time.sleep(30)
   # Do not echo CLI output: a vendor exception can contain credentials.
   if result.returncode:
    error=result.stderr+'\n'+result.stdout
