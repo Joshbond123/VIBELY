@@ -71,9 +71,10 @@ export interface FullProductionPlan {
 
 const NVIDIA_ENDPOINT = 'https://integrate.api.nvidia.com/v1/chat/completions';
 const REASONING_MODELS = [
+  'nvidia/nemotron-3.5-super-vl-120b-a12b',
   'nvidia/nemotron-3-ultra-550b-a55b',
-  'minimaxai/minimax-m3.1-flash',
-  'nvidia/llama-3.1-nemotron-70b-instruct',
+  'nvidia/nemotron-3-nano-omni-30b-a3b-reasoning',
+  'meta/llama-3.2-90b-vision-instruct',
 ];
 
 const CURATED_LOCATIONS = [
@@ -103,7 +104,7 @@ async function callNvidiaReasoningJSON(systemPrompt: string, userPrompt: string,
   for (const model of REASONING_MODELS) {
     try {
       const controller = new AbortController();
-      const timer = setTimeout(() => controller.abort(), 55_000);
+      const timer = setTimeout(() => controller.abort(), 75_000);
       const resp = await fetch(NVIDIA_ENDPOINT, {
         method: 'POST',
         headers: {
@@ -117,7 +118,7 @@ async function callNvidiaReasoningJSON(systemPrompt: string, userPrompt: string,
             { role: 'user', content: userPrompt },
           ],
           temperature,
-          max_tokens: 4096,
+          max_tokens: 6144,
         }),
         signal: controller.signal,
       });
@@ -129,7 +130,8 @@ async function callNvidiaReasoningJSON(systemPrompt: string, userPrompt: string,
       }
 
       const data: any = await resp.json();
-      const rawContent = data?.choices?.[0]?.message?.content || '';
+      const msg = data?.choices?.[0]?.message || {};
+      const rawContent = msg.content || msg.reasoning_content || '';
       const jsonStr = extractJsonObject(rawContent);
       const parsed = JSON.parse(jsonStr);
       return { parsed, modelUsed: model };

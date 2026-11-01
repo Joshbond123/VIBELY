@@ -33,6 +33,7 @@ const KAGGLE_WORKERS = [
     service_id: 'minimax_music_3',
     username: 'happink',
     slug: 'vibely-minimax-music-3-q4-0-gguf-server',
+    endpointDataset: 'happink/vibely-music3-live-endpoint',
     tokenEnv: 'KAGGLE_HAPPINK_TOKEN',
     urlRegex: /VIBELY_MUSIC_TUNNEL_URL=(https:\/\/[a-z0-9-]+\.trycloudflare\.com)/g,
   },
@@ -40,10 +41,30 @@ const KAGGLE_WORKERS = [
     service_id: 'minimax_h3_ref2va',
     username: 'joshbond123',
     slug: 'vibely-minimax-h3-ref2va-server',
+    endpointDataset: 'joshbond123/vibely-h3-live-endpoint',
     tokenEnv: 'KAGGLE_JOSHBOND_TOKEN',
     urlRegex: /VIBELY_VIDEO_TUNNEL_URL=(https:\/\/[a-z0-9-]+\.trycloudflare\.com)/g,
   },
 ];
+
+async function readKaggleEndpointDataset(datasetSlug: string, kToken: string): Promise<any | null> {
+  const tmpZip = `/tmp/ep_${datasetSlug.replace('/', '_')}_${Date.now()}.zip`;
+  try {
+    const resp = await fetch(`https://www.kaggle.com/api/v1/datasets/download/${datasetSlug}`, {
+      headers: { Authorization: `Bearer ${kToken}` },
+    });
+    if (!resp.ok) return null;
+    fs.writeFileSync(tmpZip, Buffer.from(await resp.arrayBuffer()));
+    const { stdout } = await execFileAsync('unzip', ['-p', tmpZip, 'endpoint.json']);
+    return JSON.parse(stdout);
+  } catch {
+    return null;
+  } finally {
+    if (fs.existsSync(tmpZip)) {
+      try { fs.unlinkSync(tmpZip); } catch {}
+    }
+  }
+}
 
 export async function syncKaggleEndpointsAndHealth(): Promise<ModelEndpointRecord[]> {
   for (const w of KAGGLE_WORKERS) {
@@ -62,7 +83,23 @@ export async function syncKaggleEndpointsAndHealth(): Promise<ModelEndpointRecor
         healthy = await probeWorkerHealth(w.service_id, url);
       }
 
-      // If no URL or current tunnel unreachable, query Kaggle API kernel output/status!
+      // If no URL or current tunnel unreachable, query Kaggle endpoint dataset + kernel output/status!
+      if (!healthy && kToken) {
+        const epMeta = await readKaggleEndpointDataset(w.endpointDataset, kToken);
+        if (epMeta?.endpoint_url) {
+          url = String(epMeta.endpoint_url).replace(/\/$/, '');
+          if (epMeta.api_key) {
+            await query(
+              `INSERT INTO model_endpoints (service_id, username, model_name, endpoint_url, api_key, status)
+               VALUES ($1, $2, $3, $4, $5, 'probing')
+               ON CONFLICT (service_id) DO UPDATE SET endpoint_url = EXCLUDED.endpoint_url, api_key = EXCLUDED.api_key`,
+              [w.service_id, epMeta.username || w.username, epMeta.model_name || w.service_id, url, epMeta.api_key]
+            );
+          }
+          healthy = await probeWorkerHealth(w.service_id, url);
+        }
+      }
+
       if (!healthy && kToken) {
         const statusResp = await fetch(
           `https://www.kaggle.com/api/v1/kernels/status?userName=${w.username}&kernelSlug=${w.slug}`,

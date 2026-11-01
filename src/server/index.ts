@@ -58,8 +58,8 @@ app.get('/api/health', async (_req, res) => {
       database: { connected: dbConnected, error: dbError || null },
       nvidia_reasoning: {
         configured: Boolean(process.env.NVIDIA_API_KEY),
-        primary_model: 'nvidia/nemotron-3-ultra-550b-a55b',
-        fallback_model: 'minimaxai/minimax-m3.1-flash',
+        primary_model: 'nvidia/nemotron-3.5-super-vl-120b-a12b',
+        fallback_model: 'nvidia/nemotron-3-ultra-550b-a55b',
       },
       comfyui_orchestration: {
         framework: 'ComfyUI + molbal/ComfyUI-GGUF',
@@ -70,7 +70,7 @@ app.get('/api/health', async (_req, res) => {
         count: refs.length,
         all_verified: refs.every((r) => r.verified),
       },
-      models,
+      models: models.map(sanitizeModelRow),
       settings: Object.fromEntries(settings.map((s: any) => [s.key, s.value])),
     });
   } catch (err: any) {
@@ -115,10 +115,10 @@ app.get('/api/overview', async (_req, res) => {
       ok: true,
       stats: counts[0] || { total: 0, active_videos: 0, completed_total: 0, failed_total: 0, running_total: 0 },
       series_distribution: seriesDist,
-      models,
+      models: models.map(sanitizeModelRow),
       recent_videos: videos.map(formatVideoRow),
       recent_tracks: tracks.map(formatTrackRow),
-      schedules,
+      schedules: schedules.map(formatScheduleRow),
       settings,
     });
   } catch (err: any) {
@@ -196,7 +196,7 @@ app.post('/api/models/sync', async (req, res) => {
       await probeWorkerHealth(req.body.service_id, req.body.endpoint_url);
     }
     const models = await syncKaggleEndpointsAndHealth();
-    res.json({ ok: true, models });
+    res.json({ ok: true, models: models.map(sanitizeModelRow) });
   } catch (err: any) {
     res.status(500).json({ ok: false, error: err?.message || String(err) });
   }
@@ -318,7 +318,7 @@ app.get('/api/automations', async (_req, res) => {
     );
     res.json({
       ok: true,
-      schedules,
+      schedules: schedules.map(formatScheduleRow),
       scheduled_tasks: scheduledTasks.map(formatVideoRow),
     });
   } catch (err: any) {
@@ -529,10 +529,55 @@ app.post('/api/settings/cleanup', async (_req, res) => {
   }
 });
 
+function sanitizeModelRow(m: any) {
+  if (!m) return null;
+  const { api_key, ...rest } = m;
+  return { ...rest, auth_configured: Boolean(api_key) };
+}
+
+function getFileSizeSafe(fp: string): number {
+  try {
+    return fs.existsSync(fp) ? fs.statSync(fp).size : 0;
+  } catch {
+    return 0;
+  }
+}
+
+function formatScheduleRow(s: any) {
+  if (!s) return null;
+  return {
+    ...s,
+    fail_count: Number(s.failed_count ?? s.fail_count ?? 0),
+  };
+}
+
 function formatVideoRow(r: any) {
   if (!r) return null;
+  const videoSize = r.video_file_name
+    ? getFileSizeSafe(path.join(DATA_DIR, 'videos', path.basename(r.video_file_name)))
+    : 0;
+  const scenes = Array.isArray(r.scene_plan)
+    ? r.scene_plan.map((sc: any) => ({
+        ...sc,
+        shot_framing: sc.shot_framing || sc.camera_position_and_movement || '',
+        camera_movement: sc.camera_movement || sc.camera_position_and_movement || '',
+        transition_to_next: sc.transition_to_next || sc.transition_instruction || '',
+      }))
+    : [];
   return {
     ...r,
+    visual_concept: r.video_concept || r.visual_concept || '',
+    storyline: r.script || r.storyline || '',
+    script_summary: r.script || '',
+    outfit_styling: r.outfit_descriptions || r.outfit_styling || '',
+    location_setting: r.location || r.location_setting || '',
+    lighting_setup: r.lighting_cinematography || '',
+    camera_plan: r.camera_instructions || r.camera_plan || '',
+    choreography_summary: r.choreography || r.choreography_summary || '',
+    scene_plan: scenes,
+    duration_seconds: Number(r.duration_sec ?? r.duration_seconds ?? 0),
+    auto_delete_eligible: Boolean(r.auto_delete_enabled ?? r.auto_delete_eligible ?? true),
+    file_size_bytes: videoSize,
     video_url: r.video_file_name ? `/media/videos/${r.video_file_name}` : null,
     thumbnail_url: r.thumbnail_file_name ? `/media/videos/${r.thumbnail_file_name}` : null,
   };
@@ -540,8 +585,14 @@ function formatVideoRow(r: any) {
 
 function formatTrackRow(t: any) {
   if (!t) return null;
+  const audioSize = t.file_name
+    ? getFileSizeSafe(path.join(DATA_DIR, 'music', path.basename(t.file_name)))
+    : 0;
   return {
     ...t,
+    music_prompt: t.caption_prompt || t.music_prompt || '',
+    duration_seconds: Number(t.duration_sec ?? t.duration_seconds ?? 0),
+    file_size_bytes: audioSize,
     audio_url: t.file_name ? `/media/music/${t.file_name}` : null,
   };
 }

@@ -11,13 +11,16 @@ export function computeNextRunAt(frequency: string, preferredTime: string, fromD
   const hh = Math.min(23, Math.max(0, parseInt(hhStr || '12', 10) || 0));
   const mm = Math.min(59, Math.max(0, parseInt(mmStr || '0', 10) || 0));
 
-  if (frequency === 'every_6_hours') {
+  if (frequency === 'hourly') {
+    return new Date(fromDate.getTime() + 3600 * 1000);
+  }
+  if (frequency === 'every_6_hours' || frequency === 'every_6h') {
     return new Date(fromDate.getTime() + 6 * 3600 * 1000);
   }
   if (frequency === 'every_12_hours') {
     return new Date(fromDate.getTime() + 12 * 3600 * 1000);
   }
-  if (frequency === 'custom_interval') {
+  if (frequency === 'custom_interval' || frequency === 'interval') {
     const mins = Math.max(1, customMinutes || 60);
     return new Date(fromDate.getTime() + mins * 60 * 1000);
   }
@@ -165,7 +168,13 @@ export async function runAutomaticVideoDeletionSweep(dataDir: string): Promise<{
     expiredVideosDeleted++;
   }
 
-  return { autoDeleteEnabled: true, expiredVideosDeleted, tempFilesCleaned };
+  return {
+    autoDeleteEnabled: true,
+    expiredVideosDeleted,
+    tempFilesCleaned,
+    deletedCount: expiredVideosDeleted,
+    tempFilesRemoved: tempFilesCleaned,
+  } as any;
 }
 
 export async function setAutoDeletePolicy(enabled: boolean, dataDir: string) {
