@@ -149,6 +149,7 @@ async function runMigrations(client: pg.PoolClient): Promise<void> {
     );
     INSERT INTO gpu_sessions(service_id) VALUES('minimax_h3_ref2va'),('minimax_music_3') ON CONFLICT DO NOTHING;
     CREATE TABLE IF NOT EXISTS gpu_leases(service_id TEXT NOT NULL,job_id TEXT NOT NULL,created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),PRIMARY KEY(service_id,job_id));
+    CREATE TABLE IF NOT EXISTS gpu_output_receipts(service_id TEXT NOT NULL,remote_job_id TEXT NOT NULL,endpoint_url TEXT NOT NULL,api_key TEXT NOT NULL,receipt JSONB NOT NULL,created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),delivered_at TIMESTAMPTZ,attempts INTEGER NOT NULL DEFAULT 0,last_error TEXT,PRIMARY KEY(service_id,remote_job_id));
     CREATE TABLE IF NOT EXISTS gpu_events(id BIGSERIAL PRIMARY KEY,service_id TEXT NOT NULL,event TEXT NOT NULL,detail JSONB NOT NULL DEFAULT '{}',created_at TIMESTAMPTZ NOT NULL DEFAULT NOW());
 
     CREATE TABLE IF NOT EXISTS automation_schedules (

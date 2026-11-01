@@ -51,19 +51,33 @@ export async function acceptGpuHeartbeat(service:string,version:string,started:n
   if(before?.state!==(ready?'ON':'INITIALIZING') && before?.state!=='STOPPING') await gpuEvent(service,ready?'GPU_READY':'INITIALIZING',{worker_started_at:started});
 }
 
+async function deliverReceipt(row:any) {
+  const kind=row.service_id==='minimax_h3_ref2va'?'video':'music';
+  const r=await fetch(`${row.endpoint_url}/v1/${kind}/jobs/${encodeURIComponent(row.remote_job_id)}/acknowledge`,{method:'POST',signal:AbortSignal.timeout(12000),headers:{Authorization:`Bearer ${row.api_key}`,'Content-Type':'application/json'},body:JSON.stringify(row.receipt)});
+  if(!r.ok) throw new Error(`Output acknowledgement HTTP ${r.status}`);
+  await query('UPDATE gpu_output_receipts SET delivered_at=NOW(),last_error=NULL,attempts=attempts+1 WHERE service_id=$1 AND remote_job_id=$2',[row.service_id,row.remote_job_id]);
+  await gpuEvent(row.service_id,'OUTPUT_PERSISTED',{...row.receipt,remote_job_id:row.remote_job_id});
+}
 export async function acknowledgeGpuOutput(service:string,remoteId:string,receipt:any) {
   const [ep]=await query<any>('SELECT * FROM model_endpoints WHERE service_id=$1',[service]);
   if(!ep?.endpoint_url) throw new Error('Worker endpoint missing during durable output acknowledgement');
-  const kind=service==='minimax_h3_ref2va'?'video':'music';
-  const r=await fetch(`${ep.endpoint_url}/v1/${kind}/jobs/${encodeURIComponent(remoteId)}/acknowledge`,{method:'POST',signal:AbortSignal.timeout(15000),headers:{Authorization:`Bearer ${ep.api_key}`,'Content-Type':'application/json'},body:JSON.stringify(receipt)});
-  if(!r.ok) throw new Error(`Output acknowledgement failed: HTTP ${r.status}`);
-  await gpuEvent(service,'OUTPUT_PERSISTED',receipt);
+  const [row]=await query<any>(`INSERT INTO gpu_output_receipts(service_id,remote_job_id,endpoint_url,api_key,receipt) VALUES($1,$2,$3,$4,$5::jsonb) ON CONFLICT(service_id,remote_job_id) DO UPDATE SET receipt=EXCLUDED.receipt RETURNING *`,[service,remoteId,ep.endpoint_url,ep.api_key,JSON.stringify(receipt)]);
+  try {await deliverReceipt(row);}catch(e:any) {
+    await query('UPDATE gpu_output_receipts SET attempts=attempts+1,last_error=$3 WHERE service_id=$1 AND remote_job_id=$2',[service,remoteId,e.message]);
+    await gpuEvent(service,'OUTPUT_ACK_RETRY_PENDING',{remote_job_id:remoteId,error:e.message});
+    // Output was already fsynced, decoded and database-persisted. Retry the receipt durably;
+    // the worker independently refuses to shut down until this acknowledgement arrives.
+  }
 }
 
 let ticking=false;
 export async function gpuLifecycleTick() {
   if(ticking || !pool)return;ticking=true;
   try {
+    const receipts=await query<any>('SELECT * FROM gpu_output_receipts WHERE delivered_at IS NULL ORDER BY created_at LIMIT 10');
+    for(const receipt of receipts) {
+      try{await deliverReceipt(receipt);}catch(e:any){await query('UPDATE gpu_output_receipts SET attempts=attempts+1,last_error=$3 WHERE service_id=$1 AND remote_job_id=$2',[receipt.service_id,receipt.remote_job_id,e.message]);}
+    }
     // Clean only leases whose app job is terminal/missing. Never expire healthy work by age.
     await query(`DELETE FROM gpu_leases l WHERE NOT EXISTS(SELECT 1 FROM video_generations v WHERE v.id=l.job_id AND v.status NOT IN ('completed','failed')) AND NOT EXISTS(SELECT 1 FROM music_tracks m WHERE m.id=l.job_id AND m.status='generating')`);
     for(const service of GPU_SERVICES) {
@@ -132,6 +146,6 @@ export async function gpuDashboard() {
         else availability='Unavailable';
       }catch{availability='Unavailable';}
     } else if(row.state==='OFF') availability='Not allocated; Kaggle availability checked at startup';
-    return {service_id:row.service_id,status:legacyActive?'ON':row.state==='ON'?'ON':row.state==='INITIALIZING'?'STARTING':row.state,availability:legacyActive?'Available (legacy unmanaged)':availability,gpu_name:live?.gpus?.map((g:any)=>g.name).join(', ') || row.gpu_name || null,telemetry:live,active_jobs:live?.active_jobs ?? null,queued_or_leased_jobs:row.leased_jobs,current_task:live?.current_tasks || [],session_duration_sec:row.started_at && row.state!=='OFF'?Math.max(0,Math.floor((Date.now()-new Date(row.started_at).getTime())/1000)):null,last_shutdown:row.last_shutdown_at,error:legacyActive?'Legacy worker is still active and does not implement safe shutdown. One-time Kaggle session cleanup is required; this is not OFF.':row.error,telemetry_is_live:Boolean(live),session_status:row.session_status};
+    return {service_id:row.service_id,status:legacyActive?'ON':row.state==='ON'?'ON':row.state==='INITIALIZING'?'STARTING':row.state,availability:legacyActive?'Available (legacy unmanaged)':availability,gpu_name:live?.gpus?.map((g:any)=>g.name).join(', ') || null,telemetry:live,active_jobs:live?.active_jobs ?? null,queued_or_leased_jobs:row.leased_jobs,current_task:live?.current_tasks || [],session_duration_sec:row.started_at && row.state!=='OFF'?Math.max(0,Math.floor((Date.now()-new Date(row.started_at).getTime())/1000)):null,last_shutdown:row.last_shutdown_at,error:legacyActive?'Legacy worker is still active and does not implement safe shutdown. One-time Kaggle session cleanup is required; this is not OFF.':row.error,telemetry_is_live:Boolean(live),session_status:row.session_status};
   }));
 }
