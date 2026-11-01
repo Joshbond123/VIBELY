@@ -6,7 +6,7 @@ echo "[pre-launch] Configuring persistent Android identity and AVD hardware prof
 mkdir -p "$HOME/.android"
 AVD_DIR="$HOME/.android/avd/vibely_pixel6_api34.avd"
 
-# 1. Fetch or initialize persistent ADB host keys + deterministic android_id from cserver.blitz.cloud
+# 1. Fetch or initialize persistent ADB host keys + deterministic android_id from android.aivideo.blitz.cloud
 if [[ -n "${EMULATOR_GATEWAY_URL:-}" && -n "${EMULATOR_GATEWAY_SECRET:-}" ]]; then
   ID_JSON=$(curl -fsSL --retry 3 --max-time 15 \
     -H "Authorization: Bearer ${EMULATOR_GATEWAY_SECRET}" \

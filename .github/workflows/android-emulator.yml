@@ -27,7 +27,7 @@ on:
         default: 'false'
         type: string
       force_gateway_redeploy:
-        description: 'Force rebuild/redeploy of the cserver.blitz.cloud gateway'
+        description: 'Force rebuild/redeploy of the android.aivideo.blitz.cloud gateway'
         required: false
         default: 'false'
         type: string
@@ -39,7 +39,7 @@ permissions:
 
 jobs:
   ensure-gateway:
-    name: Ensure cserver.blitz.cloud Remote Gateway
+    name: Ensure android.aivideo.blitz.cloud Remote Gateway
     runs-on: ubuntu-latest
     timeout-minutes: 15
     outputs:
@@ -47,7 +47,7 @@ jobs:
       blitz_app_id: ${{ steps.prov.outputs.blitz_app_id }}
       should_boot: ${{ steps.coord.outputs.should_boot }}
     env:
-      BLITZ_CSERVER_API_KEY: ${{ secrets.BLITZ_CSERVER_API_KEY }}
+      BLITZ_API_KEY: ${{ secrets.BLITZ_API_KEY }}
       EMULATOR_ACCESS_TOKEN: ${{ secrets.EMULATOR_ACCESS_TOKEN }}
       EMULATOR_GATEWAY_SECRET: ${{ secrets.EMULATOR_GATEWAY_SECRET }}
       FORCE_GATEWAY_REDEPLOY: ${{ inputs.force_gateway_redeploy || 'false' }}
@@ -56,7 +56,7 @@ jobs:
       - name: Checkout VIBELY repository
         uses: actions/checkout@v4
 
-      - name: Check if cserver.blitz.cloud gateway is already online
+      - name: Check if android.aivideo.blitz.cloud gateway is already online
         id: quickcheck
         run: |
           GW_URL="${{ secrets.EMULATOR_GATEWAY_URL }}"
@@ -77,7 +77,7 @@ jobs:
           docker build -t "$IMG" ./android-remote-gateway
           docker push "$IMG"
 
-      - name: Provision / Verify cserver.blitz.cloud Remote Gateway
+      - name: Provision / Verify android.aivideo.blitz.cloud Remote Gateway
         id: prov
         run: |
           node ./android-emulator/deploy-gateway.mjs
@@ -116,8 +116,8 @@ jobs:
       EMULATOR_GATEWAY_SECRET: ${{ secrets.EMULATOR_GATEWAY_SECRET }}
       EMULATOR_ACCESS_TOKEN: ${{ secrets.EMULATOR_ACCESS_TOKEN }}
       EMULATOR_STATE_KEY: ${{ secrets.EMULATOR_STATE_KEY }}
-      BLITZ_CSERVER_API_KEY: ${{ secrets.BLITZ_CSERVER_API_KEY }}
-      BLITZ_CSERVER_APP: ${{ needs.ensure-gateway.outputs.blitz_app_id || secrets.BLITZ_CSERVER_APP }}
+      BLITZ_API_KEY: ${{ secrets.BLITZ_API_KEY }}
+      BLITZ_ANDROID_APP: ${{ needs.ensure-gateway.outputs.blitz_app_id || secrets.BLITZ_ANDROID_APP }}
       GH_PAT: ${{ secrets.GH_PAT }}
       ROTATION_MINUTES: ${{ inputs.rotation_minutes || '240' }}
       RAPID_TEST_CYCLES: ${{ inputs.rapid_test_cycles || '0' }}

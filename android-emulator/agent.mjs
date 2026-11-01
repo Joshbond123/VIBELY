@@ -10,8 +10,8 @@ const execFileAsync = promisify(execFile);
 const GATEWAY_URL = (process.env.EMULATOR_GATEWAY_URL || '').replace(/\/$/, '');
 const GATEWAY_SECRET = (process.env.EMULATOR_GATEWAY_SECRET || '').trim();
 const ACCESS_TOKEN = (process.env.EMULATOR_ACCESS_TOKEN || '').trim();
-const BLITZ_CSERVER_API_KEY = (process.env.BLITZ_CSERVER_API_KEY || '').trim();
-const BLITZ_CSERVER_APP = (process.env.BLITZ_CSERVER_APP || 'android').trim();
+const BLITZ_API_KEY = (process.env.BLITZ_API_KEY || '').trim();
+const BLITZ_ANDROID_APP = (process.env.BLITZ_ANDROID_APP || 'android').trim();
 const GH_PAT = (process.env.GH_PAT || '').trim();
 const REPO = process.env.GITHUB_REPOSITORY || 'Joshbond123/VIBELY';
 const RUN_ID = process.env.GITHUB_RUN_ID || String(Date.now());
@@ -46,10 +46,10 @@ function sleep(ms) {
 }
 
 async function wakeGatewayOnBlitz() {
-  if (!BLITZ_CSERVER_API_KEY) return;
+  if (!BLITZ_API_KEY) return;
   try {
     const hdrs = {
-      Authorization: `Bearer ${BLITZ_CSERVER_API_KEY}`,
+      Authorization: `Bearer ${BLITZ_API_KEY}`,
       'Content-Type': 'application/json',
       Accept: 'application/json, text/event-stream',
     };
@@ -72,7 +72,7 @@ async function wakeGatewayOnBlitz() {
         jsonrpc: '2.0',
         id: 2,
         method: 'tools/call',
-        params: { name: 'apps_resume', arguments: { app: BLITZ_CSERVER_APP } },
+        params: { name: 'apps_resume', arguments: { app: BLITZ_ANDROID_APP } },
       }),
     });
   } catch (err) {
@@ -511,7 +511,7 @@ async function main() {
   await runStateManager('restore');
   const deviceInfo = await collectDeviceInfo();
 
-  // Connect tunnel to cserver.blitz.cloud as non-conflicting standby candidate
+  // Connect tunnel to android.aivideo.blitz.cloud as non-conflicting standby candidate
   for (let attempt = 1; attempt <= 6; attempt++) {
     try {
       await connectTunnelWebSocket(deviceInfo);
@@ -524,8 +524,8 @@ async function main() {
     }
   }
 
-  // Verify end-to-end tunnel reachability through cserver.blitz.cloud BEFORE promoting!
-  log('Running remote standby verification via cserver.blitz.cloud...');
+  // Verify end-to-end tunnel reachability through android.aivideo.blitz.cloud BEFORE promoting!
+  log('Running remote standby verification via android.aivideo.blitz.cloud...');
   const verResp = await gatewayFetch(`/api/internal/verify-standby/${encodeURIComponent(SESSION_ID)}`, {
     method: 'POST',
   });
@@ -545,7 +545,7 @@ async function main() {
   log(`Remote standby verification PASSED (${verJson.frame_bytes}B screen frame verified over tunnel).`);
 
   // Execute coordinated zero-downtime handover (flushes OLD final delta -> restores onto NEW -> swaps active pointer -> retires OLD)
-  log('Executing atomic zero-downtime handover on cserver.blitz.cloud...');
+  log('Executing atomic zero-downtime handover on android.aivideo.blitz.cloud...');
   const hoResp = await gatewayFetch('/api/internal/handover', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -570,7 +570,7 @@ async function main() {
     if (!extCheck.ok || extData?.active_emulator?.session_id !== SESSION_ID) {
       throw new Error(`Post-handover external status mismatch: ${JSON.stringify(extData)}`);
     }
-    log('Verified external cserver.blitz.cloud user endpoint is live and routed to this emulator!');
+    log('Verified external android.aivideo.blitz.cloud user endpoint is live and routed to this emulator!');
   }
 
   // Save a clean initial checkpoint right after promotion
@@ -598,8 +598,8 @@ async function main() {
       log(`Health check warning: ${err.message}`);
     }
 
-    // 2. Proactive Blitz.cloud resume every 15m so cserver.blitz.cloud never sleeps
-    if (Date.now() - lastBlitzWakeMs >= 15 * 60 * 1000) {
+    // 2. Proactive Blitz.cloud resume every 10m so android.aivideo.blitz.cloud (15m sleep tier) never sleeps
+    if (Date.now() - lastBlitzWakeMs >= 10 * 60 * 1000) {
       lastBlitzWakeMs = Date.now();
       await wakeGatewayOnBlitz();
     }

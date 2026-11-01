@@ -743,7 +743,7 @@ function renderWebConsoleHtml(authenticated: boolean): string {
 </head>
 <body>
   <div class="card">
-    <div class="badge">● ReactiveCircus Android 14 · cserver.blitz.cloud</div>
+    <div class="badge">● ReactiveCircus Android 14 · android.aivideo.blitz.cloud</div>
     <h1>Android Remote Phone Studio</h1>
     <p>Enter your secure <code>EMULATOR_ACCESS_TOKEN</code> to view and control the persistent Android virtual device.</p>
     <form id="loginForm">

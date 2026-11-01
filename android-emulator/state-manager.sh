@@ -10,7 +10,7 @@ set -euo pipefail
 #  4. Emulator & Android configuration (settings global/secure/system overrides)
 #  5. Persistent device identity (android_id + settings_ssaid.xml)
 # Backed by:
-#  - Primary Hot Store: cserver.blitz.cloud persistent volume (/app/data/persistence/latest-state.tar.zst)
+#  - Primary Hot Store: android.aivideo.blitz.cloud persistent volume (/app/data/persistence/latest-state.tar.zst)
 #  - Secondary Off-Site Encrypted Backup: GitHub Release 'emulator-state-latest' (AES-256-CBC + PBKDF2 encrypted)
 
 ACTION="${1:-}"
@@ -98,7 +98,7 @@ backup_state() {
 
   echo "[state-manager] Packed state archive ($SIZE_BYTES bytes, ${#PKG_ARRAY[@]} user apps)."
 
-  # 6. Upload to Primary Hot Store on cserver.blitz.cloud
+  # 6. Upload to Primary Hot Store on android.aivideo.blitz.cloud
   if [[ -n "${EMULATOR_GATEWAY_URL:-}" && -n "${EMULATOR_GATEWAY_SECRET:-}" ]]; then
     curl -fsSL --retry 3 --max-time 90 -X PUT \
       -H "Authorization: Bearer ${EMULATOR_GATEWAY_SECRET}" \
@@ -106,7 +106,7 @@ backup_state() {
       -H "X-State-Meta: ${META_B64}" \
       --data-binary "@${ARCHIVE}" \
       "${EMULATOR_GATEWAY_URL}/api/internal/state/snapshot" >/dev/null
-    echo "[state-manager] Uploaded snapshot to cserver.blitz.cloud persistent volume."
+    echo "[state-manager] Uploaded snapshot to android.aivideo.blitz.cloud persistent volume."
   fi
 
   # 7. Upload AES-256 encrypted off-site mirror to GitHub Release 'emulator-state-latest'
@@ -155,7 +155,7 @@ restore_state() {
   ARCHIVE="$WORK_TMP/restore.tar.zst"
   DOWNLOADED=0
 
-  # 1. Try Primary Hot Store on cserver.blitz.cloud
+  # 1. Try Primary Hot Store on android.aivideo.blitz.cloud
   if [[ -n "${EMULATOR_GATEWAY_URL:-}" && -n "${EMULATOR_GATEWAY_SECRET:-}" ]]; then
     HTTP_CODE=$(curl -sS -L --max-time 60 -w "%{http_code}" \
       -H "Authorization: Bearer ${EMULATOR_GATEWAY_SECRET}" \
@@ -163,7 +163,7 @@ restore_state() {
       "${EMULATOR_GATEWAY_URL}/api/internal/state/snapshot" || echo "000")
     if [[ "$HTTP_CODE" == "200" && -s "$ARCHIVE" ]]; then
       DOWNLOADED=1
-      echo "[state-manager] Downloaded hot state snapshot from cserver.blitz.cloud ($(stat -c '%s' "$ARCHIVE") bytes)."
+      echo "[state-manager] Downloaded hot state snapshot from android.aivideo.blitz.cloud ($(stat -c '%s' "$ARCHIVE") bytes)."
     fi
   fi
 

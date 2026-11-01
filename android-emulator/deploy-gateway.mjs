@@ -2,14 +2,14 @@ import fs from 'fs';
 import path from 'path';
 import { execFileSync } from 'child_process';
 
-const BLITZ_KEY = (process.env.BLITZ_CSERVER_API_KEY || '').trim();
+const BLITZ_KEY = (process.env.BLITZ_API_KEY || '').trim();
 const ACCESS_TOKEN = (process.env.EMULATOR_ACCESS_TOKEN || '').trim();
 const GATEWAY_SECRET = (process.env.EMULATOR_GATEWAY_SECRET || '').trim();
 const GHCR_IMAGE = (process.env.GHCR_IMAGE || 'ghcr.io/joshbond123/vibely-android-gateway').toLowerCase();
 const FORCE_REDEPLOY = String(process.env.FORCE_GATEWAY_REDEPLOY || 'false').toLowerCase() === 'true';
 
 if (!BLITZ_KEY || !ACCESS_TOKEN || !GATEWAY_SECRET) {
-  console.error('Missing BLITZ_CSERVER_API_KEY, EMULATOR_ACCESS_TOKEN, or EMULATOR_GATEWAY_SECRET');
+  console.error('Missing BLITZ_API_KEY, EMULATOR_ACCESS_TOKEN, or EMULATOR_GATEWAY_SECRET');
   process.exit(1);
 }
 
@@ -90,7 +90,7 @@ function appendGithubOutput(key, val) {
 async function main() {
   const mcp = await createBlitzMcpClient(BLITZ_KEY);
 
-  // 1. Check existing apps on cserver.blitz.cloud
+  // 1. Check existing apps on aivideo.blitz.cloud (strictly scoped to subLabel 'android' — never touches VIBELY on 'aivideo'!)
   const listRes = await mcp('apps_list', {});
   const apps = listRes.texts
     .map((t) => {
@@ -98,11 +98,14 @@ async function main() {
     })
     .filter(Boolean);
 
-  let existingApp = apps.find((a) => a.subLabel === 'cserver' || a.subLabel === 'android' || a.name === 'Android Remote Gateway');
+  let existingApp = apps.find(
+    (a) => a.name === 'Android Remote Gateway' || (a.url && a.url.includes('android.aivideo.blitz.cloud')) || a.subLabel === 'android'
+  );
+
   if (existingApp && !FORCE_REDEPLOY) {
     const appDetailsRes = await mcp('apps_get', { app: existingApp.id });
     const appDetails = JSON.parse(appDetailsRes.texts[0] || '{}');
-    const url = appDetails.url || `https://${existingApp.address}`;
+    const url = appDetails.url || 'https://android.aivideo.blitz.cloud';
     console.log(`[deploy-gateway] Found existing Blitz app ${existingApp.id} at ${url} (status=${appDetails.status})`);
     if (appDetails.asleep) {
       await mcp('apps_resume', { app: existingApp.id });
@@ -126,11 +129,11 @@ async function main() {
   if (!appObj) {
     const deployImg = ghcrPublic ? GHCR_IMAGE : 'louislam/uptime-kuma';
     const deployTag = ghcrPublic ? 'latest' : '1';
-    console.log(`[deploy-gateway] Creating Blitz app on cserver.blitz.cloud using image ${deployImg}:${deployTag}...`);
+    console.log(`[deploy-gateway] Creating Blitz app on aivideo.blitz.cloud (address=android) using image ${deployImg}:${deployTag}...`);
     const depRes = await mcp('apps_deploy_image', {
       image: deployImg,
       tag: deployTag,
-      address: 'cserver',
+      address: 'android',
       name: 'Android Remote Gateway',
       port: 8080,
       autoUpdate: true,
@@ -143,7 +146,7 @@ async function main() {
 
   const appId = appObj.id;
   const appGet = JSON.parse((await mcp('apps_get', { app: appId })).texts[0]);
-  const gatewayUrl = appGet.url || 'https://cserver.cserver.blitz.cloud';
+  const gatewayUrl = appGet.url || 'https://android.aivideo.blitz.cloud';
   console.log(`[deploy-gateway] Provisioned Blitz app id=${appId}, url=${gatewayUrl}`);
 
   // 3. Configure persistent volume /app/data, port 8080, and disable Blitz HTML error gating for clean API JSON
@@ -182,7 +185,6 @@ async function main() {
     execFileSync('tar', ['-C', stageDir, '-czf', tarPath, '.']);
     const stat = fs.statSync(tarPath);
 
-    // Wait until container reaches initial running state before uploading into volume
     for (let i = 0; i < 24; i++) {
       const st = JSON.parse((await mcp('apps_get', { app: appId })).texts[0] || '{}');
       if (st.status === 'online' || st.processes?.[0]?.status === 'online') break;
