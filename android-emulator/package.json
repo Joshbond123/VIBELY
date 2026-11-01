@@ -4,6 +4,7 @@
   "private": true,
   "type": "module",
   "dependencies": {
+    "sharp": "^0.33.5",
     "ws": "^8.18.0"
   }
 }

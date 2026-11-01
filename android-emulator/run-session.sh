@@ -4,9 +4,9 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
 
-for bin in jq zstd ffmpeg openssl curl; do
+for bin in jq zstd openssl curl; do
   if ! command -v "$bin" >/dev/null 2>&1; then
-    sudo apt-get update -qq && sudo apt-get install -y -qq jq zstd ffmpeg openssl curl
+    sudo apt-get update -qq && sudo apt-get install -y -qq jq zstd openssl curl
     break
   fi
 done

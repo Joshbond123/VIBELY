@@ -3,6 +3,7 @@ import { promisify } from 'util';
 import fs from 'fs';
 import path from 'path';
 import crypto from 'crypto';
+import sharp from 'sharp';
 import WebSocket from 'ws';
 
 const execFileAsync = promisify(execFile);
@@ -128,46 +129,20 @@ async function runStateManager(mode) {
   return stateOpLock;
 }
 
-function captureJpegFrame() {
-  return new Promise((resolve, reject) => {
-    const adb = spawn('adb', ['exec-out', 'screencap', '-p']);
-    const ff = spawn('ffmpeg', [
-      '-hide_banner',
-      '-loglevel',
-      'error',
-      '-f',
-      'png_pipe',
-      '-i',
-      '-',
-      '-vf',
-      'scale=540:-1',
-      '-q:v',
-      '6',
-      '-f',
-      'singlejpeg',
-      '-',
-    ]);
-
-    adb.stdout.pipe(ff.stdin);
-    adb.on('error', reject);
-    ff.on('error', reject);
-    ff.stdin.on('error', () => {});
-
-    const chunks = [];
-    ff.stdout.on('data', (c) => chunks.push(c));
-    const timer = setTimeout(() => {
-      adb.kill('SIGKILL');
-      ff.kill('SIGKILL');
-      reject(new Error('Frame capture timeout'));
-    }, 12000);
-
-    ff.on('close', (code) => {
-      clearTimeout(timer);
-      const buf = Buffer.concat(chunks);
-      if (code === 0 && buf.length > 1000) resolve(buf);
-      else reject(new Error(`Frame capture failed (code=${code}, bytes=${buf.length})`));
-    });
+async function captureJpegFrame() {
+  const { stdout } = await execFileAsync('adb', ['exec-out', 'screencap', '-p'], {
+    encoding: 'buffer',
+    timeout: 12000,
+    maxBuffer: 32 * 1024 * 1024,
   });
+  if (!stdout || stdout.length < 512) {
+    throw new Error(`screencap returned empty buffer (${stdout ? stdout.length : 0} bytes)`);
+  }
+  const jpg = await sharp(stdout).resize({ width: 540 }).jpeg({ quality: 74, mozjpeg: true }).toBuffer();
+  if (!jpg || jpg.length < 800) {
+    throw new Error(`JPEG encode returned invalid buffer (${jpg ? jpg.length : 0} bytes)`);
+  }
+  return jpg;
 }
 
 async function collectDeviceInfo() {
