@@ -173,13 +173,22 @@ async function main() {
 
     // Deploy the artifact built by this GitHub Actions checkout. No Git operation
     // occurs on the hosting service. Avoid the account-wide pending-upload quota.
-    const serverB64 = fs.readFileSync(path.join(gwDir, 'dist', 'server.js')).toString('base64');
-    const bootSource = JSON.stringify("await import('/app/data/gateway/dist/server.js');\nawait new Promise(() => {});\n");
-    const install = `const fs=require('fs');const p='/app/data/gateway';fs.mkdirSync(p+'/dist',{recursive:true});fs.writeFileSync(p+'/dist/server.js.next',Buffer.from('${serverB64}','base64'));fs.renameSync(p+'/dist/server.js.next',p+'/dist/server.js');fs.writeFileSync(p+'/package.json',JSON.stringify({type:'module'}));if(!fs.existsSync(p+'/node_modules'))fs.symlinkSync('/app/node_modules',p+'/node_modules','dir');fs.writeFileSync(p+'/boot-hijack.mjs',${bootSource});console.log('GitHub Actions artifact installed');`;
-    const command = 'node -e ' + "'" + install.replace(/'/g, "'\\''") + "'";
-    const installed = await mcp('apps_run', {app:appId,command,confirm:true});
-    if(installed.isError) throw new Error('Gateway artifact installation failed: '+installed.texts.join(' '));
-    console.log(installed.texts.join(' '));
+    const { gzipSync } = await import('node:zlib');
+    const artifact = gzipSync(fs.readFileSync(path.join(gwDir, 'dist', 'server.js'))).toString('base64');
+    const shellQuote = (v) => "'" + v.replace(/'/g, "'\\''") + "'";
+    async function runArtifactCommand(js) {
+      const r=await mcp('apps_run',{app:appId,command:'node -e '+shellQuote(js),confirm:true});
+      if(r.isError) throw new Error('Artifact install: '+r.texts.join(' '));
+      for(const t of r.texts) { try {const j=JSON.parse(t);if(j.exitCode || j.exit_code) throw new Error('Artifact command failed');} catch(e) {if(e.message==='Artifact command failed')throw e;} }
+    }
+    await runArtifactCommand("require('fs').writeFileSync('/app/data/gateway-artifact.b64','')");
+    for(let offset=0;offset<artifact.length;offset+=1300) {
+      await runArtifactCommand("require('fs').appendFileSync('/app/data/gateway-artifact.b64','"+artifact.slice(offset,offset+1300)+"')");
+      await sleep(3500); // respect host's 20 command/minute limit
+    }
+    const bootSource=JSON.stringify("await import('/app/data/gateway/dist/server.js');\nawait new Promise(() => {});\n");
+    await runArtifactCommand(`const fs=require('fs'),z=require('zlib'),p='/app/data/gateway';fs.mkdirSync(p+'/dist',{recursive:true});fs.writeFileSync(p+'/dist/server.js.next',z.gunzipSync(Buffer.from(fs.readFileSync('/app/data/gateway-artifact.b64','utf8'),'base64')));fs.renameSync(p+'/dist/server.js.next',p+'/dist/server.js');fs.writeFileSync(p+'/package.json',JSON.stringify({type:'module'}));if(!fs.existsSync(p+'/node_modules'))fs.symlinkSync('/app/node_modules',p+'/node_modules','dir');fs.writeFileSync(p+'/boot-hijack.mjs',${bootSource});`);
+    console.log('GitHub Actions artifact installed.');
 
     await mcp('env_set', {
       app: appId,
