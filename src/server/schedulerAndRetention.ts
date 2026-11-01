@@ -2,7 +2,7 @@ import fs from 'fs';
 import path from 'path';
 import cron from 'node-cron';
 import { query } from './db.js';
-import { launchVideoGenerationPipeline, syncKaggleEndpointsAndHealth } from './comfyOrchestrator.js';
+import { launchVideoGenerationPipeline, syncKaggleEndpointsAndHealth, recoverInFlightGenerations } from './comfyOrchestrator.js';
 
 let schedulerRunning = false;
 
@@ -215,14 +215,16 @@ export function startBackgroundDaemons(dataDir: string): void {
     runAutomaticVideoDeletionSweep(dataDir).catch(() => {});
   });
 
-  // Sync Kaggle GPU endpoints & health every 60 seconds
+  // Sync Kaggle GPU endpoints & recover any container-interrupted in-flight jobs every 60 seconds
   cron.schedule('* * * * *', () => {
     syncKaggleEndpointsAndHealth().catch(() => {});
+    recoverInFlightGenerations(dataDir).catch(() => {});
   });
 
   // Immediate startup check
   setTimeout(() => {
     syncKaggleEndpointsAndHealth().catch(() => {});
+    recoverInFlightGenerations(dataDir).catch(() => {});
     runDueSchedulesTick(dataDir).catch(() => {});
     runAutomaticVideoDeletionSweep(dataDir).catch(() => {});
   }, 3000);

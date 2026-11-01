@@ -529,6 +529,40 @@ app.post('/api/settings/cleanup', async (_req, res) => {
   }
 });
 
+app.post('/api/settings/seed-expired-test-artifact', async (req, res) => {
+  try {
+    const secret = req.headers['x-registry-secret'];
+    if (!process.env.VIBELY_MODEL_REGISTRY_SECRET || secret !== process.env.VIBELY_MODEL_REGISTRY_SECRET) {
+      res.status(401).json({ ok: false, error: 'Unauthorized' });
+      return;
+    }
+    const testId = 'vid_ret_test_' + crypto.randomUUID().slice(0, 8);
+    const videosDir = path.join(DATA_DIR, 'videos');
+    const tempDir = path.join(DATA_DIR, 'temp', testId);
+    fs.mkdirSync(videosDir, { recursive: true });
+    fs.mkdirSync(tempDir, { recursive: true });
+    const vFile = `${testId}.mp4`;
+    const tFile = `${testId}_thumb.jpg`;
+    const staleTmp = path.join(tempDir, 'scratch.tmp');
+    fs.writeFileSync(path.join(videosDir, vFile), Buffer.alloc(4096, 0x42));
+    fs.writeFileSync(path.join(videosDir, tFile), Buffer.alloc(1024, 0xff));
+    fs.writeFileSync(staleTmp, 'stale-temp-artifact');
+    const threeHoursAgo = new Date(Date.now() - 3 * 3600 * 1000);
+    fs.utimesSync(tempDir, threeHoursAgo, threeHoursAgo);
+    fs.utimesSync(staleTmp, threeHoursAgo, threeHoursAgo);
+
+    await query(
+      `INSERT INTO video_generations
+        (id, trigger_type, status, current_stage, progress, content_series, series_id, title, video_concept, video_file_name, thumbnail_file_name, duration_sec, auto_delete_enabled, created_at, completed_at, expires_at)
+       VALUES ($1, 'manual', 'completed', 'Completed — Ready to Stream', 100, 'THE BOUNCE DANCE', 'bounce_dance', 'Retention Policy 72h Verification Fixture', 'Automated 72h retention verification record', $2, $3, 24.0, TRUE, NOW() - INTERVAL '73 hours', NOW() - INTERVAL '73 hours', NOW() - INTERVAL '1 hour')`,
+      [testId, vFile, tFile]
+    );
+    res.json({ ok: true, test_id: testId, video_file: vFile, thumb_file: tFile });
+  } catch (err: any) {
+    res.status(500).json({ ok: false, error: err?.message || String(err) });
+  }
+});
+
 function sanitizeModelRow(m: any) {
   if (!m) return null;
   const { api_key, ...rest } = m;

@@ -200,6 +200,8 @@ async function getReadyEndpoint(serviceId: string): Promise<ModelEndpointRecord>
   return ep;
 }
 
+const ACTIVE_IN_MEMORY_JOBS = new Set<string>();
+
 export async function executeMusicGenerationOnComfyUI(params: {
   dataDir: string;
   title: string;
@@ -212,31 +214,43 @@ export async function executeMusicGenerationOnComfyUI(params: {
   audioCharacteristics: any;
   durationSec: number;
   similarityScore: number;
+  parentVideoGenId?: string;
+  existingRemoteJobId?: string;
 }): Promise<{ trackId: string; fileName: string; filePath: string; durationSec: number; comfyPromptId: string; workflow: any }> {
   const ep = await getReadyEndpoint('minimax_music_3');
   const apiKey = ep.api_key || process.env.MINIMAX_MUSIC3_API_KEY || '';
   const trackId = 'trk_' + crypto.randomUUID().slice(0, 12);
 
-  const createResp = await fetch(`${ep.endpoint_url}/v1/music/jobs`, {
-    method: 'POST',
-    headers: {
-      Authorization: `Bearer ${apiKey}`,
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify({
-      caption: params.captionPrompt,
-      lyrics: params.lyrics,
-      duration_sec: params.durationSec,
-      steps: 10,
-      cfg_scale: 1.5,
-      top_k: 50,
-    }),
-  });
+  let remoteJobId = params.existingRemoteJobId || '';
+  if (!remoteJobId) {
+    const createResp = await fetch(`${ep.endpoint_url}/v1/music/jobs`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${apiKey}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        caption: params.captionPrompt,
+        lyrics: params.lyrics,
+        duration_sec: params.durationSec,
+        steps: 10,
+        cfg_scale: 1.5,
+        top_k: 50,
+      }),
+    });
 
-  if (!createResp.ok) {
-    throw new Error(`MiniMax Music 3 API error (${createResp.status}): ${await createResp.text()}`);
+    if (!createResp.ok) {
+      throw new Error(`MiniMax Music 3 API error (${createResp.status}): ${await createResp.text()}`);
+    }
+    const cj: any = await createResp.json();
+    remoteJobId = cj.job_id;
+    if (params.parentVideoGenId) {
+      await query(
+        `UPDATE video_generations SET comfyui_workflow = jsonb_set(COALESCE(comfyui_workflow, '{}'::jsonb), '{remote_music_job_id}', to_jsonb($2::text), true) WHERE id = $1`,
+        [params.parentVideoGenId, remoteJobId]
+      );
+    }
   }
-  const { job_id: remoteJobId }: any = await createResp.json();
 
   let completedJob: any = null;
   const started = Date.now();
@@ -343,14 +357,15 @@ export async function launchVideoGenerationPipeline(params: {
   const autoDeleteEnabled = setRows[0]?.value?.enabled !== false;
 
   await query(
-    `INSERT INTO video_generations (id, trigger_type, schedule_id, status, current_stage, progress, content_series, series_id, auto_delete_enabled)
-     VALUES ($1, $2, $3, 'reasoning', 'Layer 1: NVIDIA AI Reasoning creating concept & weighted series...', 5, 'Selecting weighted series...', 'pending', $4)`,
+    `INSERT INTO video_generations (id, trigger_type, schedule_id, status, current_stage, progress, content_series, series_id, width, height, auto_delete_enabled)
+     VALUES ($1, $2, $3, 'reasoning', 'Layer 1: NVIDIA AI Reasoning creating concept & weighted series...', 5, 'Selecting weighted series...', 'pending', 720, 1280, $4)`,
     [genId, params.triggerType, params.scheduleId || null, autoDeleteEnabled]
   );
 
+  ACTIVE_IN_MEMORY_JOBS.add(genId);
   // Run asynchronous full pipeline in background
-  runFullPipelineBg(genId, params.dataDir, autoDeleteEnabled, params.forceSeriesId, params.scheduleId || null).catch(
-    async (err) => {
+  runFullPipelineBg(genId, params.dataDir, autoDeleteEnabled, params.forceSeriesId, params.scheduleId || null)
+    .catch(async (err) => {
       console.error(`[Pipeline] Generation ${genId} failed:`, err);
       await query(
         `UPDATE video_generations SET status = 'failed', current_stage = 'Failed', error_message = $2 WHERE id = $1`,
@@ -362,8 +377,10 @@ export async function launchVideoGenerationPipeline(params: {
           [params.scheduleId]
         );
       }
-    }
-  );
+    })
+    .finally(() => {
+      ACTIVE_IN_MEMORY_JOBS.delete(genId);
+    });
 
   return genId;
 }
@@ -438,6 +455,7 @@ async function runFullPipelineBg(
     audioCharacteristics: plan.music.audio_characteristics,
     durationSec: plan.total_duration_sec + 0.8,
     similarityScore: plan.similarity_score,
+    parentVideoGenId: genId,
   });
 
   await updateVideoStage(
@@ -449,36 +467,79 @@ async function runFullPipelineBg(
     [musicRes.trackId]
   );
 
-  // Stage 6-8: ComfyUI + MiniMax H3 Ref2VA Multi-Scene Seamless Generation on Kaggle user "Joshbond123"
+  await executeAndFinalizeH3Video({
+    genId,
+    dataDir,
+    scenes: plan.scenes,
+    totalDurationSec: plan.total_duration_sec,
+    workflowVariant: plan.workflow_variant,
+    musicFilePath: musicRes.filePath,
+    musicComfyPromptId: musicRes.comfyPromptId,
+    autoDeleteEnabled,
+    scheduleId: scheduleId || null,
+  });
+}
+
+async function executeAndFinalizeH3Video(opts: {
+  genId: string;
+  dataDir: string;
+  scenes: any[];
+  totalDurationSec: number;
+  workflowVariant: string;
+  musicFilePath: string;
+  musicComfyPromptId: string;
+  autoDeleteEnabled: boolean;
+  scheduleId: string | null;
+  existingRemoteVidJobId?: string;
+}): Promise<void> {
+  const { genId, dataDir, scenes, totalDurationSec, workflowVariant, musicFilePath, musicComfyPromptId, autoDeleteEnabled, scheduleId } = opts;
   const videoEp = await getReadyEndpoint('minimax_h3_ref2va');
   const videoApiKey = videoEp.api_key || process.env.MINIMAX_H3_API_KEY || '';
-  const masterAudioB64 = fs.readFileSync(musicRes.filePath).toString('base64');
 
-  const createVidResp = await fetch(`${videoEp.endpoint_url}/v1/video/jobs`, {
-    method: 'POST',
-    headers: {
-      Authorization: `Bearer ${videoApiKey}`,
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify({
-      scenes: plan.scenes,
-      master_audio_base64: masterAudioB64,
-      diffusion_width: 320,
-      diffusion_height: 576,
-      width: 720,
-      height: 1280,
-      steps: 4,
-    }),
-  });
+  let remoteVidJobId = opts.existingRemoteVidJobId || '';
+  if (!remoteVidJobId) {
+    const masterAudioB64 = fs.readFileSync(musicFilePath).toString('base64');
+    const createVidResp = await fetch(`${videoEp.endpoint_url}/v1/video/jobs`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${videoApiKey}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        scenes,
+        master_audio_base64: masterAudioB64,
+        diffusion_width: 256,
+        diffusion_height: 448,
+        width: 720,
+        height: 1280,
+        steps: 4,
+      }),
+    });
 
-  if (!createVidResp.ok) {
-    throw new Error(`MiniMax H3 Ref2VA API error (${createVidResp.status}): ${await createVidResp.text()}`);
+    if (!createVidResp.ok) {
+      throw new Error(`MiniMax H3 Ref2VA API error (${createVidResp.status}): ${await createVidResp.text()}`);
+    }
+    const cj: any = await createVidResp.json();
+    remoteVidJobId = cj.job_id;
+    await query(
+      `UPDATE video_generations
+       SET comfyui_workflow = $2::jsonb
+       WHERE id = $1`,
+      [
+        genId,
+        JSON.stringify({
+          workflow_variant: workflowVariant,
+          music_comfyui_prompt_id: musicComfyPromptId,
+          remote_video_job_id: remoteVidJobId,
+          scene_count: scenes.length,
+        }),
+      ]
+    );
   }
-  const { job_id: remoteVidJobId }: any = await createVidResp.json();
 
   let completedVidJob: any = null;
   const vidStart = Date.now();
-  while (Date.now() - vidStart < 45 * 60 * 1000) {
+  while (Date.now() - vidStart < 50 * 60 * 1000) {
     await new Promise((r) => setTimeout(r, 4000));
     const stResp = await fetch(`${videoEp.endpoint_url}/v1/video/jobs/${remoteVidJobId}`, {
       headers: { Authorization: `Bearer ${videoApiKey}` },
@@ -505,7 +566,6 @@ async function runFullPipelineBg(
     throw new Error('Timed out waiting for MiniMax H3 Ref2VA multi-scene video render');
   }
 
-  // Download final MP4
   const mp4Resp = await fetch(`${videoEp.endpoint_url}/v1/video/jobs/${remoteVidJobId}/video`, {
     headers: { Authorization: `Bearer ${videoApiKey}` },
   });
@@ -519,8 +579,7 @@ async function runFullPipelineBg(
   const videoFilePath = path.join(videosDir, videoFileName);
   fs.writeFileSync(videoFilePath, Buffer.from(await mp4Resp.arrayBuffer()));
 
-  // Verify exact duration (20-40s) and extract poster thumbnail via ffmpeg/ffprobe
-  let verifiedDuration = Number(completedVidJob.duration_sec || plan.total_duration_sec);
+  let verifiedDuration = Number(completedVidJob.duration_sec || totalDurationSec);
   try {
     const { stdout } = await execFileAsync('ffprobe', [
       '-v', 'error', '-show_entries', 'format=duration',
@@ -541,7 +600,6 @@ async function runFullPipelineBg(
     ]);
   } catch {}
 
-  // Clean up any temp artifacts in /app/data/temp
   const tempDir = path.join(dataDir, 'temp', genId);
   if (fs.existsSync(tempDir)) {
     fs.rmSync(tempDir, { recursive: true, force: true });
@@ -549,11 +607,12 @@ async function runFullPipelineBg(
 
   const expiresAt = autoDeleteEnabled ? new Date(Date.now() + 72 * 3600 * 1000).toISOString() : null;
   const combinedWorkflowMeta = {
-    workflow_variant: plan.workflow_variant,
-    music_comfyui_prompt_id: musicRes.comfyPromptId,
+    workflow_variant: workflowVariant,
+    music_comfyui_prompt_id: musicComfyPromptId,
     video_comfyui_prompt_ids: completedVidJob.comfyui_prompt_ids || [],
+    remote_video_job_id: remoteVidJobId,
     character_references: ['scarlett_ref_1.jpg', 'scarlett_ref_2.jpg', 'scarlett_ref_3.jpg'],
-    scene_count: plan.scenes.length,
+    scene_count: scenes.length,
   };
 
   await query(
@@ -564,6 +623,8 @@ async function runFullPipelineBg(
          video_file_name = $2,
          thumbnail_file_name = $3,
          duration_sec = $4,
+         width = 720,
+         height = 1280,
          comfyui_workflow = $5::jsonb,
          comfyui_prompt_ids = $6::jsonb,
          expires_at = $7,
@@ -585,5 +646,91 @@ async function runFullPipelineBg(
       `UPDATE automation_schedules SET completed_count = completed_count + 1, last_generation_id = $2, updated_at = NOW() WHERE id = $1`,
       [scheduleId, genId]
     );
+  }
+}
+
+export async function recoverInFlightGenerations(dataDir: string): Promise<void> {
+  // Mark stale abandoned jobs (>65m old) as failed so DB stays clean
+  await query(
+    `UPDATE video_generations
+     SET status = 'failed', current_stage = 'Failed', error_message = 'Generation superseded after >65m timeout'
+     WHERE status IN ('reasoning', 'generating_music', 'generating_video')
+       AND created_at < NOW() - INTERVAL '65 minutes'`
+  );
+
+  const inflight = await query<any>(
+    `SELECT * FROM video_generations
+     WHERE status IN ('generating_music', 'generating_video')
+       AND created_at >= NOW() - INTERVAL '65 minutes'`
+  );
+
+  for (const row of inflight) {
+    if (ACTIVE_IN_MEMORY_JOBS.has(row.id)) continue;
+    ACTIVE_IN_MEMORY_JOBS.add(row.id);
+    (async () => {
+      try {
+        const wf = row.comfyui_workflow || {};
+        const scenes = Array.isArray(row.scene_plan) ? row.scene_plan : [];
+        const totalDur = scenes.reduce((a: number, s: any) => a + Number(s.duration_sec || 7.5), 0) || 23;
+        let musicFilePath = '';
+        let musicComfyPromptId = wf.music_comfyui_prompt_id || '';
+
+        if (row.status === 'generating_music' && wf.remote_music_job_id) {
+          const mRes = await executeMusicGenerationOnComfyUI({
+            dataDir,
+            title: row.title || 'Scarlett Fusion',
+            bpm: 112,
+            musicalKey: 'F minor',
+            vocalHook: row.vocal_hook || '',
+            songStructure: ['[Intro]', '[Verse]', '[Chorus]', '[Instrumental]', '[Bridge]', '[Outro]'],
+            captionPrompt: row.music_prompt || '',
+            lyrics: row.lyrics || '',
+            audioCharacteristics: row.audio_characteristics || {},
+            durationSec: totalDur + 0.8,
+            similarityScore: Number(row.similarity_score || 0),
+            parentVideoGenId: row.id,
+            existingRemoteJobId: wf.remote_music_job_id,
+          });
+          musicFilePath = mRes.filePath;
+          musicComfyPromptId = mRes.comfyPromptId;
+          await updateVideoStage(
+            row.id,
+            'generating_video',
+            'Layer 2 (Joshbond123): ComfyUI + MiniMax H3 Ref2VA rendering seamless multi-scene Scarlett Monroe video...',
+            42,
+            ', music_track_id = $5',
+            [mRes.trackId]
+          );
+        } else if (row.music_track_id) {
+          const tr = await query<any>(`SELECT * FROM music_tracks WHERE id = $1`, [row.music_track_id]);
+          if (tr[0]?.file_name) {
+            musicFilePath = path.join(dataDir, 'music', path.basename(tr[0].file_name));
+            musicComfyPromptId = musicComfyPromptId || tr[0].comfyui_prompt_id || '';
+          }
+        }
+
+        await executeAndFinalizeH3Video({
+          genId: row.id,
+          dataDir,
+          scenes,
+          totalDurationSec: totalDur,
+          workflowVariant: wf.workflow_variant || 'comfyui_h3_ref2va_continuous_choreo',
+          musicFilePath,
+          musicComfyPromptId,
+          autoDeleteEnabled: Boolean(row.auto_delete_enabled),
+          scheduleId: row.schedule_id || null,
+          existingRemoteVidJobId: wf.remote_video_job_id || undefined,
+        });
+        console.log(`[Recovery] Successfully recovered & finalized generation ${row.id}`);
+      } catch (err: any) {
+        console.error(`[Recovery] Generation ${row.id} failed:`, err);
+        await query(
+          `UPDATE video_generations SET status = 'failed', current_stage = 'Failed', error_message = $2 WHERE id = $1`,
+          [row.id, err?.message || String(err)]
+        );
+      } finally {
+        ACTIVE_IN_MEMORY_JOBS.delete(row.id);
+      }
+    })();
   }
 }
