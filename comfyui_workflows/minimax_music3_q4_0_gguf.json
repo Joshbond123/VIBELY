@@ -1,0 +1,83 @@
+{
+  "workflow_name": "VIBELY MiniMax Music 3 Q4_0 GGUF — Amapiano + Afrobeats Fusion",
+  "model": "MiniMax Music 3 Q4_0 GGUF",
+  "host_user": "happink",
+  "prompt": {
+    "1": {
+      "class_type": "CLIPLoaderGGUFDynamicVRAM",
+      "inputs": {
+        "clip_name": "minimax_music3_text_encoder_pruned_Q4_0.gguf",
+        "type": "minimax"
+      }
+    },
+    "2": {
+      "class_type": "UnetLoaderGGUFDynamicVRAM",
+      "inputs": {
+        "unet_name": "minimax_music3_dit_Q4_0.gguf"
+      }
+    },
+    "3": {
+      "class_type": "VAELoader",
+      "inputs": {
+        "vae_name": "minimax_music3_dav.safetensors"
+      }
+    },
+    "4": {
+      "class_type": "MiniMaxMusic3TextEncode",
+      "inputs": {
+        "clip": ["1", 0],
+        "caption": "{{STRUCTURED_CAPTION}}",
+        "lyrics": "{{SECTION_TAGGED_LYRICS}}",
+        "seed": "{{SEED}}",
+        "max_duration": "{{MAX_DURATION_SEC}}",
+        "cfg_scale": 1.7,
+        "top_k": 50
+      }
+    },
+    "5": {
+      "class_type": "ConditioningZeroOut",
+      "inputs": {
+        "conditioning": ["4", 0]
+      }
+    },
+    "6": {
+      "class_type": "EmptyMiniMaxMusic3LatentAudio",
+      "inputs": {
+        "seconds": ["4", 1],
+        "batch_size": 1
+      }
+    },
+    "7": {
+      "class_type": "KSampler",
+      "inputs": {
+        "model": ["2", 0],
+        "positive": ["4", 0],
+        "negative": ["5", 0],
+        "latent_image": ["6", 0],
+        "seed": "{{SEED}}",
+        "steps": 24,
+        "cfg": 1.7,
+        "sampler_name": "euler",
+        "scheduler": "simple",
+        "denoise": 1.0
+      }
+    },
+    "8": {
+      "class_type": "VAEDecodeAudioTiled",
+      "inputs": {
+        "samples": ["7", 0],
+        "vae": ["3", 0],
+        "tile_size": 1536,
+        "overlap": 64
+      }
+    },
+    "9": {
+      "class_type": "SaveAudioMP3",
+      "inputs": {
+        "audio": ["8", 0],
+        "filename_prefix": "audio/vibely_scarlett_music",
+        "quality": "V0"
+      }
+    }
+  }
+}

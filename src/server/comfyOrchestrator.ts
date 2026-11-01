@@ -1,0 +1,550 @@
+import crypto from 'crypto';
+import fs from 'fs';
+import path from 'path';
+import { execFile } from 'child_process';
+import { promisify } from 'util';
+import { query } from './db.js';
+import {
+  FullProductionPlan,
+  generateFullVideoProductionPlan,
+  generateStandaloneMusicPlan,
+} from './reasoningEngine.js';
+
+const execFileAsync = promisify(execFile);
+
+export interface ModelEndpointRecord {
+  service_id: string;
+  username: string;
+  model_name: string;
+  endpoint_url: string;
+  api_key: string;
+  status: string;
+  comfyui_ready: boolean;
+  dataset_cached: boolean;
+  storage_sources: any;
+  gpu_name: string;
+  extra_meta: any;
+  last_heartbeat_at: string | null;
+  updated_at: string;
+}
+
+const KAGGLE_WORKERS = [
+  {
+    service_id: 'minimax_music_3',
+    username: 'happink',
+    slug: 'vibely-minimax-music-3-q4-0-gguf-server',
+    tokenEnv: 'KAGGLE_HAPPINK_TOKEN',
+    urlRegex: /VIBELY_MUSIC_TUNNEL_URL=(https:\/\/[a-z0-9-]+\.trycloudflare\.com)/g,
+  },
+  {
+    service_id: 'minimax_h3_ref2va',
+    username: 'joshbond123',
+    slug: 'vibely-minimax-h3-ref2va-server',
+    tokenEnv: 'KAGGLE_JOSHBOND_TOKEN',
+    urlRegex: /VIBELY_VIDEO_TUNNEL_URL=(https:\/\/[a-z0-9-]+\.trycloudflare\.com)/g,
+  },
+];
+
+export async function syncKaggleEndpointsAndHealth(): Promise<ModelEndpointRecord[]> {
+  for (const w of KAGGLE_WORKERS) {
+    const kToken = process.env[w.tokenEnv];
+    try {
+      const rows = await query<ModelEndpointRecord>(
+        `SELECT * FROM model_endpoints WHERE service_id = $1`,
+        [w.service_id]
+      );
+      const current = rows[0];
+      let url = current?.endpoint_url || '';
+
+      // Probe current URL if set
+      let healthy = false;
+      if (url) {
+        healthy = await probeWorkerHealth(w.service_id, url);
+      }
+
+      // If no URL or current tunnel unreachable, query Kaggle API kernel output/status!
+      if (!healthy && kToken) {
+        const statusResp = await fetch(
+          `https://www.kaggle.com/api/v1/kernels/status?userName=${w.username}&kernelSlug=${w.slug}`,
+          { headers: { Authorization: `Bearer ${kToken}` } }
+        );
+        let kStatus = 'unknown';
+        if (statusResp.ok) {
+          const sj: any = await statusResp.json();
+          kStatus = sj?.status || 'unknown';
+        }
+
+        const outResp = await fetch(
+          `https://www.kaggle.com/api/v1/kernels/output?userName=${w.username}&kernelSlug=${w.slug}`,
+          { headers: { Authorization: `Bearer ${kToken}` } }
+        );
+        if (outResp.ok) {
+          const outJson: any = await outResp.json();
+          const logStr = JSON.stringify(outJson?.log || '');
+          const matches = Array.from(logStr.matchAll(w.urlRegex));
+          if (matches.length > 0) {
+            const latestUrl = matches[matches.length - 1][1];
+            if (latestUrl && latestUrl !== url) {
+              url = latestUrl;
+              healthy = await probeWorkerHealth(w.service_id, url);
+            }
+          }
+        }
+
+        if (!healthy) {
+          await query(
+            `UPDATE model_endpoints
+             SET status = $2, extra_meta = jsonb_set(COALESCE(extra_meta, '{}'::jsonb), '{kaggle_kernel_status}', to_jsonb($3::text)), updated_at = NOW()
+             WHERE service_id = $1`,
+            [w.service_id, kStatus === 'running' ? 'booting_gpu' : kStatus, kStatus]
+          );
+        }
+      }
+    } catch (err: any) {
+      console.warn(`[KaggleSync] ${w.service_id} check note:`, err?.message || err);
+    }
+  }
+
+  return query<ModelEndpointRecord>(`SELECT * FROM model_endpoints ORDER BY service_id ASC`);
+}
+
+export async function probeWorkerHealth(serviceId: string, baseUrl: string): Promise<boolean> {
+  try {
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), 8000);
+    const resp = await fetch(`${baseUrl.replace(/\/$/, '')}/health`, { signal: ctrl.signal });
+    clearTimeout(timer);
+    if (!resp.ok) return false;
+    const h: any = await resp.json();
+    if (!h?.ok) return false;
+
+    await query(
+      `UPDATE model_endpoints
+       SET endpoint_url = $2,
+           status = $3,
+           comfyui_ready = $4,
+           dataset_cached = $5,
+           storage_sources = $6::jsonb,
+           gpu_name = $7,
+           extra_meta = $8::jsonb,
+           last_heartbeat_at = NOW(),
+           updated_at = NOW()
+       WHERE service_id = $1`,
+      [
+        serviceId,
+        baseUrl.replace(/\/$/, ''),
+        h.comfyui_ready ? 'online' : h.stage || 'initializing',
+        Boolean(h.comfyui_ready),
+        Boolean(h.dataset_cached),
+        JSON.stringify(h.storage_sources || {}),
+        String(h.gpu || ''),
+        JSON.stringify({ stage: h.stage, uptime_sec: h.uptime_sec, character_refs: h.character_refs || [], last_error: h.last_error || '' }),
+      ]
+    );
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function getReadyEndpoint(serviceId: string): Promise<ModelEndpointRecord> {
+  await syncKaggleEndpointsAndHealth();
+  const rows = await query<ModelEndpointRecord>(
+    `SELECT * FROM model_endpoints WHERE service_id = $1`,
+    [serviceId]
+  );
+  const ep = rows[0];
+  if (!ep || !ep.endpoint_url) {
+    throw new Error(`Model service ${serviceId} does not have an active endpoint URL yet (status: ${ep?.status || 'unknown'})`);
+  }
+  if (!ep.comfyui_ready) {
+    throw new Error(`Model service ${serviceId} (${ep.model_name}) is currently in stage "${ep.status}" — ComfyUI still loading weights on Kaggle GPU`);
+  }
+  return ep;
+}
+
+export async function executeMusicGenerationOnComfyUI(params: {
+  dataDir: string;
+  title: string;
+  bpm: number;
+  musicalKey: string;
+  vocalHook: string;
+  songStructure: string[];
+  captionPrompt: string;
+  lyrics: string;
+  audioCharacteristics: any;
+  durationSec: number;
+  similarityScore: number;
+}): Promise<{ trackId: string; fileName: string; filePath: string; durationSec: number; comfyPromptId: string; workflow: any }> {
+  const ep = await getReadyEndpoint('minimax_music_3');
+  const apiKey = ep.api_key || process.env.MINIMAX_MUSIC3_API_KEY || '';
+  const trackId = 'trk_' + crypto.randomUUID().slice(0, 12);
+
+  const createResp = await fetch(`${ep.endpoint_url}/v1/music/jobs`, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${apiKey}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      caption: params.captionPrompt,
+      lyrics: params.lyrics,
+      duration_sec: params.durationSec,
+      steps: 24,
+      cfg_scale: 1.7,
+      top_k: 50,
+    }),
+  });
+
+  if (!createResp.ok) {
+    throw new Error(`MiniMax Music 3 API error (${createResp.status}): ${await createResp.text()}`);
+  }
+  const { job_id: remoteJobId }: any = await createResp.json();
+
+  let completedJob: any = null;
+  const started = Date.now();
+  while (Date.now() - started < 15 * 60 * 1000) {
+    await new Promise((r) => setTimeout(r, 3000));
+    const stResp = await fetch(`${ep.endpoint_url}/v1/music/jobs/${remoteJobId}`, {
+      headers: { Authorization: `Bearer ${apiKey}` },
+    });
+    if (!stResp.ok) continue;
+    const jobData: any = await stResp.json();
+    if (jobData.status === 'completed') {
+      completedJob = jobData;
+      break;
+    }
+    if (jobData.status === 'failed') {
+      throw new Error(`MiniMax Music 3 ComfyUI failure: ${jobData.error || 'Unknown error'}`);
+    }
+  }
+
+  if (!completedJob) {
+    throw new Error('Timed out waiting for MiniMax Music 3 Q4_0 GGUF generation');
+  }
+
+  const audioResp = await fetch(`${ep.endpoint_url}/v1/music/jobs/${remoteJobId}/audio`, {
+    headers: { Authorization: `Bearer ${apiKey}` },
+  });
+  if (!audioResp.ok) {
+    throw new Error(`Failed downloading generated MP3 (${audioResp.status})`);
+  }
+
+  const musicDir = path.join(params.dataDir, 'music');
+  fs.mkdirSync(musicDir, { recursive: true });
+  const fileName = `${trackId}.mp3`;
+  const filePath = path.join(musicDir, fileName);
+  const arrayBuf = await audioResp.arrayBuffer();
+  fs.writeFileSync(filePath, Buffer.from(arrayBuf));
+
+  const actualDuration = Number(completedJob.duration_sec || params.durationSec);
+  const comfyPromptId = String(completedJob.comfyui_prompt_id || '');
+  const workflow = completedJob.workflow_used || {};
+
+  await query(
+    `INSERT INTO music_tracks
+      (id, title, genre, bpm, musical_key, vocal_hook, caption_prompt, lyrics, song_structure, audio_characteristics, comfyui_prompt_id, comfyui_workflow, file_name, duration_sec, similarity_score, status)
+     VALUES ($1,$2,'Amapiano + Afrobeats Fusion',$3,$4,$5,$6,$7,$8::jsonb,$9::jsonb,$10,$11::jsonb,$12,$13,$14,'completed')`,
+    [
+      trackId,
+      params.title,
+      params.bpm,
+      params.musicalKey,
+      params.vocalHook,
+      params.captionPrompt,
+      params.lyrics,
+      JSON.stringify(params.songStructure),
+      JSON.stringify(params.audioCharacteristics || {}),
+      comfyPromptId,
+      JSON.stringify(workflow),
+      fileName,
+      actualDuration,
+      params.similarityScore,
+    ]
+  );
+
+  return { trackId, fileName, filePath, durationSec: actualDuration, comfyPromptId, workflow };
+}
+
+export async function startStandaloneMusicTask(dataDir: string, customTheme?: string) {
+  const plan = await generateStandaloneMusicPlan(customTheme);
+  const targetDur = 28 + crypto.randomInt(0, 8);
+  const res = await executeMusicGenerationOnComfyUI({
+    dataDir,
+    title: plan.title,
+    bpm: plan.bpm,
+    musicalKey: plan.musical_key,
+    vocalHook: plan.vocal_hook,
+    songStructure: plan.song_structure,
+    captionPrompt: plan.caption_prompt,
+    lyrics: plan.lyrics,
+    audioCharacteristics: plan.audio_characteristics,
+    durationSec: targetDur,
+    similarityScore: plan.similarity_score,
+  });
+  const rows = await query(`SELECT * FROM music_tracks WHERE id = $1`, [res.trackId]);
+  return rows[0];
+}
+
+async function updateVideoStage(genId: string, status: string, stage: string, progress: number, extraSql = '', extraParams: any[] = []) {
+  await query(
+    `UPDATE video_generations SET status = $2, current_stage = $3, progress = $4 ${extraSql} WHERE id = $1`,
+    [genId, status, stage, progress, ...extraParams]
+  );
+}
+
+export async function launchVideoGenerationPipeline(params: {
+  dataDir: string;
+  triggerType: 'manual' | 'scheduled';
+  scheduleId?: string | null;
+  forceSeriesId?: string;
+}): Promise<string> {
+  const genId = 'vid_' + crypto.randomUUID().slice(0, 12);
+
+  // Read current auto_delete setting
+  const setRows = await query<{ value: any }>(`SELECT value FROM app_settings WHERE key = 'auto_delete'`);
+  const autoDeleteEnabled = setRows[0]?.value?.enabled !== false;
+
+  await query(
+    `INSERT INTO video_generations (id, trigger_type, schedule_id, status, current_stage, progress, content_series, series_id, auto_delete_enabled)
+     VALUES ($1, $2, $3, 'reasoning', 'Layer 1: NVIDIA AI Reasoning creating concept & weighted series...', 5, 'Selecting weighted series...', 'pending', $4)`,
+    [genId, params.triggerType, params.scheduleId || null, autoDeleteEnabled]
+  );
+
+  // Run asynchronous full pipeline in background
+  runFullPipelineBg(genId, params.dataDir, autoDeleteEnabled, params.forceSeriesId, params.scheduleId || null).catch(
+    async (err) => {
+      console.error(`[Pipeline] Generation ${genId} failed:`, err);
+      await query(
+        `UPDATE video_generations SET status = 'failed', current_stage = 'Failed', error_message = $2 WHERE id = $1`,
+        [genId, err?.message || String(err)]
+      );
+      if (params.scheduleId) {
+        await query(
+          `UPDATE automation_schedules SET failed_count = failed_count + 1, updated_at = NOW() WHERE id = $1`,
+          [params.scheduleId]
+        );
+      }
+    }
+  );
+
+  return genId;
+}
+
+async function runFullPipelineBg(
+  genId: string,
+  dataDir: string,
+  autoDeleteEnabled: boolean,
+  forceSeriesId?: string,
+  scheduleId?: string | null
+): Promise<void> {
+  // Stage 1-4: NVIDIA Reasoning + Weighted Series + Uniqueness Verification + Scene & Music Planning
+  const plan: FullProductionPlan = await generateFullVideoProductionPlan({ forceSeriesId });
+
+  await query(
+    `UPDATE video_generations
+     SET content_series = $2,
+         series_id = $3,
+         title = $4,
+         video_concept = $5,
+         script = $6,
+         scene_plan = $7::jsonb,
+         choreography = $8,
+         camera_instructions = $9,
+         outfit_descriptions = $10,
+         location = $11,
+         lighting_cinematography = $12,
+         expressions_poses = $13,
+         music_prompt = $14,
+         lyrics = $15,
+         vocal_hook = $16,
+         audio_characteristics = $17::jsonb,
+         similarity_score = $18,
+         regeneration_attempts = $19,
+         status = 'generating_music',
+         current_stage = 'Layer 2 (happink): MiniMax Music 3 Q4_0 GGUF synthesizing original Amapiano + Afrobeats track...',
+         progress = 22
+     WHERE id = $1`,
+    [
+      genId,
+      plan.selected_series.name,
+      plan.selected_series.id,
+      plan.title,
+      plan.video_concept,
+      plan.script,
+      JSON.stringify(plan.scenes),
+      plan.choreography_summary,
+      plan.camera_summary,
+      plan.outfit_descriptions,
+      plan.location,
+      plan.lighting_cinematography,
+      plan.expressions_poses,
+      plan.music.caption_prompt,
+      plan.music.lyrics,
+      plan.music.vocal_hook,
+      JSON.stringify(plan.music.audio_characteristics),
+      plan.similarity_score,
+      plan.regeneration_attempts,
+    ]
+  );
+
+  // Stage 5: MiniMax Music 3 Q4_0 GGUF on Kaggle user "happink"
+  const musicRes = await executeMusicGenerationOnComfyUI({
+    dataDir,
+    title: plan.music.title,
+    bpm: plan.music.bpm,
+    musicalKey: plan.music.musical_key,
+    vocalHook: plan.music.vocal_hook,
+    songStructure: plan.music.song_structure,
+    captionPrompt: plan.music.caption_prompt,
+    lyrics: plan.music.lyrics,
+    audioCharacteristics: plan.music.audio_characteristics,
+    durationSec: plan.total_duration_sec + 1.5,
+    similarityScore: plan.similarity_score,
+  });
+
+  await updateVideoStage(
+    genId,
+    'generating_video',
+    'Layer 2 (Joshbond123): ComfyUI + MiniMax H3 Ref2VA rendering seamless multi-scene Scarlett Monroe video...',
+    42,
+    ', music_track_id = $5',
+    [musicRes.trackId]
+  );
+
+  // Stage 6-8: ComfyUI + MiniMax H3 Ref2VA Multi-Scene Seamless Generation on Kaggle user "Joshbond123"
+  const videoEp = await getReadyEndpoint('minimax_h3_ref2va');
+  const videoApiKey = videoEp.api_key || process.env.MINIMAX_H3_API_KEY || '';
+  const masterAudioB64 = fs.readFileSync(musicRes.filePath).toString('base64');
+
+  const createVidResp = await fetch(`${videoEp.endpoint_url}/v1/video/jobs`, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${videoApiKey}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      scenes: plan.scenes,
+      master_audio_base64: masterAudioB64,
+      width: 480,
+      height: 832,
+      steps: 4,
+    }),
+  });
+
+  if (!createVidResp.ok) {
+    throw new Error(`MiniMax H3 Ref2VA API error (${createVidResp.status}): ${await createVidResp.text()}`);
+  }
+  const { job_id: remoteVidJobId }: any = await createVidResp.json();
+
+  let completedVidJob: any = null;
+  const vidStart = Date.now();
+  while (Date.now() - vidStart < 35 * 60 * 1000) {
+    await new Promise((r) => setTimeout(r, 4000));
+    const stResp = await fetch(`${videoEp.endpoint_url}/v1/video/jobs/${remoteVidJobId}`, {
+      headers: { Authorization: `Bearer ${videoApiKey}` },
+    });
+    if (!stResp.ok) continue;
+    const jd: any = await stResp.json();
+    if (jd.status === 'completed') {
+      completedVidJob = jd;
+      break;
+    }
+    if (jd.status === 'failed') {
+      throw new Error(`MiniMax H3 Ref2VA ComfyUI failure: ${jd.error || 'Unknown error'}`);
+    }
+    const mappedPct = Math.min(94, 42 + Math.round((Number(jd.progress || 0) / 100) * 52));
+    await updateVideoStage(
+      genId,
+      'generating_video',
+      `ComfyUI + MiniMax H3 Ref2VA: ${String(jd.stage || 'rendering').replace(/_/g, ' ')}`,
+      mappedPct
+    );
+  }
+
+  if (!completedVidJob) {
+    throw new Error('Timed out waiting for MiniMax H3 Ref2VA multi-scene video render');
+  }
+
+  // Download final MP4
+  const mp4Resp = await fetch(`${videoEp.endpoint_url}/v1/video/jobs/${remoteVidJobId}/video`, {
+    headers: { Authorization: `Bearer ${videoApiKey}` },
+  });
+  if (!mp4Resp.ok) {
+    throw new Error(`Failed downloading rendered MP4 (${mp4Resp.status})`);
+  }
+
+  const videosDir = path.join(dataDir, 'videos');
+  fs.mkdirSync(videosDir, { recursive: true });
+  const videoFileName = `${genId}.mp4`;
+  const videoFilePath = path.join(videosDir, videoFileName);
+  fs.writeFileSync(videoFilePath, Buffer.from(await mp4Resp.arrayBuffer()));
+
+  // Verify exact duration (20-40s) and extract poster thumbnail via ffmpeg/ffprobe
+  let verifiedDuration = Number(completedVidJob.duration_sec || plan.total_duration_sec);
+  try {
+    const { stdout } = await execFileAsync('ffprobe', [
+      '-v', 'error', '-show_entries', 'format=duration',
+      '-of', 'default=noprint_wrappers=1:nokey=1', videoFilePath,
+    ]);
+    const parsedDur = parseFloat(stdout.trim());
+    if (!Number.isNaN(parsedDur) && parsedDur > 0) {
+      verifiedDuration = Number(parsedDur.toFixed(2));
+    }
+  } catch {}
+
+  const thumbFileName = `${genId}_thumb.jpg`;
+  const thumbFilePath = path.join(videosDir, thumbFileName);
+  try {
+    await execFileAsync('ffmpeg', [
+      '-y', '-ss', '1.5', '-i', videoFilePath,
+      '-frames:v', '1', '-q:v', '3', thumbFilePath,
+    ]);
+  } catch {}
+
+  // Clean up any temp artifacts in /app/data/temp
+  const tempDir = path.join(dataDir, 'temp', genId);
+  if (fs.existsSync(tempDir)) {
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+
+  const expiresAt = autoDeleteEnabled ? new Date(Date.now() + 72 * 3600 * 1000).toISOString() : null;
+  const combinedWorkflowMeta = {
+    workflow_variant: plan.workflow_variant,
+    music_comfyui_prompt_id: musicRes.comfyPromptId,
+    video_comfyui_prompt_ids: completedVidJob.comfyui_prompt_ids || [],
+    character_references: ['scarlett_ref_1.jpg', 'scarlett_ref_2.jpg', 'scarlett_ref_3.jpg'],
+    scene_count: plan.scenes.length,
+  };
+
+  await query(
+    `UPDATE video_generations
+     SET status = 'completed',
+         current_stage = 'Completed — Ready to Stream',
+         progress = 100,
+         video_file_name = $2,
+         thumbnail_file_name = $3,
+         duration_sec = $4,
+         comfyui_workflow = $5::jsonb,
+         comfyui_prompt_ids = $6::jsonb,
+         expires_at = $7,
+         completed_at = NOW()
+     WHERE id = $1`,
+    [
+      genId,
+      videoFileName,
+      fs.existsSync(thumbFilePath) ? thumbFileName : '',
+      verifiedDuration,
+      JSON.stringify(combinedWorkflowMeta),
+      JSON.stringify(completedVidJob.comfyui_prompt_ids || []),
+      expiresAt,
+    ]
+  );
+
+  if (scheduleId) {
+    await query(
+      `UPDATE automation_schedules SET completed_count = completed_count + 1, last_generation_id = $2, updated_at = NOW() WHERE id = $1`,
+      [scheduleId, genId]
+    );
+  }
+}

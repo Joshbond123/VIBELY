@@ -1,0 +1,40 @@
+{
+  "name": "vibely-ai-platform",
+  "version": "1.0.0",
+  "private": true,
+  "description": "VIBELY — Autonomous Two-Layer AI Influencer Video & Original Music Generation Platform (NVIDIA Reasoning + ComfyUI + MiniMax Music 3 Q4_0 GGUF + MiniMax H3 Ref2VA)",
+  "type": "module",
+  "scripts": {
+    "dev:server": "tsx watch src/server/index.ts",
+    "dev:client": "vite",
+    "build:client": "vite build",
+    "build:server": "tsc -p tsconfig.server.json",
+    "build": "npm run build:client && npm run build:server",
+    "start": "node dist/server/index.js"
+  },
+  "dependencies": {
+    "cors": "^2.8.5",
+    "express": "^4.21.2",
+    "lucide-react": "^0.475.0",
+    "node-cron": "^3.0.3",
+    "pg": "^8.13.3",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0"
+  },
+  "devDependencies": {
+    "@types/cors": "^2.8.17",
+    "@types/express": "^5.0.0",
+    "@types/node": "^22.13.4",
+    "@types/node-cron": "^3.0.11",
+    "@types/pg": "^8.11.11",
+    "@types/react": "^19.0.8",
+    "@types/react-dom": "^19.0.3",
+    "@vitejs/plugin-react": "^4.3.4",
+    "autoprefixer": "^10.4.20",
+    "postcss": "^8.5.2",
+    "tailwindcss": "^3.4.17",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.3",
+    "vite": "^6.1.0"
+  }
+}

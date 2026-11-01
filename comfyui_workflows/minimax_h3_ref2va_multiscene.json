@@ -1,0 +1,151 @@
+{
+  "workflow_name": "VIBELY MiniMax H3 Ref2VA — Seamless Multi-Scene Character-Locked Video",
+  "model": "MiniMax H3 Ref2VA",
+  "host_user": "Joshbond123",
+  "prompt": {
+    "1": {
+      "class_type": "UnetLoaderGGUFDynamicVRAM",
+      "inputs": {
+        "unet_name": "minimax-h3-ref2va-Q4_0.gguf"
+      }
+    },
+    "2": {
+      "class_type": "LoraLoaderModelOnly",
+      "inputs": {
+        "model": ["1", 0],
+        "lora_name": "minimax_h3_ref2v_turbo_4step_v0.1_comfyui_bf16.safetensors",
+        "strength_model": 1.0
+      }
+    },
+    "3": {
+      "class_type": "CLIPLoaderGGUFDynamicVRAM",
+      "inputs": {
+        "clip_name": "Qwen3-VL-32B-Instruct-MiniMax-H3-L0-49-Q2_K.gguf",
+        "type": "minimax"
+      }
+    },
+    "4": {
+      "class_type": "VAELoader",
+      "inputs": {
+        "vae_name": "minimax_h3_video_vae_fp16.safetensors"
+      }
+    },
+    "5": {
+      "class_type": "VAELoader",
+      "inputs": {
+        "vae_name": "minimax_h3_audio_vae_fp32.safetensors"
+      }
+    },
+    "20": {
+      "class_type": "LoadImage",
+      "inputs": {
+        "image": "scarlett_ref_1.jpg"
+      }
+    },
+    "21": {
+      "class_type": "LoadImage",
+      "inputs": {
+        "image": "scarlett_ref_3.jpg"
+      }
+    },
+    "22": {
+      "class_type": "LoadImage",
+      "inputs": {
+        "image": "scarlett_ref_2.jpg"
+      }
+    },
+    "23": {
+      "class_type": "LoadAudio",
+      "inputs": {
+        "audio": "{{SCENE_SYNC_AUDIO_SLICE}}"
+      }
+    },
+    "11": {
+      "class_type": "MiniMaxH3ReferenceToVideo",
+      "inputs": {
+        "clip": ["3", 0],
+        "vae": ["4", 0],
+        "audio_vae": ["5", 0],
+        "ref_images.ref_image_0": ["20", 0],
+        "ref_images.ref_image_1": ["21", 0],
+        "ref_images.ref_image_2": ["22", 0],
+        "ref_audios.ref_audio_0": ["23", 0],
+        "prompt": "{{SCENE_REF2VA_PROMPT}}",
+        "width": 480,
+        "height": 832,
+        "length": 175,
+        "ref_image_size": "match"
+      }
+    },
+    "12": {
+      "class_type": "KSamplerSelect",
+      "inputs": {
+        "sampler_name": "res_multistep"
+      }
+    },
+    "13": {
+      "class_type": "BasicScheduler",
+      "inputs": {
+        "model": ["2", 0],
+        "scheduler": "simple",
+        "steps": 4,
+        "denoise": 1.0
+      }
+    },
+    "14": {
+      "class_type": "BasicGuider",
+      "inputs": {
+        "model": ["2", 0],
+        "conditioning": ["11", 0]
+      }
+    },
+    "15": {
+      "class_type": "RandomNoise",
+      "inputs": {
+        "noise_seed": "{{SEED}}"
+      }
+    },
+    "16": {
+      "class_type": "SamplerCustomAdvanced",
+      "inputs": {
+        "noise": ["15", 0],
+        "guider": ["14", 0],
+        "sampler": ["12", 0],
+        "sigmas": ["13", 0],
+        "latent_image": ["11", 1]
+      }
+    },
+    "17": {
+      "class_type": "VAEDecode",
+      "inputs": {
+        "samples": ["16", 0],
+        "vae": ["4", 0]
+      }
+    },
+    "18": {
+      "class_type": "VAEDecodeAudio",
+      "inputs": {
+        "samples": ["16", 0],
+        "vae": ["5", 0]
+      }
+    },
+    "19": {
+      "class_type": "CreateVideo",
+      "inputs": {
+        "images": ["17", 0],
+        "fps": 24.0,
+        "audio": ["18", 0],
+        "bit_depth": 8
+      }
+    },
+    "99": {
+      "class_type": "SaveVideo",
+      "inputs": {
+        "video": ["19", 0],
+        "filename_prefix": "video/vibely_scarlett_scene",
+        "format": "auto",
+        "codec": "auto"
+      }
+    }
+  }
+}
