@@ -188,7 +188,8 @@ CRITICAL PRODUCTION RULES:
 1. Total video duration MUST equal ${targetTotal} seconds (strictly between 20 and 40 seconds), split across EXACTLY 3 connected, continuous scenes whose durations sum to ${targetTotal} seconds (e.g. 3 scenes of ${(targetTotal / 3).toFixed(1)}s each).
 2. Every scene MUST follow seamlessly from the previous scene: Scene N's entry_pose MUST match Scene (N-1)'s exit_pose, maintaining exact facial identity, platinum-blonde hair, icy-blue eyes, hourglass body proportions, lighting, and location${selectedSeries.outfitTransition ? ' (except at the planned beat-matched outfit transition from stylish casual wear into a glamorous figure-hugging bodycon dress in Scene 2)' : ' and exact outfit continuity across all 3 scenes'}.
 3. Music MUST be an original, non-copyrighted AMAPIANO + AFROBEATS FUSION song (${suggestedBpm} BPM, ${suggestedKey}) featuring catchy female vocals, infectious Amapiano log drums, crisp Afrobeats percussion, deep punchy bass, and all 6 required sections: [Intro], [Verse] with distinctive vocal hook, [Chorus] catchy & repetitive, [Instrumental] dance-friendly break, [Bridge]/[Drop] energetic musical drop, and [Outro] satisfying ending.
-4. Reply ONLY with a single valid JSON object matching the exact schema requested. No markdown prose outside JSON.`;
+4. For gym_challenge choose ONE simple continuous exercise progression (standing setup -> controlled squats -> standing recovery), at normal speed, fixed focal length and camera axis. No moving to a different bench, no orbiting behind the subject, no abrupt scale/framing changes. Keep lighting and outfit descriptions identical in every scene. Avoid exaggerated anatomy and bounce language: reproduce the reference proportions without amplification.
+5. Reply ONLY with a single valid JSON object matching the exact schema requested. No markdown prose outside JSON.`;
 
     const userPrompt = `Create a brand-new, ultra-photorealistic Scarlett Monroe production for Content Series: "${selectedSeries.name}" (${selectedSeries.description}).
 Series signature elements: ${selectedSeries.signatureElements.join('; ')}.
@@ -214,7 +215,7 @@ Return JSON with this exact structure:
   "lighting_cinematography": "Detailed natural/cinematic lighting, shadows, lens, and camera style",
   "expressions_poses": "Detailed natural facial expressions, eye contact, smiles, and signature poses",
   "choreography_summary": "Detailed biomechanical dance/fitness movement plan with natural weight transfer and realistic secondary motion",
-  "camera_summary": "Master camera movement progression across all 4 scenes",
+  "camera_summary": "Master camera movement progression across all 3 scenes",
   "scenes": [
     {
       "scene_number": 1,
@@ -408,7 +409,7 @@ function normalizeSceneTimeline(rawScenes: any[], targetTotalSec: number, root: 
     cursor = end;
 
     const prevExit = i > 0 ? out[i - 1].exit_pose : 'Confident standing model stance facing camera with soft hip angle';
-    const entryPose = String(src.entry_pose || prevExit);
+    const entryPose = i>0 ? prevExit : String(src.entry_pose || prevExit);
     const exitPose = String(src.exit_pose || 'Balanced feminine three-quarter dance stance with warm eye contact');
     const basePrompt = String(
       src.comfy_prompt ||
@@ -430,7 +431,7 @@ function normalizeSceneTimeline(rawScenes: any[], targetTotalSec: number, root: 
       entry_pose: entryPose,
       exit_pose: exitPose,
       transition_instruction: String(src.transition_instruction || 'Continuous motion-matched camera flow'),
-      comfy_prompt: basePrompt,
+      comfy_prompt: `${basePrompt} Continuity constraints: start in ${entryPose}; end in ${exitPose}. Use identical outfit: ${root.outfit_descriptions}. Identical environment and light: ${root.location}; ${root.lighting_cinematography}. Same reference-defined skeletal dimensions and body volume in every frame. Normal speed, no size fluctuations.`,
     });
   }
   return out;

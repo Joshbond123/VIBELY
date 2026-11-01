@@ -38,6 +38,13 @@ export interface SceneSegment {
 }
 
 export interface VideoGeneration {
+  social_caption: string;
+  hashtags: string[];
+  caption_status: string;
+  caption_error: string | null;
+  observed_content: string;
+  quality_notes: string[];
+  stage_timings: {stage: string; at: string; progress: number}[];
   id: string;
   trigger_type: 'manual' | 'scheduled';
   schedule_id: string | null;

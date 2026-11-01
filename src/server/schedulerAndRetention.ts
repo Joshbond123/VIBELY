@@ -2,9 +2,11 @@ import fs from 'fs';
 import path from 'path';
 import cron from 'node-cron';
 import { query } from './db.js';
+import { recoverSocialMetadata } from './socialMetadata.js';
 import { launchVideoGenerationPipeline, syncKaggleEndpointsAndHealth, recoverInFlightGenerations } from './comfyOrchestrator.js';
 
 let schedulerRunning = false;
+let socialRecoveryStarted=false;
 
 export function computeNextRunAt(frequency: string, preferredTime: string, fromDate = new Date(), customMinutes = 60): Date {
   const [hhStr, mmStr] = (preferredTime || '12:00').split(':');
@@ -205,6 +207,11 @@ export async function setAutoDeletePolicy(enabled: boolean, dataDir: string) {
 }
 
 export function startBackgroundDaemons(dataDir: string): void {
+  if(!socialRecoveryStarted) {
+    socialRecoveryStarted=true;
+    setInterval(()=>{recoverSocialMetadata(dataDir).catch(e=>console.error('[Caption retry]',e.message));},120000);
+  }
+
   // Poll due schedules every 20 seconds (persistent DB-backed, independent of browser sessions)
   cron.schedule('*/20 * * * * *', () => {
     runDueSchedulesTick(dataDir).catch(() => {});

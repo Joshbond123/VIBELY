@@ -1150,6 +1150,20 @@ export default function App() {
                             </div>
                             <h3 className="font-bold text-sm">{v.title}</h3>
                             <p className="text-xs text-zinc-400 line-clamp-2">{v.visual_concept}</p>
+                            {v.status === 'completed' && (
+                              <div className="pt-3 space-y-2" data-testid="social-metadata">
+                                {v.social_caption ? <>
+                                  <p className="text-sm text-zinc-200 whitespace-pre-wrap">{v.social_caption}</p>
+                                  <p className="text-xs text-fuchsia-300 break-words">{(v.hashtags || []).join(' ')}</p>
+                                  <button className="px-3 py-2 rounded-lg bg-zinc-800 text-xs" onClick={async (e) => {
+                                    const button=e.currentTarget;
+                                    const text=v.social_caption+'\n\n'+(v.hashtags || []).join(' ');
+                                    try { await navigator.clipboard.writeText(text); button.textContent='Copied!'; }
+                                    catch { button.textContent='Copy unavailable — select text above'; }
+                                  }}>Copy caption &amp; hashtags</button>
+                                </> : <p className="text-xs text-zinc-500">{v.caption_status === 'failed' ? 'Caption analysis failed; retry pending.' : 'Analyzing finished video for caption and hashtags…'}</p>}
+                              </div>
+                            )}
                           </div>
 
                           <div className="space-y-2 pt-2 border-t border-zinc-800/80 text-xs">

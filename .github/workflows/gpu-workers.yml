@@ -1,0 +1,33 @@
+name: Deploy GPU workers from GitHub
+on:
+  workflow_dispatch:
+    inputs:
+      worker:
+        description: Worker to replace (ensure old jobs finished first)
+        type: choice
+        options: [all, video, music]
+        default: all
+permissions:
+  contents: read
+concurrency:
+  group: gpu-worker-deployment
+  cancel-in-progress: false
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: pip install kaggle
+      - name: Deploy private Kaggle kernels
+        run: python workers/deploy.py "${{ inputs.worker }}"
+        env:
+          KAGGLE_JOSHBOND_TOKEN: ${{ secrets.KAGGLE_JOSHBOND_TOKEN }}
+          KAGGLE_HAPPINK_TOKEN: ${{ secrets.KAGGLE_HAPPINK_TOKEN }}
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          MINIMAX_H3_API_KEY: ${{ secrets.MINIMAX_H3_API_KEY }}
+          MINIMAX_MUSIC3_API_KEY: ${{ secrets.MINIMAX_MUSIC3_API_KEY }}
+          VIBELY_MODEL_REGISTRY_SECRET: ${{ secrets.VIBELY_MODEL_REGISTRY_SECRET }}

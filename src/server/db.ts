@@ -131,6 +131,17 @@ async function runMigrations(client: pg.PoolClient): Promise<void> {
       completed_at TIMESTAMPTZ
     );
 
+    ALTER TABLE video_generations ADD COLUMN IF NOT EXISTS social_caption TEXT NOT NULL DEFAULT '';
+    ALTER TABLE video_generations ADD COLUMN IF NOT EXISTS hashtags JSONB NOT NULL DEFAULT '[]'::jsonb;
+    ALTER TABLE video_generations ADD COLUMN IF NOT EXISTS caption_status TEXT NOT NULL DEFAULT 'pending';
+    ALTER TABLE video_generations ADD COLUMN IF NOT EXISTS caption_attempts INTEGER NOT NULL DEFAULT 0;
+    ALTER TABLE video_generations ADD COLUMN IF NOT EXISTS caption_error TEXT;
+    ALTER TABLE video_generations ADD COLUMN IF NOT EXISTS observed_content TEXT NOT NULL DEFAULT '';
+    ALTER TABLE video_generations ADD COLUMN IF NOT EXISTS quality_notes JSONB NOT NULL DEFAULT '[]'::jsonb;
+    ALTER TABLE video_generations ADD COLUMN IF NOT EXISTS caption_model TEXT NOT NULL DEFAULT '';
+    ALTER TABLE video_generations ADD COLUMN IF NOT EXISTS last_activity_at TIMESTAMPTZ NOT NULL DEFAULT NOW();
+    ALTER TABLE video_generations ADD COLUMN IF NOT EXISTS stage_timings JSONB NOT NULL DEFAULT '[]'::jsonb;
+
     CREATE TABLE IF NOT EXISTS automation_schedules (
       id TEXT PRIMARY KEY,
       name TEXT NOT NULL,

@@ -99,11 +99,11 @@ export const SCARLETT_PERMANENT_IDENTITY_PROMPT = `SCARLETT MONROE – PERMANENT
 1. CHARACTER IDENTITY
 Scarlett Monroe is a fictional 25-year-old adult female fashion, beauty and lifestyle influencer.
 She has a glamorous, seductive, confident and exceptionally feminine appearance. Her visual identity must remain consistent across every generated image and video.
-She has a distinctive, exaggerated hourglass figure featuring:
-- A very full, prominent bust.
+She has a distinctive, reference-defined hourglass figure featuring:
+- A bust matching the reference images, without enlargement.
 - A narrow, defined waist.
 - Wide, curvaceous hips.
-- A very full, rounded backside.
+- A rounded backside matching the reference images, without enlargement.
 - Thick, shapely thighs.
 - Smooth, feminine body proportions.
 Her figure must remain visually consistent and anatomically coherent in every scene.
