@@ -122,20 +122,11 @@
         "vae": ["4", 0]
       }
     },
-    "18": {
-      "class_type": "VAEDecodeAudio",
-      "inputs": {
-        "samples": ["16", 0],
-        "vae": ["5", 0]
-      }
-    },
     "19": {
       "class_type": "CreateVideo",
       "inputs": {
         "images": ["17", 0],
-        "fps": 24.0,
-        "audio": ["18", 0],
-        "bit_depth": 8
+        "fps": 24.0
       }
     },
     "99": {
@@ -143,8 +134,8 @@
       "inputs": {
         "video": ["19", 0],
         "filename_prefix": "video/vibely_scarlett_scene",
-        "format": "auto",
-        "codec": "auto"
+        "format": "mp4",
+        "codec": "h264"
       }
     }
   }

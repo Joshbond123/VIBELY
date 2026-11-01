@@ -227,8 +227,8 @@ export async function executeMusicGenerationOnComfyUI(params: {
       caption: params.captionPrompt,
       lyrics: params.lyrics,
       duration_sec: params.durationSec,
-      steps: 24,
-      cfg_scale: 1.7,
+      steps: 10,
+      cfg_scale: 1.5,
       top_k: 50,
     }),
   });
@@ -240,7 +240,7 @@ export async function executeMusicGenerationOnComfyUI(params: {
 
   let completedJob: any = null;
   const started = Date.now();
-  while (Date.now() - started < 15 * 60 * 1000) {
+  while (Date.now() - started < 20 * 60 * 1000) {
     await new Promise((r) => setTimeout(r, 3000));
     const stResp = await fetch(`${ep.endpoint_url}/v1/music/jobs/${remoteJobId}`, {
       headers: { Authorization: `Bearer ${apiKey}` },
@@ -305,7 +305,7 @@ export async function executeMusicGenerationOnComfyUI(params: {
 
 export async function startStandaloneMusicTask(dataDir: string, customTheme?: string) {
   const plan = await generateStandaloneMusicPlan(customTheme);
-  const targetDur = 28 + crypto.randomInt(0, 8);
+  const targetDur = 22 + crypto.randomInt(0, 4);
   const res = await executeMusicGenerationOnComfyUI({
     dataDir,
     title: plan.title,
@@ -436,7 +436,7 @@ async function runFullPipelineBg(
     captionPrompt: plan.music.caption_prompt,
     lyrics: plan.music.lyrics,
     audioCharacteristics: plan.music.audio_characteristics,
-    durationSec: plan.total_duration_sec + 1.5,
+    durationSec: plan.total_duration_sec + 0.8,
     similarityScore: plan.similarity_score,
   });
 
@@ -463,8 +463,10 @@ async function runFullPipelineBg(
     body: JSON.stringify({
       scenes: plan.scenes,
       master_audio_base64: masterAudioB64,
-      width: 480,
-      height: 832,
+      diffusion_width: 320,
+      diffusion_height: 576,
+      width: 720,
+      height: 1280,
       steps: 4,
     }),
   });
@@ -476,7 +478,7 @@ async function runFullPipelineBg(
 
   let completedVidJob: any = null;
   const vidStart = Date.now();
-  while (Date.now() - vidStart < 35 * 60 * 1000) {
+  while (Date.now() - vidStart < 45 * 60 * 1000) {
     await new Promise((r) => setTimeout(r, 4000));
     const stResp = await fetch(`${videoEp.endpoint_url}/v1/video/jobs/${remoteVidJobId}`, {
       headers: { Authorization: `Bearer ${videoApiKey}` },

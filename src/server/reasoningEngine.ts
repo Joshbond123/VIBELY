@@ -160,8 +160,8 @@ export async function generateFullVideoProductionPlan(options?: {
     ? SCARLETT_CONTENT_SERIES.find((s) => s.id === options.forceSeriesId) || selectWeightedSeries()
     : selectWeightedSeries();
 
-  // Total duration strictly inside 20-40s (4 scenes of ~6.5-8.0s => 26-32s)
-  const targetTotal = Math.min(36, Math.max(24, options?.targetDurationSec || (24 + crypto.randomInt(0, 11))));
+  // Total duration strictly inside 20-40s (3 seamless connected scenes of ~7.3-8.7s => 22-26s default, honoring 20-40s custom)
+  const targetTotal = Math.min(40, Math.max(20, options?.targetDurationSec || (22 + crypto.randomInt(0, 4))));
   const includeTwerk = selectedSeries.allowTwerkAccent && crypto.randomInt(0, 100) < 38;
   const history = await getRecentHistorySummary(20);
 
@@ -180,8 +180,8 @@ You MUST obey Scarlett Monroe's Permanent Identity Directive strictly:
 ${SCARLETT_PERMANENT_IDENTITY_PROMPT}
 
 CRITICAL PRODUCTION RULES:
-1. Total video duration MUST equal ${targetTotal} seconds (strictly between 20 and 40 seconds), split across EXACTLY 4 connected, continuous scenes whose durations sum to ${targetTotal} seconds (e.g. 4 scenes of ${(targetTotal / 4).toFixed(1)}s each).
-2. Every scene MUST follow seamlessly from the previous scene: Scene N's entry_pose MUST match Scene (N-1)'s exit_pose, maintaining exact facial identity, platinum-blonde hair, icy-blue eyes, hourglass body proportions, lighting, and location${selectedSeries.outfitTransition ? ' (except at the planned beat-matched outfit transition from stylish casual wear into a glamorous figure-hugging bodycon dress in Scene 3)' : ' and exact outfit continuity across all 4 scenes'}.
+1. Total video duration MUST equal ${targetTotal} seconds (strictly between 20 and 40 seconds), split across EXACTLY 3 connected, continuous scenes whose durations sum to ${targetTotal} seconds (e.g. 3 scenes of ${(targetTotal / 3).toFixed(1)}s each).
+2. Every scene MUST follow seamlessly from the previous scene: Scene N's entry_pose MUST match Scene (N-1)'s exit_pose, maintaining exact facial identity, platinum-blonde hair, icy-blue eyes, hourglass body proportions, lighting, and location${selectedSeries.outfitTransition ? ' (except at the planned beat-matched outfit transition from stylish casual wear into a glamorous figure-hugging bodycon dress in Scene 2)' : ' and exact outfit continuity across all 3 scenes'}.
 3. Music MUST be an original, non-copyrighted AMAPIANO + AFROBEATS FUSION song (${suggestedBpm} BPM, ${suggestedKey}) featuring catchy female vocals, infectious Amapiano log drums, crisp Afrobeats percussion, deep punchy bass, and all 6 required sections: [Intro], [Verse] with distinctive vocal hook, [Chorus] catchy & repetitive, [Instrumental] dance-friendly break, [Bridge]/[Drop] energetic musical drop, and [Outro] satisfying ending.
 4. Reply ONLY with a single valid JSON object matching the exact schema requested. No markdown prose outside JSON.`;
 
@@ -247,7 +247,7 @@ Return JSON with this exact structure:
     }
   }
 }
-Ensure "scenes" has ALL 4 connected scenes (scene_number 1, 2, 3, 4) covering 0s to ${targetTotal}s with zero gaps!`;
+Ensure "scenes" has ALL 3 connected scenes (scene_number 1, 2, 3) covering 0s to ${targetTotal}s with zero gaps!`;
 
     const { parsed, modelUsed } = await callNvidiaReasoningJSON(
       systemPrompt,
@@ -389,8 +389,8 @@ Return JSON:
 }
 
 function normalizeSceneTimeline(rawScenes: any[], targetTotalSec: number, root: any): SceneProductionSpec[] {
-  const count = 4;
-  const clampedTotal = Math.min(38, Math.max(22, targetTotalSec));
+  const count = 3;
+  const clampedTotal = Math.min(40, Math.max(21, targetTotalSec));
   const perScene = Number((clampedTotal / count).toFixed(2));
   const out: SceneProductionSpec[] = [];
   let cursor = 0;
