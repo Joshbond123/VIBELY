@@ -171,58 +171,15 @@ async function main() {
     execFileSync('npm', ['ci'], { cwd: gwDir, stdio: 'inherit' });
     execFileSync('npm', ['run', 'build'], { cwd: gwDir, stdio: 'inherit' });
 
-    const stageDir = '/tmp/gw_bundle_stage';
-    fs.rmSync(stageDir, { recursive: true, force: true });
-    fs.mkdirSync(stageDir, { recursive: true });
-    fs.cpSync(path.join(gwDir, 'package.json'), path.join(stageDir, 'package.json'));
-    fs.cpSync(path.join(gwDir, 'dist'), path.join(stageDir, 'dist'), { recursive: true });
-    fs.cpSync(path.join(gwDir, 'node_modules'), path.join(stageDir, 'node_modules'), { recursive: true });
-    fs.writeFileSync(
-      path.join(stageDir, 'boot-hijack.mjs'),
-      "await import('/app/data/gateway/dist/server.js');\nawait new Promise(() => {});\n"
-    );
-
-    const tarPath = '/tmp/gateway-bundle.tar.gz';
-    execFileSync('tar', ['-C', stageDir, '-czf', tarPath, '.']);
-    const stat = fs.statSync(tarPath);
-
-    for (let i = 0; i < 24; i++) {
-      const st = JSON.parse((await mcp('apps_get', { app: appId })).texts[0] || '{}');
-      if (st.status === 'online' || st.processes?.[0]?.status === 'online') break;
-      await sleep(5000);
-    }
-
-    const upStart = await mcp('files_upload_start', {
-      app: appId,
-      fileName: 'gateway-bundle.tar.gz',
-      size: stat.size,
-    });
-    if (upStart.isError) {
-      throw new Error(`files_upload_start failed: ${upStart.texts.join(' ')}`);
-    }
-    const upInfo = JSON.parse(upStart.texts[0]);
-    const putUrl = upInfo.url || upInfo.uploadUrl;
-    const uploadToken = upInfo.upload || upInfo.id;
-
-    const putResp = await fetch(putUrl, {
-      method: 'PUT',
-      headers: { 'Content-Type': 'application/gzip', 'Content-Length': String(stat.size) },
-      body: fs.readFileSync(tarPath),
-    });
-    if (!putResp.ok) {
-      throw new Error(`Bundle PUT failed (${putResp.status}): ${await putResp.text()}`);
-    }
-
-    const upFin = await mcp('files_upload_finish', {
-      app: appId,
-      upload: uploadToken,
-      path: '/app/data/gateway',
-      extract: true,
-      confirm: true,
-    });
-    if (upFin.isError) {
-      throw new Error(`files_upload_finish failed: ${upFin.texts.join(' ')}`);
-    }
+    // Deploy the artifact built by this GitHub Actions checkout. No Git operation
+    // occurs on the hosting service. Avoid the account-wide pending-upload quota.
+    const serverB64 = fs.readFileSync(path.join(gwDir, 'dist', 'server.js')).toString('base64');
+    const bootSource = JSON.stringify("await import('/app/data/gateway/dist/server.js');\nawait new Promise(() => {});\n");
+    const install = `const fs=require('fs');const p='/app/data/gateway';fs.mkdirSync(p+'/dist',{recursive:true});fs.writeFileSync(p+'/dist/server.js.next',Buffer.from('${serverB64}','base64'));fs.renameSync(p+'/dist/server.js.next',p+'/dist/server.js');fs.writeFileSync(p+'/package.json',JSON.stringify({type:'module'}));if(!fs.existsSync(p+'/node_modules'))fs.symlinkSync('/app/node_modules',p+'/node_modules','dir');fs.writeFileSync(p+'/boot-hijack.mjs',${bootSource});console.log('GitHub Actions artifact installed');`;
+    const command = 'node -e ' + "'" + install.replace(/'/g, "'\\''") + "'";
+    const installed = await mcp('apps_run', {app:appId,command,confirm:true});
+    if(installed.isError) throw new Error('Gateway artifact installation failed: '+installed.texts.join(' '));
+    console.log(installed.texts.join(' '));
 
     await mcp('env_set', {
       app: appId,
