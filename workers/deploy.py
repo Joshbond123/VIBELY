@@ -14,9 +14,13 @@ for kind in ([sys.argv[1]] if len(sys.argv)>1 and sys.argv[1]!='all' else SPECS)
  compile(source,slug,'exec')
  with tempfile.TemporaryDirectory() as temp:
   p=pathlib.Path(temp);(p/'server.py').write_text(source)
-  (p/'kernel-metadata.json').write_text(json.dumps({'id':user+'/'+slug,'title':'VIBELY '+kind+' GPU worker','code_file':'server.py','language':'python','kernel_type':'script','is_private':True,'enable_gpu':True,'enable_internet':True,'enable_tpu':False,'dataset_sources':datasets,'competition_sources':[],'kernel_sources':[],'model_sources':[]}))
+  (p/'kernel-metadata.json').write_text(json.dumps({'id':user+'/'+slug,'title':'VIBELY '+kind+' GPU worker','code_file':'server.py','language':'python','kernel_type':'script','is_private':'true','enable_gpu':'true','enable_internet':'true','enable_tpu':'false','dataset_sources':datasets,'competition_sources':[],'kernel_sources':[],'model_sources':[]}))
   env={**os.environ,'KAGGLE_USERNAME':user,'KAGGLE_KEY':values['KAGGLE_API_TOKEN'],'KAGGLE_API_TOKEN':values['KAGGLE_API_TOKEN']}
   result=subprocess.run(['kaggle','kernels','push','-p',temp],env=env,capture_output=True,text=True)
   # Do not echo CLI output: a vendor exception can contain credentials.
-  if result.returncode: raise RuntimeError('Kaggle deployment failed for '+kind+' (exit '+str(result.returncode)+')')
+  if result.returncode:
+   error=result.stderr+'\n'+result.stdout
+   for value in values.values():error=error.replace(value,'[REDACTED]')
+   print(error[-3000:],file=sys.stderr)
+   raise RuntimeError('Kaggle deployment failed for '+kind+' (exit '+str(result.returncode)+')')
   print('Deployed private '+kind+' worker from GitHub source',flush=True)
