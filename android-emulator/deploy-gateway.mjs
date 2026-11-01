@@ -177,7 +177,7 @@ async function main() {
     const artifact = gzipSync(fs.readFileSync(path.join(gwDir, 'dist', 'server.js'))).toString('base64');
     const shellQuote = (v) => "'" + v.replace(/'/g, "'\\''") + "'";
     async function runArtifactCommand(js) {
-      const r=await mcp('apps_run',{app:appId,command:'node -e '+shellQuote(js),confirm:true});
+      const r=await mcp('apps_run',{app:appId,command:'NODE_OPTIONS= node -e '+shellQuote(js),confirm:true});
       if(r.isError) throw new Error('Artifact install: '+r.texts.join(' '));
       for(const t of r.texts) { try {const j=JSON.parse(t);if(j.exitCode || j.exit_code) throw new Error('Artifact command failed');} catch(e) {if(e.message==='Artifact command failed')throw e;} }
     }
