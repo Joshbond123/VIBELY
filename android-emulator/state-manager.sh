@@ -47,7 +47,7 @@ backup_state() {
   adb exec-out "cat /data/system/users/0/settings_ssaid.xml 2>/dev/null || true" > "$WORK_TMP/stage/identity/settings_ssaid.xml" || true
 
   # Record foreground component, not just installed data. No forced HOME on reconnect.
-  adb shell dumpsys activity activities | tr -d '\r' | sed -n 's/.*mResumedActivity:.* [^ ]* \([^ ]*\/[^ ]*\) .*/\1/p' | head -1 > "$WORK_TMP/stage/settings/foreground.txt" || true
+  adb shell dumpsys activity activities | tr -d '\r' | sed -n 's/.*[Rr]esumedActivity[=:].* u[0-9][0-9]* \([^ ]*\/[^ ]*\) .*/\1/p' | head -1 > "$WORK_TMP/stage/settings/foreground.txt" || true
 
   # 2. Emulator & Android settings snapshot
   adb shell settings list system | tr -d '\r' > "$WORK_TMP/stage/settings/system.txt" || true

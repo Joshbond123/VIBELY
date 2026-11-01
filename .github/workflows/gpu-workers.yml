@@ -21,7 +21,7 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
-      - run: pip install kaggle
+      - run: pip install kaggle six
       - name: Deploy private Kaggle kernels
         run: python workers/deploy.py "${{ inputs.worker }}"
         env:
