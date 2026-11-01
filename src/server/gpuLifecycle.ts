@@ -89,7 +89,7 @@ export async function gpuLifecycleTick() {
         const {rows:[leases]}=await c.query('SELECT COUNT(*)::int AS count FROM gpu_leases WHERE service_id=$1',[service]);
         if(['STARTING','INITIALIZING'].includes(state.state)) {
           const user=service==='minimax_h3_ref2va'?'joshbond123':'happink';
-          const slug=service==='minimax_h3_ref2va'?'vibely-minimax-h3-ref2va-server':'vibely-minimax-music-3-q4-0-gguf-server';
+          const slug=service==='minimax_h3_ref2va'?'vibely-minimax-h3-ref2va-server':'vibely-music-gpu-worker';
           const token=process.env[service==='minimax_h3_ref2va'?'KAGGLE_JOSHBOND_TOKEN':'KAGGLE_HAPPINK_TOKEN'];
           const r=await fetch(`https://www.kaggle.com/api/v1/kernels/status?userName=${user}&kernelSlug=${slug}`,{signal:AbortSignal.timeout(8000),headers:{Authorization:`Bearer ${token || ''}`}});
           if(r.ok){const k:any=await r.json();if(['error','failed'].includes(String(k.status).toLowerCase()) && Date.now()-new Date(state.requested_at || state.started_at).getTime()>120000) {
@@ -111,9 +111,9 @@ export async function gpuLifecycleTick() {
             } else if(response.status!==409) await c.query('UPDATE gpu_sessions SET error=$2 WHERE service_id=$1',[service,`Shutdown HTTP ${response.status}; not marked OFF`]);
           }
         }
-        if(state.state==='STOPPING') {
+        if(['STOPPING','ERROR'].includes(state.state)) {
           const user=service==='minimax_h3_ref2va'?'joshbond123':'happink';
-          const slug=service==='minimax_h3_ref2va'?'vibely-minimax-h3-ref2va-server':'vibely-minimax-music-3-q4-0-gguf-server';
+          const slug=service==='minimax_h3_ref2va'?'vibely-minimax-h3-ref2va-server':'vibely-music-gpu-worker';
           const token=process.env[service==='minimax_h3_ref2va'?'KAGGLE_JOSHBOND_TOKEN':'KAGGLE_HAPPINK_TOKEN'];
           const r=await fetch(`https://www.kaggle.com/api/v1/kernels/status?userName=${user}&kernelSlug=${slug}`,{signal:AbortSignal.timeout(10000),headers:{Authorization:`Bearer ${token || ''}`}});
           if(r.ok) {

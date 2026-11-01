@@ -4,7 +4,7 @@ Secrets are injected at deployment time; never commit rendered worker files.
 import ast, json, os, pathlib, subprocess, tempfile, sys, time, urllib.request, urllib.error
 SPECS={
  'video':('joshbond123','vibely-minimax-h3-ref2va-server',['joshbond123/minimax-h3-ref2va-cache','joshbond123/scarlett-monroe-character-refs'],'KAGGLE_JOSHBOND_TOKEN','MINIMAX_H3_API_KEY'),
- 'music':('happink','vibely-minimax-music-3-q4-0-gguf-server',['happink/minimax-music-3-q4-0-gguf-cache'],'KAGGLE_HAPPINK_TOKEN','MINIMAX_MUSIC3_API_KEY')}
+ 'music':('happink','vibely-music-gpu-worker',['happink/minimax-music-3-q4-0-gguf-cache'],'KAGGLE_HAPPINK_TOKEN','MINIMAX_MUSIC3_API_KEY')}
 for kind in ([sys.argv[1]] if len(sys.argv)>1 and sys.argv[1]!='all' else SPECS):
  user,slug,datasets,token_var,api_var=SPECS[kind]
  source=pathlib.Path(__file__).with_name(kind+'_worker.py').read_text()
@@ -14,7 +14,7 @@ for kind in ([sys.argv[1]] if len(sys.argv)>1 and sys.argv[1]!='all' else SPECS)
  compile(source,slug,'exec')
  with tempfile.TemporaryDirectory() as temp:
   p=pathlib.Path(temp);(p/'server.py').write_text(source)
-  metadata={'id':user+'/'+slug,'title':('VIBELY MiniMax H3 Ref2VA Server' if kind=='video' else 'VIBELY MiniMax Music 3 Q4 0 GGUF Server'),'code_file':'server.py','language':'python','kernel_type':'script','is_private':'true','enable_gpu':'true','enable_internet':'true','enable_tpu':'false','dataset_sources':datasets,'competition_sources':[],'kernel_sources':[],'model_sources':[]}
+  metadata={'id':user+'/'+slug,'title':('VIBELY MiniMax H3 Ref2VA Server' if kind=='video' else 'VIBELY music GPU worker'),'code_file':'server.py','language':'python','kernel_type':'script','is_private':'true','enable_gpu':'true','enable_internet':'true','enable_tpu':'false','dataset_sources':datasets,'competition_sources':[],'kernel_sources':[],'model_sources':[]}
   # Resolve numeric identity before saving, so changing a title cannot fork/rename another worker.
   for candidate in [slug,'vibely-'+kind+'-gpu-worker']:
    try:

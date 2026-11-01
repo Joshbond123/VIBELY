@@ -203,6 +203,7 @@ export async function probeWorkerHealth(serviceId: string, baseUrl: string): Pro
 }
 
 async function getReadyEndpoint(serviceId:string,jobId:string):Promise<ModelEndpointRecord> {
+  if(serviceId==='minimax_h3_ref2va') await updateVideoStage(jobId,'generating_video','Requesting video GPU allocation and ComfyUI initialization',42);
   await acquireGpu(serviceId,jobId);
   const start=Date.now();
   while(Date.now()-start<20*60000) {
@@ -212,6 +213,7 @@ async function getReadyEndpoint(serviceId:string,jobId:string):Promise<ModelEndp
     if(session?.state==='OFF') await acquireGpu(serviceId,jobId);
     if(session?.state==='ERROR') throw new Error(session.error || 'GPU startup failed');
     if(ep?.comfyui_ready && ep.extra_meta?.worker_version==='lifecycle-v3' && session?.state==='ON') return ep;
+    if(serviceId==='minimax_h3_ref2va') await updateVideoStage(jobId,'generating_video',`Video GPU ${session?.state || 'UNKNOWN'} — waiting for model/ComfyUI readiness`,42);
     await new Promise(r=>setTimeout(r,8000));
   }
   throw new Error(`GPU startup deadline exceeded for ${serviceId}; check Kaggle quota and session availability`);
