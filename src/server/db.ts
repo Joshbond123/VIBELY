@@ -142,6 +142,15 @@ async function runMigrations(client: pg.PoolClient): Promise<void> {
     ALTER TABLE video_generations ADD COLUMN IF NOT EXISTS last_activity_at TIMESTAMPTZ NOT NULL DEFAULT NOW();
     ALTER TABLE video_generations ADD COLUMN IF NOT EXISTS stage_timings JSONB NOT NULL DEFAULT '[]'::jsonb;
 
+    CREATE TABLE IF NOT EXISTS gpu_sessions (
+      service_id TEXT PRIMARY KEY, state TEXT NOT NULL DEFAULT 'OFF', requested_at TIMESTAMPTZ,
+      started_at TIMESTAMPTZ, worker_started_at DOUBLE PRECISION NOT NULL DEFAULT 0,
+      last_shutdown_at TIMESTAMPTZ, session_status TEXT, error TEXT, telemetry JSONB, telemetry_at TIMESTAMPTZ
+    );
+    INSERT INTO gpu_sessions(service_id) VALUES('minimax_h3_ref2va'),('minimax_music_3') ON CONFLICT DO NOTHING;
+    CREATE TABLE IF NOT EXISTS gpu_leases(service_id TEXT NOT NULL,job_id TEXT NOT NULL,created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),PRIMARY KEY(service_id,job_id));
+    CREATE TABLE IF NOT EXISTS gpu_events(id BIGSERIAL PRIMARY KEY,service_id TEXT NOT NULL,event TEXT NOT NULL,detail JSONB NOT NULL DEFAULT '{}',created_at TIMESTAMPTZ NOT NULL DEFAULT NOW());
+
     CREATE TABLE IF NOT EXISTS automation_schedules (
       id TEXT PRIMARY KEY,
       name TEXT NOT NULL,

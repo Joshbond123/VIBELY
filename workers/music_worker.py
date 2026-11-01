@@ -68,6 +68,8 @@ STATE = {
 }
 JOBS = {}
 JOBS_LOCK = threading.Lock()
+SHUTDOWN_REQUESTED=threading.Event()
+LAST_ACTIVITY_AT=time.time()
 MUSIC_EXECUTION_LOCK = threading.Lock()
 
 def log(msg: str):
@@ -624,7 +626,7 @@ def start_cloudflared_and_heartbeat():
         if not STATE.get("tunnel_url"):
             return
         payload_dict = {
-            "worker_version":"critical-v2",
+            "worker_version":"lifecycle-v3",
             "worker_started_at":STATE["started_at"],
             "service": "minimax_music_3",
             "username": KAGGLE_USERNAME,
@@ -683,7 +685,7 @@ def main():
     def health():
         return {
             "ok": True,
-            "worker_version":"critical-v2",
+            "worker_version":"lifecycle-v3",
             "worker_started_at":STATE["started_at"],
             "service": "minimax_music_3",
             "username": KAGGLE_USERNAME,
@@ -702,6 +704,7 @@ def main():
     @app.post("/v1/music/jobs")
     def create_music_job(payload: dict, authorization: str = Header(default="")):
         verify_auth(authorization)
+        if SHUTDOWN_REQUESTED.is_set(): raise HTTPException(status_code=503,detail="Worker is shutting down")
         if not STATE["comfyui_ready"]:
             raise HTTPException(status_code=503, detail=f"ComfyUI still {STATE['stage']}")
         request_id=str(payload.get("request_id") or "")
@@ -748,6 +751,48 @@ def main():
             out[fn] = open(p, errors="replace").read()[-6000:] if os.path.exists(p) else ""
         return out
 
+    @app.get("/v1/telemetry")
+    def gpu_telemetry(authorization: str = Header(default="")):
+        verify_auth(authorization)
+        cmd=["nvidia-smi","--query-gpu=index,name,utilization.gpu,memory.used,memory.total,temperature.gpu","--format=csv,noheader,nounits"]
+        result=subprocess.run(cmd,capture_output=True,text=True,timeout=8)
+        if result.returncode: raise HTTPException(status_code=503,detail="nvidia-smi unavailable")
+        gpus=[]
+        def num(x):
+            try:return float(x)
+            except ValueError:return None
+        for line in result.stdout.strip().splitlines():
+            a=[x.strip() for x in line.split(',')]
+            if len(a)==6:gpus.append({"index":num(a[0]),"name":a[1],"utilization_percent":num(a[2]),"memory_used_mib":num(a[3]),"memory_total_mib":num(a[4]),"temperature_c":num(a[5])})
+        with JOBS_LOCK:active=[j for j in JOBS.values() if j.get('status') in ('running','queued')]
+        return {"measured_at":time.time(),"gpus":gpus,"active_jobs":len(active),"current_tasks":[j.get('stage') for j in active],"session_started_at":STATE['started_at']}
+
+    @app.post("/v1/music/jobs/{job_id}/acknowledge")
+    def acknowledge_output(job_id: str, receipt: dict, authorization: str = Header(default="")):
+        verify_auth(authorization)
+        if not receipt.get('sha256') or not receipt.get('playable') or not receipt.get('bytes'):
+            raise HTTPException(status_code=400,detail="Durable decoded-output receipt required")
+        with JOBS_LOCK:
+            job=JOBS.get(job_id)
+            if not job or job.get('status')!='completed':raise HTTPException(status_code=409,detail="Output is not completed")
+            job['persisted_receipt']=receipt;job['acknowledged_at']=time.time()
+        return {"ok":True}
+
+    @app.post("/v1/lifecycle/shutdown")
+    def shutdown_worker(payload: dict, authorization: str = Header(default="")):
+        verify_auth(authorization)
+        with JOBS_LOCK:
+            blockers=[j for j in JOBS.values() if j.get('status') in ('queued','running') or (j.get('status')=='completed' and not j.get('persisted_receipt'))]
+            if blockers:raise HTTPException(status_code=409,detail="Running jobs or outputs not yet acknowledged as persisted")
+            try:
+                q=json.loads(urllib.request.urlopen('http://127.0.0.1:8188/queue',timeout=5).read().decode())
+                if q.get('queue_running') or q.get('queue_pending'):raise HTTPException(status_code=409,detail="ComfyUI queue is not empty")
+            except HTTPException:raise
+            except Exception:
+                if COMFY_PROC is not None and COMFY_PROC.poll() is None:raise HTTPException(status_code=503,detail="Cannot verify ComfyUI queue; refusing unsafe shutdown")
+            SHUTDOWN_REQUESTED.set();STATE['stage']='shutting_down';STATE['comfyui_ready']=False
+        return {"ok":True,"state":"STOPPING","session_termination":"script exits after ComfyUI terminates; Kaggle status must independently confirm completion"}
+
     @app.get("/v1/diagnostics")
     def music_diagnostics(authorization: str = Header(default="")):
         verify_auth(authorization)
@@ -780,16 +825,37 @@ def main():
         log(f"FATAL SETUP ERROR: {e}\n{traceback.format_exc()}")
 
     # Keep session alive up to 11.5 hours
-    t0 = time.time()
-    while time.time() - t0 < 11.5 * 3600:
-        if COMFY_PROC is not None and COMFY_PROC.poll() is not None:
-            log("ComfyUI process exited unexpectedly; restarting...")
-            STATE["comfyui_ready"] = False
+    t0=time.time()
+    idle_since=time.time()
+    while time.time()-t0<11.5*3600:
+        if SHUTDOWN_REQUESTED.is_set():break
+        with JOBS_LOCK:
+            busy=any(j.get('status') in ('queued','running') or (j.get('status')=='completed' and not j.get('persisted_receipt')) for j in JOBS.values())
+        if busy:idle_since=time.time()
+        elif time.time()-idle_since>30:
             try:
-                start_comfyui()
-            except Exception as re_err:
-                log(f"Restart error: {re_err}")
-        time.sleep(15)
+                req=urllib.request.Request(VIBELY_BACKEND_URL+'/api/gpu/leases?service_id=minimax_music_3',headers={'X-Registry-Secret':REGISTRY_SECRET})
+                leases=json.loads(urllib.request.urlopen(req,timeout=8).read().decode())
+                if leases.get('ok') and leases.get('pending')==0:
+                    SHUTDOWN_REQUESTED.set();break
+            except Exception:pass
+            # Abandoned startup safety: no submitted work/output, never interrupt active inference.
+            if not JOBS and time.time()-idle_since>15*60:
+                log('No job arrived within startup grace; releasing unused GPU session.');break
+        if COMFY_PROC is not None and COMFY_PROC.poll() is not None:
+            STATE['comfyui_ready']=False;STATE['stage']='error';STATE['last_error']='ComfyUI exited; session will terminate rather than silently lose jobs'
+            log(STATE['last_error']);break
+        time.sleep(3)
+    STATE['stage']='shutting_down';STATE['comfyui_ready']=False
+    if COMFY_PROC is not None and COMFY_PROC.poll() is None:
+        COMFY_PROC.terminate()
+        try:COMFY_PROC.wait(timeout=20)
+        except subprocess.TimeoutExpired:COMFY_PROC.kill();COMFY_PROC.wait(timeout=10)
+    log('ComfyUI terminated; models and CUDA allocations released. Returning from Kaggle batch script.')
+    try:
+        body=json.dumps({'service_id':"minimax_music_3",'worker_started_at':STATE['started_at']}).encode()
+        urllib.request.urlopen(urllib.request.Request(VIBELY_BACKEND_URL+'/api/gpu/stopped',data=body,headers={'Content-Type':'application/json','X-Registry-Secret':REGISTRY_SECRET}),timeout=10).close()
+    except Exception:pass
 
 if __name__ == "__main__":
     main()

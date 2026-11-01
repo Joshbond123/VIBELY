@@ -1,4 +1,5 @@
 import crypto from 'crypto';
+import { gpuDashboard, acceptGpuHeartbeat } from './gpuLifecycle.js';
 import { generateSocialMetadata } from './socialMetadata.js';
 import cors from 'cors';
 import express from 'express';
@@ -127,6 +128,22 @@ app.get('/api/overview', async (_req, res) => {
   }
 });
 
+// Read-only telemetry never allocates or starts GPUs.
+app.get('/api/gpu', async (_req,res)=>{
+  try {res.json({ok:true,workers:await gpuDashboard()});}
+  catch(e:any){res.status(500).json({ok:false,error:e.message});}
+});
+app.post('/api/gpu/stopped',async(req,res)=>{
+  if(!process.env.VIBELY_MODEL_REGISTRY_SECRET || req.header('X-Registry-Secret')!==process.env.VIBELY_MODEL_REGISTRY_SECRET){res.status(401).json({ok:false});return;}
+  await query("UPDATE gpu_sessions SET state='STOPPING',telemetry=NULL,telemetry_at=NULL WHERE service_id=$1 AND worker_started_at=$2",[req.body.service_id,Number(req.body.worker_started_at)]);
+  res.json({ok:true});
+});
+app.get('/api/gpu/leases',async(req,res)=>{
+  if(!process.env.VIBELY_MODEL_REGISTRY_SECRET || req.header('X-Registry-Secret')!==process.env.VIBELY_MODEL_REGISTRY_SECRET){res.status(401).json({ok:false});return;}
+  const rows=await query<any>('SELECT count(*)::int AS count FROM gpu_leases WHERE service_id=$1',[String(req.query.service_id || '')]);
+  res.json({ok:true,pending:rows[0]?.count || 0});
+});
+
 // Model Endpoint Heartbeat Registration (called by Kaggle GPU workers)
 app.post('/api/models/register', async (req, res) => {
   try {
@@ -188,6 +205,7 @@ app.post('/api/models/register', async (req, res) => {
       ]
     );
 
+    await acceptGpuHeartbeat(service,worker_version,Number(worker_started_at || 0),Boolean(comfyui_ready));
     res.json({ ok: true });
   } catch (err: any) {
     res.status(500).json({ ok: false, error: err?.message || String(err) });

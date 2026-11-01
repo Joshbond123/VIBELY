@@ -4,6 +4,7 @@ import path from 'path';
 import { execFile } from 'child_process';
 import { promisify } from 'util';
 import { query } from './db.js';
+import {acquireGpu,releaseGpuJob,acknowledgeGpuOutput,gpuEvent} from './gpuLifecycle.js';
 import { generateSocialMetadata } from './socialMetadata.js';
 import {
   FullProductionPlan,
@@ -169,7 +170,7 @@ export async function probeWorkerHealth(serviceId: string, baseUrl: string): Pro
     const h: any = await resp.json();
     if (!h?.ok) return false;
     const [registered]=await query<any>('SELECT extra_meta FROM model_endpoints WHERE service_id=$1',[serviceId]);
-    if(registered?.extra_meta?.worker_version==='critical-v2' && h.worker_version!=='critical-v2') return false;
+    if(registered?.extra_meta?.worker_version==='lifecycle-v3' && h.worker_version!=='lifecycle-v3') return false;
     if(Number(registered?.extra_meta?.worker_started_at || 0)>Number(h.worker_started_at || 0)) return false;
 
     await query(
@@ -201,20 +202,19 @@ export async function probeWorkerHealth(serviceId: string, baseUrl: string): Pro
   }
 }
 
-async function getReadyEndpoint(serviceId: string): Promise<ModelEndpointRecord> {
-  await syncKaggleEndpointsAndHealth();
-  const rows = await query<ModelEndpointRecord>(
-    `SELECT * FROM model_endpoints WHERE service_id = $1`,
-    [serviceId]
-  );
-  const ep = rows[0];
-  if (!ep || !ep.endpoint_url) {
-    throw new Error(`Model service ${serviceId} does not have an active endpoint URL yet (status: ${ep?.status || 'unknown'})`);
+async function getReadyEndpoint(serviceId:string,jobId:string):Promise<ModelEndpointRecord> {
+  await acquireGpu(serviceId,jobId);
+  const start=Date.now();
+  while(Date.now()-start<20*60000) {
+    await syncKaggleEndpointsAndHealth();
+    const [ep]=await query<ModelEndpointRecord>('SELECT * FROM model_endpoints WHERE service_id=$1',[serviceId]);
+    const [session]=await query<any>('SELECT * FROM gpu_sessions WHERE service_id=$1',[serviceId]);
+    if(session?.state==='OFF') await acquireGpu(serviceId,jobId);
+    if(session?.state==='ERROR') throw new Error(session.error || 'GPU startup failed');
+    if(ep?.comfyui_ready && ep.extra_meta?.worker_version==='lifecycle-v3' && session?.state==='ON') return ep;
+    await new Promise(r=>setTimeout(r,8000));
   }
-  if (!ep.comfyui_ready) {
-    throw new Error(`Model service ${serviceId} (${ep.model_name}) is currently in stage "${ep.status}" — ComfyUI still loading weights on Kaggle GPU`);
-  }
-  return ep;
+  throw new Error(`GPU startup deadline exceeded for ${serviceId}; check Kaggle quota and session availability`);
 }
 
 const ACTIVE_IN_MEMORY_JOBS = new Set<string>();
@@ -235,9 +235,9 @@ export async function executeMusicGenerationOnComfyUI(params: {
   existingRemoteJobId?: string;
   precreatedTrackId?: string;
 }): Promise<{ trackId: string; fileName: string; filePath: string; durationSec: number; comfyPromptId: string; workflow: any }> {
-  const ep = await getReadyEndpoint('minimax_music_3');
-  const apiKey = ep.api_key || process.env.MINIMAX_MUSIC3_API_KEY || '';
   const trackId = params.precreatedTrackId || ('trk_' + crypto.randomUUID().slice(0, 12));
+  const ep = await getReadyEndpoint('minimax_music_3',params.parentVideoGenId || trackId);
+  const apiKey = ep.api_key || process.env.MINIMAX_MUSIC3_API_KEY || '';
 
   let remoteJobId = params.existingRemoteJobId || '';
   if (!remoteJobId) {
@@ -263,6 +263,7 @@ export async function executeMusicGenerationOnComfyUI(params: {
     }
     const cj: any = await createResp.json();
     remoteJobId = cj.job_id;
+    await gpuEvent('minimax_music_3','GENERATING',{job_id:params.parentVideoGenId || trackId,remote_job_id:remoteJobId});
     if(params.parentVideoGenId) await query("UPDATE video_generations SET stage_timings=stage_timings || jsonb_build_array(jsonb_build_object('stage','music_submitted','at',NOW())) WHERE id=$1",[params.parentVideoGenId]);
     if (params.parentVideoGenId) {
       await query(
@@ -318,7 +319,7 @@ export async function executeMusicGenerationOnComfyUI(params: {
   const fileName = `${trackId}.mp3`;
   const filePath = path.join(musicDir, fileName);
   const arrayBuf = await audioResp.arrayBuffer();
-  fs.writeFileSync(filePath, Buffer.from(arrayBuf));
+  fs.writeFileSync(filePath, Buffer.from(arrayBuf),{flush:true});
 
   const actualDuration = Number(completedJob.duration_sec || params.durationSec);
   const comfyPromptId = String(completedJob.comfyui_prompt_id || '');
@@ -374,6 +375,9 @@ export async function executeMusicGenerationOnComfyUI(params: {
   }
 
   if (params.parentVideoGenId) await query("UPDATE video_generations SET music_track_id=$2, stage_timings=stage_timings || jsonb_build_array(jsonb_build_object('stage','music_completed','at',NOW())) WHERE id=$1",[params.parentVideoGenId,trackId]);
+  await execFileAsync('ffmpeg',['-v','error','-i',filePath,'-f','null','-'],{timeout:60000});
+  await acknowledgeGpuOutput('minimax_music_3',remoteJobId,{sha256:crypto.createHash('sha256').update(fs.readFileSync(filePath)).digest('hex'),bytes:fs.statSync(filePath).size,playable:true,file:fileName});
+  if(!params.parentVideoGenId) await releaseGpuJob(params.precreatedTrackId || trackId);
   return { trackId, fileName, filePath, durationSec: actualDuration, comfyPromptId, workflow };
 }
 
@@ -412,6 +416,7 @@ export async function startStandaloneMusicTask(dataDir: string, customTheme?: st
     } catch (err: any) {
       await query(`UPDATE music_tracks SET status = 'failed', error_message = $2 WHERE id = $1`, [trackId, err?.message || String(err)]);
     } finally {
+      await releaseGpuJob(trackId);
       ACTIVE_IN_MEMORY_JOBS.delete(trackId);
     }
   })();
@@ -462,7 +467,8 @@ export async function launchVideoGenerationPipeline(params: {
         );
       }
     })
-    .finally(() => {
+    .finally(async () => {
+      await releaseGpuJob(genId);
       ACTIVE_IN_MEMORY_JOBS.delete(genId);
     });
 
@@ -576,7 +582,7 @@ async function executeAndFinalizeH3Video(opts: {
 }): Promise<void> {
   const { genId, dataDir, scenes, totalDurationSec, workflowVariant, autoDeleteEnabled, scheduleId } = opts;
   let {musicFilePath,musicComfyPromptId}=opts;
-  const videoEp = await getReadyEndpoint('minimax_h3_ref2va');
+  const videoEp = await getReadyEndpoint('minimax_h3_ref2va',genId);
   const videoApiKey = videoEp.api_key || process.env.MINIMAX_H3_API_KEY || '';
 
   let remoteVidJobId = opts.existingRemoteVidJobId || '';
@@ -605,6 +611,7 @@ async function executeAndFinalizeH3Video(opts: {
     }
     const cj: any = await createVidResp.json();
     remoteVidJobId = cj.job_id;
+    await gpuEvent('minimax_h3_ref2va','GENERATING',{job_id:genId,remote_job_id:remoteVidJobId});
     await query("UPDATE video_generations SET stage_timings=stage_timings || jsonb_build_array(jsonb_build_object('stage','video_submitted','at',NOW())) WHERE id=$1",[genId]);
     await query(
       `UPDATE video_generations
@@ -671,7 +678,9 @@ async function executeAndFinalizeH3Video(opts: {
   fs.mkdirSync(videosDir, { recursive: true });
   const videoFileName = `${genId}.mp4`;
   const videoFilePath = path.join(videosDir, videoFileName);
-  fs.writeFileSync(videoFilePath, Buffer.from(await mp4Resp.arrayBuffer()));
+  await updateVideoStage(genId,'rendering_final','Saving rendered video to persistent storage',96);
+  await gpuEvent('minimax_h3_ref2va','SAVING',{job_id:genId});
+  fs.writeFileSync(videoFilePath, Buffer.from(await mp4Resp.arrayBuffer()),{flush:true});
 
   if (opts.musicPromise) {
     await updateVideoStage(genId,'rendering_final','Visual render complete; joining original music and validating output',95);
@@ -682,6 +691,7 @@ async function executeAndFinalizeH3Video(opts: {
   if (musicFilePath) {
     const muxed=path.join(videosDir,`${genId}_mux.mp4`);
     await execFileAsync('ffmpeg',['-y','-v','error','-i',videoFilePath,'-i',musicFilePath,'-map','0:v:0','-map','1:a:0','-c:v','copy','-c:a','aac','-b:a','192k','-af','apad','-t',String(totalDurationSec),'-movflags','+faststart',muxed],{timeout:120000});
+    const fd=fs.openSync(muxed,'r');try{fs.fsyncSync(fd);}finally{fs.closeSync(fd);}
     fs.renameSync(muxed,videoFilePath);
   }
   // Full decode test, not just an HTTP 200 or plausible filename.
@@ -754,6 +764,12 @@ async function executeAndFinalizeH3Video(opts: {
     ]
   );
 
+  const playback=await workerFetch(`https://aivideo.aivideo.blitz.cloud/media/videos/${videoFileName}`,{headers:{Range:'bytes=0-4095'}});
+  if(!playback.ok) throw new Error(`Saved video is not publicly accessible: ${playback.status}`);
+  const remotePrefix=Buffer.from(await playback.arrayBuffer()).subarray(0,4096);
+  if(!remotePrefix.equals(fs.readFileSync(videoFilePath).subarray(0,4096))) throw new Error('Persistent playback bytes mismatch');
+  await acknowledgeGpuOutput('minimax_h3_ref2va',remoteVidJobId,{sha256:crypto.createHash('sha256').update(fs.readFileSync(videoFilePath)).digest('hex'),bytes:fs.statSync(videoFilePath).size,playable:true,file:videoFileName});
+  await releaseGpuJob(genId);
   await generateSocialMetadata(genId, dataDir).catch((e) => console.error('[Post-render captions]', genId, e.message));
 
   if (scheduleId) {
@@ -784,7 +800,7 @@ export async function recoverInFlightGenerations(dataDir: string): Promise<void>
         let musicFilePath = '';
         let musicComfyPromptId = wf.music_comfyui_prompt_id || '';
 
-        if (!row.music_track_id && wf.remote_music_job_id) {
+        if (!row.music_track_id && row.music_prompt) {
           const mRes = await executeMusicGenerationOnComfyUI({
             dataDir,
             title: row.title || 'Scarlett Fusion',
@@ -838,6 +854,7 @@ export async function recoverInFlightGenerations(dataDir: string): Promise<void>
           [row.id, err?.message || String(err)]
         );
       } finally {
+        await releaseGpuJob(row.id);
         ACTIVE_IN_MEMORY_JOBS.delete(row.id);
       }
     })();
@@ -875,6 +892,7 @@ export async function recoverInFlightGenerations(dataDir: string): Promise<void>
       } catch (err: any) {
         await query(`UPDATE music_tracks SET status = 'failed', error_message = $2 WHERE id = $1`, [mrow.id, err?.message || String(err)]);
       } finally {
+        await releaseGpuJob(mrow.id);
         ACTIVE_IN_MEMORY_JOBS.delete(mrow.id);
       }
     })();

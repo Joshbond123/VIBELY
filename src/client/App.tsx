@@ -1,3 +1,4 @@
+import { GpuMonitor } from './GpuMonitor';
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import {
   Activity,
@@ -469,6 +470,7 @@ export default function App() {
                   </div>
                 </div>
 
+                <GpuMonitor />
                 {/* KPI Grid */}
                 <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
                   <div className="p-4 rounded-2xl bg-zinc-900/70 border border-zinc-800/80">

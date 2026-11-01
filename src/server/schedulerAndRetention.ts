@@ -2,6 +2,7 @@ import fs from 'fs';
 import path from 'path';
 import cron from 'node-cron';
 import { query } from './db.js';
+import { gpuLifecycleTick } from './gpuLifecycle.js';
 import { recoverSocialMetadata } from './socialMetadata.js';
 import { launchVideoGenerationPipeline, syncKaggleEndpointsAndHealth, recoverInFlightGenerations } from './comfyOrchestrator.js';
 
@@ -209,6 +210,7 @@ export async function setAutoDeletePolicy(enabled: boolean, dataDir: string) {
 export function startBackgroundDaemons(dataDir: string): void {
   if(!socialRecoveryStarted) {
     socialRecoveryStarted=true;
+    setInterval(()=>{gpuLifecycleTick().catch(e=>console.error('[GPU lifecycle]',e.message));},15000);
     setInterval(()=>{recoverSocialMetadata(dataDir).catch(e=>console.error('[Caption retry]',e.message));},120000);
   }
 
