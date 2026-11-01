@@ -7,6 +7,8 @@ COPY src ./src
 RUN npm run build && npm prune --omit=dev
 
 FROM node:22-alpine
+LABEL org.opencontainers.image.source="https://github.com/Joshbond123/VIBELY"
+LABEL org.opencontainers.image.description="VIBELY Android Remote Phone Gateway & 4h Rotation Coordinator"
 RUN apk add --no-cache ca-certificates
 WORKDIR /app
 ENV NODE_ENV=production

@@ -26,6 +26,11 @@ on:
         required: false
         default: 'false'
         type: string
+      force_gateway_redeploy:
+        description: 'Force rebuild/redeploy of the cserver.blitz.cloud gateway'
+        required: false
+        default: 'false'
+        type: string
 
 permissions:
   contents: write
@@ -33,17 +38,86 @@ permissions:
   packages: write
 
 jobs:
+  ensure-gateway:
+    name: Ensure cserver.blitz.cloud Remote Gateway
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    outputs:
+      gateway_url: ${{ steps.prov.outputs.gateway_url }}
+      blitz_app_id: ${{ steps.prov.outputs.blitz_app_id }}
+      should_boot: ${{ steps.coord.outputs.should_boot }}
+    env:
+      BLITZ_CSERVER_API_KEY: ${{ secrets.BLITZ_CSERVER_API_KEY }}
+      EMULATOR_ACCESS_TOKEN: ${{ secrets.EMULATOR_ACCESS_TOKEN }}
+      EMULATOR_GATEWAY_SECRET: ${{ secrets.EMULATOR_GATEWAY_SECRET }}
+      FORCE_GATEWAY_REDEPLOY: ${{ inputs.force_gateway_redeploy || 'false' }}
+
+    steps:
+      - name: Checkout VIBELY repository
+        uses: actions/checkout@v4
+
+      - name: Check if cserver.blitz.cloud gateway is already online
+        id: quickcheck
+        run: |
+          GW_URL="${{ secrets.EMULATOR_GATEWAY_URL }}"
+          ONLINE="false"
+          if [[ "${FORCE_GATEWAY_REDEPLOY}" != "true" && -n "$GW_URL" ]]; then
+            SVC=$(curl -fsSL --max-time 10 "${GW_URL}/api/public/health" 2>/dev/null | jq -r '.service // empty' || echo "")
+            if [[ "$SVC" == "vibely-android-remote-gateway" ]]; then
+              ONLINE="true"
+            fi
+          fi
+          echo "already_online=$ONLINE" >> "$GITHUB_OUTPUT"
+
+      - name: Build & Push Gateway Container to GHCR (initial deploy / update)
+        if: steps.quickcheck.outputs.already_online != 'true'
+        run: |
+          echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+          IMG="ghcr.io/$(echo '${{ github.repository_owner }}' | tr '[:upper:]' '[:lower:]')/vibely-android-gateway:latest"
+          docker build -t "$IMG" ./android-remote-gateway
+          docker push "$IMG"
+
+      - name: Provision / Verify cserver.blitz.cloud Remote Gateway
+        id: prov
+        run: |
+          node ./android-emulator/deploy-gateway.mjs
+
+      - name: Coordinate rotation necessity (prevent duplicate cron overlap)
+        id: coord
+        run: |
+          GW_URL="${{ steps.prov.outputs.gateway_url }}"
+          FORCE="${{ inputs.force_rotate || 'false' }}"
+          EVENT="${{ github.event_name }}"
+          SHOULD_BOOT="true"
+
+          if [[ "$EVENT" == "schedule" && "$FORCE" != "true" && -n "$GW_URL" ]]; then
+            HEALTH=$(curl -fsSL --max-time 15 "${GW_URL}/api/public/health" 2>/dev/null || echo "")
+            if [[ -n "$HEALTH" ]]; then
+              CONNECTED=$(echo "$HEALTH" | jq -r '.active_emulator_connected // false')
+              UPTIME=$(echo "$HEALTH" | jq -r '.active_uptime_sec // 0')
+              STANDBY=$(echo "$HEALTH" | jq -r '.standby_count // 0')
+              echo "Gateway health: connected=$CONNECTED uptime=${UPTIME}s standby=$STANDBY"
+              if [[ "$CONNECTED" == "true" && "$UPTIME" -lt 12600 ]] || [[ "$STANDBY" -gt 0 ]]; then
+                echo "Healthy active emulator is within 4h window (${UPTIME}s < 12600s); skipping redundant cron launch."
+                SHOULD_BOOT="false"
+              fi
+            fi
+          fi
+          echo "should_boot=$SHOULD_BOOT" >> "$GITHUB_OUTPUT"
+
   android-emulator:
     name: ReactiveCircus Android 14 (Pixel 6 · KVM)
+    needs: ensure-gateway
+    if: needs.ensure-gateway.outputs.should_boot == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 355
     env:
-      EMULATOR_GATEWAY_URL: ${{ secrets.EMULATOR_GATEWAY_URL }}
+      EMULATOR_GATEWAY_URL: ${{ needs.ensure-gateway.outputs.gateway_url || secrets.EMULATOR_GATEWAY_URL }}
       EMULATOR_GATEWAY_SECRET: ${{ secrets.EMULATOR_GATEWAY_SECRET }}
       EMULATOR_ACCESS_TOKEN: ${{ secrets.EMULATOR_ACCESS_TOKEN }}
       EMULATOR_STATE_KEY: ${{ secrets.EMULATOR_STATE_KEY }}
       BLITZ_CSERVER_API_KEY: ${{ secrets.BLITZ_CSERVER_API_KEY }}
-      BLITZ_CSERVER_APP: ${{ secrets.BLITZ_CSERVER_APP }}
+      BLITZ_CSERVER_APP: ${{ needs.ensure-gateway.outputs.blitz_app_id || secrets.BLITZ_CSERVER_APP }}
       GH_PAT: ${{ secrets.GH_PAT }}
       ROTATION_MINUTES: ${{ inputs.rotation_minutes || '240' }}
       RAPID_TEST_CYCLES: ${{ inputs.rapid_test_cycles || '0' }}
@@ -53,31 +127,7 @@ jobs:
       - name: Checkout VIBELY repository
         uses: actions/checkout@v4
 
-      - name: Coordinate rotation necessity (prevent duplicate cron overlap)
-        id: coord
-        run: |
-          FORCE="${{ inputs.force_rotate || 'false' }}"
-          EVENT="${{ github.event_name }}"
-          SHOULD_BOOT="true"
-
-          if [[ "$EVENT" == "schedule" && "$FORCE" != "true" && -n "${EMULATOR_GATEWAY_URL:-}" ]]; then
-            HEALTH=$(curl -fsSL --max-time 15 "${EMULATOR_GATEWAY_URL}/api/public/health" 2>/dev/null || echo "")
-            if [[ -n "$HEALTH" ]]; then
-              CONNECTED=$(echo "$HEALTH" | jq -r '.active_emulator_connected // false')
-              UPTIME=$(echo "$HEALTH" | jq -r '.active_uptime_sec // 0')
-              STANDBY=$(echo "$HEALTH" | jq -r '.standby_count // 0')
-              echo "Gateway health: connected=$CONNECTED uptime=${UPTIME}s standby=$STANDBY"
-              # Skip duplicate cron run if a healthy active emulator rotated < 3.5h (12600s) ago or a standby is already booting
-              if [[ "$CONNECTED" == "true" && "$UPTIME" -lt 12600 ]] || [[ "$STANDBY" -gt 0 ]]; then
-                echo "Healthy active emulator is well within 4h window (${UPTIME}s < 12600s); skipping redundant cron launch."
-                SHOULD_BOOT="false"
-              fi
-            fi
-          fi
-          echo "should_boot=$SHOULD_BOOT" >> "$GITHUB_OUTPUT"
-
       - name: Enable Linux KVM hardware virtualization
-        if: steps.coord.outputs.should_boot == 'true'
         run: |
           echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
           sudo udevadm control --reload-rules
@@ -86,18 +136,16 @@ jobs:
           ls -la /dev/kvm
 
       - name: Ensure sufficient runner SSD headroom
-        if: steps.coord.outputs.should_boot == 'true'
         run: |
           FREE_GB=$(df -BG / | awk 'NR==2 {gsub("G","",$4); print $4}')
           echo "Runner free root disk: ${FREE_GB}GB"
           if [[ "$FREE_GB" -lt 18 ]]; then
-            echo "Reclaiming unused SDK bloat (/usr/share/dotnet, /usr/local/lib/android/sdk/ndk)..."
+            echo "Reclaiming unused SDK bloat (/usr/share/dotnet, /opt/ghc)..."
             sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/share/boost || true
             df -h /
           fi
 
       - name: Cache Android 14 (API 34 google_apis x86_64) system image
-        if: steps.coord.outputs.should_boot == 'true'
         uses: actions/cache@v4
         with:
           path: |
@@ -105,13 +153,11 @@ jobs:
           key: android-sysimg-34-google_apis-x86_64-v1
 
       - name: Prepare emulator agent & lifecycle scripts
-        if: steps.coord.outputs.should_boot == 'true'
         run: |
           chmod +x ./android-emulator/pre-launch.sh ./android-emulator/state-manager.sh ./android-emulator/run-session.sh
           cd ./android-emulator && npm install --no-audit --no-fund
 
       - name: Boot Android 14 Virtual Phone & Run Coordinated Session
-        if: steps.coord.outputs.should_boot == 'true'
         uses: reactivecircus/android-emulator-runner@v2
         with:
           api-level: 34
@@ -133,7 +179,7 @@ jobs:
           script: ./android-emulator/run-session.sh
 
       - name: Automatic Failure Notification & Cold-Start Self-Healing
-        if: failure() && steps.coord.outputs.should_boot == 'true' && inputs.simulate_boot_failure != 'true'
+        if: failure() && inputs.simulate_boot_failure != 'true'
         run: |
           echo "Emulator workflow encountered a failure; notifying gateway while preserving any active session..."
           if [[ -n "${EMULATOR_GATEWAY_URL:-}" && -n "${EMULATOR_GATEWAY_SECRET:-}" ]]; then
