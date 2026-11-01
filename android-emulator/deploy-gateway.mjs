@@ -124,7 +124,8 @@ async function main() {
   console.log(`[deploy-gateway] GHCR image ${GHCR_IMAGE}:latest anonymous pullable = ${ghcrPublic}`);
 
   let appObj = existingApp;
-  let needVolumeBootstrap = !ghcrPublic;
+  // Build the checked-out GitHub revision, never leave an older volume bundle active.
+  let needVolumeBootstrap = true;
 
   if (!appObj) {
     const deployImg = ghcrPublic ? GHCR_IMAGE : 'louislam/uptime-kuma';

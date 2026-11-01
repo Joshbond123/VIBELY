@@ -37,6 +37,7 @@ let promotedAtMs = 0;
 let replacementDispatchedAt = 0;
 let replacementRetries = 0;
 let stateOpLock = Promise.resolve();
+let reconnecting = false;
 
 function log(msg) {
   console.log(`[${new Date().toISOString()}] [${SESSION_ID}] ${msg}`);
@@ -47,6 +48,12 @@ function sleep(ms) {
 }
 
 async function wakeGatewayOnBlitz() {
+  // Resume only an unreachable gateway: resuming an already running app can
+  // restart its container and disconnect every active/standby tunnel.
+  try {
+    const health = await fetch(`${GATEWAY_URL}/api/public/health`, { signal: AbortSignal.timeout(8000) });
+    if (health.ok) return;
+  } catch {}
   if (!BLITZ_API_KEY) return;
   try {
     const hdrs = {
@@ -386,14 +393,11 @@ function connectTunnelWebSocket(deviceInfo) {
       } catch {}
     });
 
-    ws.on('close', async () => {
-      wsClient = null;
-      if (!retiring && opened) {
-        log('WebSocket tunnel closed unexpectedly; reconnecting in 4s...');
-        await wakeGatewayOnBlitz();
-        await sleep(4000);
-        const di = await collectDeviceInfo().catch(() => deviceInfo);
-        connectTunnelWebSocket(di).catch((e) => log(`Reconnect error: ${e.message}`));
+    ws.on('close', () => {
+      if (wsClient === ws) wsClient = null;
+      if (!retiring && opened && !reconnecting) {
+        reconnecting = true;
+        reconnectTunnel(deviceInfo).finally(() => { reconnecting = false; });
       }
     });
 
@@ -487,6 +491,45 @@ async function checkDispatchedSuccessorHealth() {
     }
   } catch (err) {
     log(`Successor monitor warning: ${err.message}`);
+  }
+}
+
+async function reconnectTunnel(deviceInfo) {
+  let attempt = 0;
+  while (!retiring) {
+    try {
+      await sleep(Math.min(30000, 2000 * 2 ** Math.min(attempt++, 4)));
+      await wakeGatewayOnBlitz();
+      if (!wsClient || wsClient.readyState !== WebSocket.OPEN) {
+        await connectTunnelWebSocket(await collectDeviceInfo().catch(() => deviceInfo));
+      }
+      // An already promoted runner must reclaim an EMPTY gateway after restart.
+      // Never displace a successor which has already become active.
+      if (promotedAtMs) {
+        const health = await fetch(`${GATEWAY_URL}/api/public/health`, { signal: AbortSignal.timeout(10000) });
+        if (!health.ok) throw new Error(`Health ${health.status}`);
+        const state = await health.json();
+        if (state.active_session_id && state.active_session_id !== SESSION_ID) {
+          retiring = true;
+          wsClient?.close();
+          process.exit(0);
+        }
+        if (!state.active_session_id) {
+          const verified = await gatewayFetch(`/api/internal/verify-standby/${encodeURIComponent(SESSION_ID)}`, { method: 'POST' });
+          if (!verified.ok || !(await verified.json()).verified) throw new Error('Reconnect verification failed');
+          const promoted = await gatewayFetch('/api/internal/handover', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ new_session_id: SESSION_ID, reason: 'gateway_restart_recovery' }),
+          });
+          if (!promoted.ok || !(await promoted.json()).ok) throw new Error('Reconnect promotion failed');
+        }
+      }
+      if (wsClient?.readyState !== WebSocket.OPEN) throw new Error('Tunnel closed during recovery');
+      log('Tunnel recovery complete.');
+      return;
+    } catch (err) {
+      log(`Tunnel recovery attempt ${attempt} failed: ${err.message}; retrying indefinitely.`);
+    }
   }
 }
 

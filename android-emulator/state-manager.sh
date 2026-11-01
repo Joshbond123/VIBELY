@@ -46,6 +46,9 @@ backup_state() {
   echo -n "$AID" > "$WORK_TMP/stage/identity/android_id.txt"
   adb exec-out "cat /data/system/users/0/settings_ssaid.xml 2>/dev/null || true" > "$WORK_TMP/stage/identity/settings_ssaid.xml" || true
 
+  # Record foreground component, not just installed data. No forced HOME on reconnect.
+  adb shell dumpsys activity activities | tr -d '\r' | sed -n 's/.*mResumedActivity:.* [^ ]* \([^ ]*\/[^ ]*\) .*/\1/p' | head -1 > "$WORK_TMP/stage/settings/foreground.txt" || true
+
   # 2. Emulator & Android settings snapshot
   adb shell settings list system | tr -d '\r' > "$WORK_TMP/stage/settings/system.txt" || true
   adb shell settings list secure | tr -d '\r' > "$WORK_TMP/stage/settings/secure.txt" || true
@@ -267,6 +270,13 @@ restore_state() {
     fi
   done
 
+  # Resume last foreground Activity; app lifecycle determines its exact in-app view.
+  if [[ -s "$WORK_TMP/extract/settings/foreground.txt" ]]; then
+    component=$(head -1 "$WORK_TMP/extract/settings/foreground.txt")
+    if [[ "$component" =~ ^[a-zA-Z0-9_.]+/[a-zA-Z0-9_.$]+$ ]]; then
+      adb shell am start -W -n "$component" >/dev/null 2>&1 || true
+    fi
+  fi
   echo "[state-manager] State restoration completed."
 }
 

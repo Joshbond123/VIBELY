@@ -120,25 +120,10 @@ function parseCookies(cookieHeader?: string): Record<string, string> {
   return out;
 }
 
-function isUserAuthenticated(req: http.IncomingMessage | Request): boolean {
-  if (!ACCESS_TOKEN) return false;
-  const auth = req.headers['authorization'] || '';
-  if (typeof auth === 'string' && auth.startsWith('Bearer ')) {
-    const provided = auth.slice(7).trim();
-    if (provided && safeCompare(provided, ACCESS_TOKEN)) return true;
-  }
-  const headerTok = req.headers['x-emulator-token'];
-  if (typeof headerTok === 'string' && safeCompare(headerTok.trim(), ACCESS_TOKEN)) return true;
-
-  const urlObj = new URL(req.url || '/', 'http://localhost');
-  const qTok = urlObj.searchParams.get('token');
-  if (qTok && safeCompare(qTok.trim(), ACCESS_TOKEN)) return true;
-
-  const cookies = parseCookies(req.headers.cookie);
-  if (cookies.emu_auth && safeCompare(cookies.emu_auth, signCookieValue(ACCESS_TOKEN))) {
-    return true;
-  }
-  return false;
+// Public shared phone: intentionally no user authentication. Internal agent
+// endpoints still require EMULATOR_GATEWAY_SECRET.
+function isUserAuthenticated(_req: http.IncomingMessage | Request): boolean {
+  return true;
 }
 
 function isGatewayAgentAuthenticated(req: http.IncomingMessage | Request): boolean {
@@ -805,6 +790,21 @@ function renderWebConsoleHtml(authenticated: boolean): string {
     table { width: 100%; border-collapse: collapse; font-size: 12px; }
     th, td { text-align: left; padding: 7px 8px; border-bottom: 1px solid #1e293b; color: #cbd5e1; }
     th { color: #94a3b8; font-weight: 600; }
+    /* Live Android framebuffer is the primary surface; tools are opt-in. */
+    html, body { width:100%; height:100%; overflow:hidden; background:#000; }
+    body { min-height:100dvh; }
+    body > header { position:fixed; z-index:20; top:8px; right:8px; padding:6px; border:0; background:rgba(15,23,42,.72); border-radius:12px; }
+    header .brand { display:none; }
+    main { display:block; position:fixed; inset:0; padding:0; max-width:none; margin:0; }
+    .phone-wrap { height:100%; gap:0; justify-content:center; }
+    .phone-frame { display:flex; justify-content:center; align-items:center; width:100%; height:calc(100dvh - 44px - env(safe-area-inset-bottom)); border:0; padding:0; border-radius:0; box-shadow:none; background:#000; }
+    canvas { width:auto; height:100%; max-width:100vw; max-height:100%; aspect-ratio:9 / 20; border-radius:0; object-fit:contain; }
+    .nav-bar { width:min(100%,540px); height:44px; padding:4px; flex-shrink:0; }
+    .phone-wrap > .row { display:none; }
+    main > div:not(.phone-wrap) { display:none !important; }
+    body.tools-open main > div:not(.phone-wrap) { display:flex !important; position:fixed; right:0; top:55px; bottom:50px; width:min(520px,100vw); overflow:auto; z-index:30; padding:12px; background:#090d16; }
+    body.tools-open .phone-wrap > .row { display:flex; position:fixed; bottom:48px; z-index:35; background:#111827; padding:8px; }
+    @media (orientation:landscape) { canvas { max-width:calc((100dvh - 44px) * .45); } }
   </style>
 </head>
 <body>
@@ -817,7 +817,8 @@ function renderWebConsoleHtml(authenticated: boolean): string {
     </div>
     <div style="display:flex;gap:8px;align-items:center;">
       <button class="btn primary" onclick="triggerCheckpoint()">Save State Now</button>
-      <button class="btn" onclick="logout()">Logout</button>
+      <button class="btn" id="toolsToggle" onclick="document.body.classList.toggle('tools-open')">Tools</button>
+      <button class="btn" id="fullscreenToggle" onclick="toggleFullscreen()">Full screen</button>
     </div>
   </header>
 
@@ -887,6 +888,12 @@ function renderWebConsoleHtml(authenticated: boolean): string {
   </main>
 
   <script>
+    async function toggleFullscreen() {
+      try {
+        if (document.fullscreenElement) await document.exitFullscreen();
+        else if (document.documentElement.requestFullscreen) await document.documentElement.requestFullscreen();
+      } catch (e) { console.warn('Browser fullscreen unavailable; viewport layout remains active.'); }
+    }
     const canvas = document.getElementById('screen');
     const ctx = canvas.getContext('2d');
     let devWidth = 1080, devHeight = 2400;
@@ -948,6 +955,7 @@ function renderWebConsoleHtml(authenticated: boolean): string {
       pointerDown = { ...mapCoords(e), t: Date.now() };
     });
 
+    canvas.addEventListener('pointercancel', () => { pointerDown = null; });
     canvas.addEventListener('pointerup', async (e) => {
       if (!pointerDown) return;
       const up = mapCoords(e);
