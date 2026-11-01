@@ -168,6 +168,9 @@ export async function probeWorkerHealth(serviceId: string, baseUrl: string): Pro
     if (!resp.ok) return false;
     const h: any = await resp.json();
     if (!h?.ok) return false;
+    const [registered]=await query<any>('SELECT extra_meta FROM model_endpoints WHERE service_id=$1',[serviceId]);
+    if(registered?.extra_meta?.worker_version==='critical-v2' && h.worker_version!=='critical-v2') return false;
+    if(Number(registered?.extra_meta?.worker_started_at || 0)>Number(h.worker_started_at || 0)) return false;
 
     await query(
       `UPDATE model_endpoints
@@ -177,7 +180,7 @@ export async function probeWorkerHealth(serviceId: string, baseUrl: string): Pro
            dataset_cached = $5,
            storage_sources = $6::jsonb,
            gpu_name = $7,
-           extra_meta = $8::jsonb,
+           extra_meta = model_endpoints.extra_meta || $8::jsonb,
            last_heartbeat_at = NOW(),
            updated_at = NOW()
        WHERE service_id = $1`,
@@ -189,7 +192,7 @@ export async function probeWorkerHealth(serviceId: string, baseUrl: string): Pro
         Boolean(h.dataset_cached),
         JSON.stringify(h.storage_sources || {}),
         String(h.gpu || ''),
-        JSON.stringify({ stage: h.stage, uptime_sec: h.uptime_sec, character_refs: h.character_refs || [], last_error: h.last_error || '' }),
+        JSON.stringify({ worker_version: h.worker_version || null, worker_started_at:h.worker_started_at || 0, stage: h.stage, uptime_sec: h.uptime_sec, character_refs: h.character_refs || [], last_error: h.last_error || '' }),
       ]
     );
     return true;

@@ -625,6 +625,7 @@ def start_cloudflared_and_heartbeat():
             return
         payload_dict = {
             "worker_version":"critical-v2",
+            "worker_started_at":STATE["started_at"],
             "service": "minimax_music_3",
             "username": KAGGLE_USERNAME,
             "model_name": "MiniMax Music 3 Q4_0 GGUF",
@@ -683,6 +684,7 @@ def main():
         return {
             "ok": True,
             "worker_version":"critical-v2",
+            "worker_started_at":STATE["started_at"],
             "service": "minimax_music_3",
             "username": KAGGLE_USERNAME,
             "model": "MiniMax Music 3 Q4_0 GGUF",

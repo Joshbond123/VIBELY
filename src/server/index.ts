@@ -148,6 +148,8 @@ app.post('/api/models/register', async (req, res) => {
       storage_sources,
       character_refs,
       gpu_name,
+      worker_version,
+      worker_started_at,
     } = req.body || {};
 
     if (!service || !endpoint_url) {
@@ -169,7 +171,8 @@ app.post('/api/models/register', async (req, res) => {
          gpu_name = EXCLUDED.gpu_name,
          extra_meta = EXCLUDED.extra_meta,
          last_heartbeat_at = NOW(),
-         updated_at = NOW()`,
+         updated_at = NOW()
+       WHERE COALESCE((EXCLUDED.extra_meta->>'worker_started_at')::double precision,0) >= COALESCE((model_endpoints.extra_meta->>'worker_started_at')::double precision,0)`,
       [
         service,
         username || '',
@@ -181,7 +184,7 @@ app.post('/api/models/register', async (req, res) => {
         Boolean(dataset_cached),
         JSON.stringify(storage_sources || {}),
         String(gpu_name || ''),
-        JSON.stringify({ character_refs: character_refs || [] }),
+        JSON.stringify({ character_refs: character_refs || [], worker_version: worker_version || null, worker_started_at:Number(worker_started_at || 0) }),
       ]
     );
 

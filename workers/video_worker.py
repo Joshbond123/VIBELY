@@ -804,6 +804,7 @@ def start_cloudflared_and_heartbeat():
             return
         payload_dict = {
             "worker_version":"critical-v2",
+            "worker_started_at":STATE["started_at"],
             "service": "minimax_h3_ref2va",
             "username": KAGGLE_USERNAME,
             "model_name": "MiniMax H3 Ref2VA",
@@ -826,18 +827,8 @@ def start_cloudflared_and_heartbeat():
                 method="POST",
             )
             urllib.request.urlopen(req, timeout=8).read()
-        except urllib.error.HTTPError as he:
-            if he.code in (502, 503, 504):
-                try:
-                    _mcp_hdr = {"Authorization": "Bearer REMOVED_HOSTING_CREDENTIAL", "Content-Type": "application/json", "Accept": "application/json, text/event-stream"}
-                    with urllib.request.urlopen(urllib.request.Request("https://mcp.blitz.cloud/mcp", data=json.dumps({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"protocolVersion": "2024-11-05", "capabilities": {}, "clientInfo": {"name": "vibely-hb", "version": "1.0"}}}).encode(), headers=_mcp_hdr, method="POST"), timeout=10) as _ir:
-                        _sid = _ir.headers.get("Mcp-Session-Id")
-                    if _sid:
-                        _mcp_hdr["Mcp-Session-Id"] = _sid
-                    urllib.request.urlopen(urllib.request.Request("https://mcp.blitz.cloud/mcp", data=json.dumps({"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {"name": "apps_resume", "arguments": {"app": "66184937-3da8-4df4-88af-eb475f889a43"}}}).encode(), headers=_mcp_hdr, method="POST"), timeout=15).read()
-                except Exception:
-                    pass
         except Exception:
+            # Workers report health; they must never resume/restart hosting apps.
             pass
 
     def _hb_loop():
@@ -872,6 +863,7 @@ def main():
         return {
             "ok": True,
             "worker_version":"critical-v2",
+            "worker_started_at":STATE["started_at"],
             "service": "minimax_h3_ref2va",
             "username": KAGGLE_USERNAME,
             "model": "MiniMax H3 Ref2VA",
