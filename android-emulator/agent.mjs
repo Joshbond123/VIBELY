@@ -238,16 +238,32 @@ async function verifyLocalEmulatorReadiness() {
   await sleep(1500);
   await execFileAsync('adb', ['wait-for-device'], { timeout: 15000 });
 
-  // Wake screen & keep awake while plugged in so remote screen is always bright and responsive
-  await adbShell('svc power stayon true; input keyevent 224; wm dismiss-keyguard || true');
+  // Wake screen & ensure Wi-Fi / mobile data are active inside the Android guest
+  await adbShell('svc power stayon true; svc wifi enable; svc data enable; input keyevent 224; wm dismiss-keyguard || true');
 
-  // Verify internet connectivity inside Android guest OS
-  const netCheck = await adbShell(
-    '(curl -fsSI --max-time 12 https://connectivitycheck.gstatic.com/generate_204 || curl -fsSI --max-time 12 https://example.com || ping -c 2 8.8.8.8) && echo NET_OK=1',
-    25000
-  );
-  if (!netCheck.stdout.includes('NET_OK=1')) {
-    throw new Error(`Android guest internet check failed: ${netCheck.stdout} ${netCheck.stderr}`);
+  // Verify real DNS + outbound TCP/HTTP internet connectivity inside Android guest OS
+  // (Note: Azure SDN drops raw ICMP ping & AOSP/google_apis ships toybox nc rather than curl)
+  let netVerified = false;
+  let lastNetOut = '';
+  for (let attempt = 1; attempt <= 10; attempt++) {
+    try {
+      const netCheck = await adbShell(
+        "(printf 'HEAD /generate_204 HTTP/1.1\\r\\nHost: connectivitycheck.gstatic.com\\r\\nConnection: close\\r\\n\\r\\n' | toybox nc -w 8 connectivitycheck.gstatic.com 80 || " +
+          "printf 'HEAD / HTTP/1.1\\r\\nHost: example.com\\r\\nConnection: close\\r\\n\\r\\n' | toybox nc -w 8 example.com 80)",
+        20000
+      );
+      lastNetOut = `${netCheck.stdout} ${netCheck.stderr}`.trim();
+      if (/HTTP\/1\.[01]\s+(204|200|301|302)/i.test(netCheck.stdout)) {
+        netVerified = true;
+        break;
+      }
+    } catch (e) {
+      lastNetOut = e.message;
+    }
+    await sleep(3000);
+  }
+  if (!netVerified) {
+    throw new Error(`Android guest internet check failed: ${lastNetOut}`);
   }
 
   const frame = await captureJpegFrame();
