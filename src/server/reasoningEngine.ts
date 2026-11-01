@@ -70,11 +70,11 @@ export interface FullProductionPlan {
 }
 
 const NVIDIA_ENDPOINT = 'https://integrate.api.nvidia.com/v1/chat/completions';
-const REASONING_MODELS = [
-  'nvidia/nemotron-3.5-super-vl-120b-a12b',
-  'nvidia/nemotron-3-ultra-550b-a55b',
-  'nvidia/nemotron-3-nano-omni-30b-a3b-reasoning',
-  'meta/llama-3.2-90b-vision-instruct',
+const REASONING_MODELS: Array<{ id: string; disableThinkingTokenBudget: boolean }> = [
+  { id: 'nvidia/nemotron-3.5-super-vl-120b-a12b', disableThinkingTokenBudget: true },
+  { id: 'nvidia/nemotron-3-nano-omni-30b-a3b-reasoning', disableThinkingTokenBudget: true },
+  { id: 'nvidia/nemotron-3-ultra-550b-a55b', disableThinkingTokenBudget: false },
+  { id: 'meta/llama-3.2-90b-vision-instruct', disableThinkingTokenBudget: false },
 ];
 
 const CURATED_LOCATIONS = [
@@ -101,25 +101,30 @@ async function callNvidiaReasoningJSON(systemPrompt: string, userPrompt: string,
   }
 
   let lastErr = '';
-  for (const model of REASONING_MODELS) {
+  for (const entry of REASONING_MODELS) {
+    const model = entry.id;
     try {
       const controller = new AbortController();
-      const timer = setTimeout(() => controller.abort(), 75_000);
+      const timer = setTimeout(() => controller.abort(), 90_000);
+      const reqBody: Record<string, any> = {
+        model,
+        messages: [
+          { role: 'system', content: systemPrompt },
+          { role: 'user', content: userPrompt },
+        ],
+        temperature,
+        max_tokens: 6144,
+      };
+      if (entry.disableThinkingTokenBudget) {
+        reqBody.chat_template_kwargs = { enable_thinking: false };
+      }
       const resp = await fetch(NVIDIA_ENDPOINT, {
         method: 'POST',
         headers: {
           Authorization: `Bearer ${apiKey}`,
           'Content-Type': 'application/json',
         },
-        body: JSON.stringify({
-          model,
-          messages: [
-            { role: 'system', content: systemPrompt },
-            { role: 'user', content: userPrompt },
-          ],
-          temperature,
-          max_tokens: 6144,
-        }),
+        body: JSON.stringify(reqBody),
         signal: controller.signal,
       });
       clearTimeout(timer);
