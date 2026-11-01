@@ -1,0 +1,158 @@
+name: Android Virtual Phone (4h Zero-Downtime Rotation)
+
+on:
+  schedule:
+    # Automatic 4-hour rotation & watchdog recovery schedule
+    - cron: '0 */4 * * *'
+  workflow_dispatch:
+    inputs:
+      rotation_minutes:
+        description: 'Minutes to keep this emulator active before dispatching successor (default: 240 = 4 hours)'
+        required: false
+        default: '240'
+        type: string
+      rapid_test_cycles:
+        description: 'Remaining rapid rotation verification cycles before settling into 240m mode'
+        required: false
+        default: '0'
+        type: string
+      force_rotate:
+        description: 'Boot replacement even if an active emulator rotated recently'
+        required: false
+        default: 'true'
+        type: string
+      simulate_boot_failure:
+        description: 'Simulate candidate initialization failure to test zero-impact active preservation'
+        required: false
+        default: 'false'
+        type: string
+
+permissions:
+  contents: write
+  actions: write
+  packages: write
+
+jobs:
+  android-emulator:
+    name: ReactiveCircus Android 14 (Pixel 6 · KVM)
+    runs-on: ubuntu-latest
+    timeout-minutes: 355
+    env:
+      EMULATOR_GATEWAY_URL: ${{ secrets.EMULATOR_GATEWAY_URL }}
+      EMULATOR_GATEWAY_SECRET: ${{ secrets.EMULATOR_GATEWAY_SECRET }}
+      EMULATOR_ACCESS_TOKEN: ${{ secrets.EMULATOR_ACCESS_TOKEN }}
+      EMULATOR_STATE_KEY: ${{ secrets.EMULATOR_STATE_KEY }}
+      BLITZ_CSERVER_API_KEY: ${{ secrets.BLITZ_CSERVER_API_KEY }}
+      BLITZ_CSERVER_APP: ${{ secrets.BLITZ_CSERVER_APP }}
+      GH_PAT: ${{ secrets.GH_PAT }}
+      ROTATION_MINUTES: ${{ inputs.rotation_minutes || '240' }}
+      RAPID_TEST_CYCLES: ${{ inputs.rapid_test_cycles || '0' }}
+      SIMULATE_BOOT_FAILURE: ${{ inputs.simulate_boot_failure || 'false' }}
+
+    steps:
+      - name: Checkout VIBELY repository
+        uses: actions/checkout@v4
+
+      - name: Coordinate rotation necessity (prevent duplicate cron overlap)
+        id: coord
+        run: |
+          FORCE="${{ inputs.force_rotate || 'false' }}"
+          EVENT="${{ github.event_name }}"
+          SHOULD_BOOT="true"
+
+          if [[ "$EVENT" == "schedule" && "$FORCE" != "true" && -n "${EMULATOR_GATEWAY_URL:-}" ]]; then
+            HEALTH=$(curl -fsSL --max-time 15 "${EMULATOR_GATEWAY_URL}/api/public/health" 2>/dev/null || echo "")
+            if [[ -n "$HEALTH" ]]; then
+              CONNECTED=$(echo "$HEALTH" | jq -r '.active_emulator_connected // false')
+              UPTIME=$(echo "$HEALTH" | jq -r '.active_uptime_sec // 0')
+              STANDBY=$(echo "$HEALTH" | jq -r '.standby_count // 0')
+              echo "Gateway health: connected=$CONNECTED uptime=${UPTIME}s standby=$STANDBY"
+              # Skip duplicate cron run if a healthy active emulator rotated < 3.5h (12600s) ago or a standby is already booting
+              if [[ "$CONNECTED" == "true" && "$UPTIME" -lt 12600 ]] || [[ "$STANDBY" -gt 0 ]]; then
+                echo "Healthy active emulator is well within 4h window (${UPTIME}s < 12600s); skipping redundant cron launch."
+                SHOULD_BOOT="false"
+              fi
+            fi
+          fi
+          echo "should_boot=$SHOULD_BOOT" >> "$GITHUB_OUTPUT"
+
+      - name: Enable Linux KVM hardware virtualization
+        if: steps.coord.outputs.should_boot == 'true'
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+          sudo chmod 666 /dev/kvm || true
+          ls -la /dev/kvm
+
+      - name: Ensure sufficient runner SSD headroom
+        if: steps.coord.outputs.should_boot == 'true'
+        run: |
+          FREE_GB=$(df -BG / | awk 'NR==2 {gsub("G","",$4); print $4}')
+          echo "Runner free root disk: ${FREE_GB}GB"
+          if [[ "$FREE_GB" -lt 18 ]]; then
+            echo "Reclaiming unused SDK bloat (/usr/share/dotnet, /usr/local/lib/android/sdk/ndk)..."
+            sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/share/boost || true
+            df -h /
+          fi
+
+      - name: Cache Android 14 (API 34 google_apis x86_64) system image
+        if: steps.coord.outputs.should_boot == 'true'
+        uses: actions/cache@v4
+        with:
+          path: |
+            /usr/local/lib/android/sdk/system-images/android-34/google_apis/x86_64
+          key: android-sysimg-34-google_apis-x86_64-v1
+
+      - name: Prepare emulator agent & lifecycle scripts
+        if: steps.coord.outputs.should_boot == 'true'
+        run: |
+          chmod +x ./android-emulator/pre-launch.sh ./android-emulator/state-manager.sh ./android-emulator/run-session.sh
+          cd ./android-emulator && npm install --no-audit --no-fund
+
+      - name: Boot Android 14 Virtual Phone & Run Coordinated Session
+        if: steps.coord.outputs.should_boot == 'true'
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 34
+          target: google_apis
+          arch: x86_64
+          profile: pixel_6
+          cores: 4
+          ram-size: 4096M
+          heap-size: 512M
+          disk-size: 6144M
+          sdcard-path-or-size: 1024M
+          avd-name: vibely_pixel6_api34
+          force-avd-creation: true
+          emulator-boot-timeout: 300
+          disable-animations: true
+          enable-hw-keyboard: true
+          emulator-options: -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back emulated -camera-front emulated -no-snapshot
+          pre-emulator-launch-script: ./android-emulator/pre-launch.sh
+          script: ./android-emulator/run-session.sh
+
+      - name: Automatic Failure Notification & Cold-Start Self-Healing
+        if: failure() && steps.coord.outputs.should_boot == 'true' && inputs.simulate_boot_failure != 'true'
+        run: |
+          echo "Emulator workflow encountered a failure; notifying gateway while preserving any active session..."
+          if [[ -n "${EMULATOR_GATEWAY_URL:-}" && -n "${EMULATOR_GATEWAY_SECRET:-}" ]]; then
+            curl -fsSL --max-time 15 -X POST \
+              -H "Authorization: Bearer ${EMULATOR_GATEWAY_SECRET}" \
+              -H "Content-Type: application/json" \
+              -d "{\"session_id\":\"run_${GITHUB_RUN_ID}\",\"github_run_id\":\"${GITHUB_RUN_ID}\",\"reason\":\"Workflow step failure prior to retirement\"}" \
+              "${EMULATOR_GATEWAY_URL}/api/internal/report-failed-candidate" || true
+
+            HEALTH=$(curl -fsSL --max-time 15 "${EMULATOR_GATEWAY_URL}/api/public/health" 2>/dev/null || echo "")
+            CONNECTED=$(echo "$HEALTH" | jq -r '.active_emulator_connected // false')
+            if [[ "$CONNECTED" != "true" && -n "${GH_PAT:-}" && "${GITHUB_RUN_ATTEMPT}" == "1" ]]; then
+              echo "No active emulator currently online; scheduling automatic recovery run in 15s..."
+              sleep 15
+              curl -fsSL -X POST \
+                -H "Authorization: Bearer ${GH_PAT}" \
+                -H "Accept: application/vnd.github+json" \
+                -H "Content-Type: application/json" \
+                -d '{"ref":"main","inputs":{"rotation_minutes":"240","rapid_test_cycles":"0","force_rotate":"true","simulate_boot_failure":"false"}}' \
+                "https://api.github.com/repos/${GITHUB_REPOSITORY}/actions/workflows/android-emulator.yml/dispatches" || true
+            fi
+          fi

@@ -216,10 +216,11 @@ export async function executeMusicGenerationOnComfyUI(params: {
   similarityScore: number;
   parentVideoGenId?: string;
   existingRemoteJobId?: string;
+  precreatedTrackId?: string;
 }): Promise<{ trackId: string; fileName: string; filePath: string; durationSec: number; comfyPromptId: string; workflow: any }> {
   const ep = await getReadyEndpoint('minimax_music_3');
   const apiKey = ep.api_key || process.env.MINIMAX_MUSIC3_API_KEY || '';
-  const trackId = 'trk_' + crypto.randomUUID().slice(0, 12);
+  const trackId = params.precreatedTrackId || ('trk_' + crypto.randomUUID().slice(0, 12));
 
   let remoteJobId = params.existingRemoteJobId || '';
   if (!remoteJobId) {
@@ -248,6 +249,12 @@ export async function executeMusicGenerationOnComfyUI(params: {
       await query(
         `UPDATE video_generations SET comfyui_workflow = jsonb_set(COALESCE(comfyui_workflow, '{}'::jsonb), '{remote_music_job_id}', to_jsonb($2::text), true) WHERE id = $1`,
         [params.parentVideoGenId, remoteJobId]
+      );
+    }
+    if (params.precreatedTrackId) {
+      await query(
+        `UPDATE music_tracks SET comfyui_workflow = jsonb_set(COALESCE(comfyui_workflow, '{}'::jsonb), '{remote_music_job_id}', to_jsonb($2::text), true) WHERE id = $1`,
+        [params.precreatedTrackId, remoteJobId]
       );
     }
   }
@@ -292,48 +299,98 @@ export async function executeMusicGenerationOnComfyUI(params: {
   const comfyPromptId = String(completedJob.comfyui_prompt_id || '');
   const workflow = completedJob.workflow_used || {};
 
-  await query(
-    `INSERT INTO music_tracks
-      (id, title, genre, bpm, musical_key, vocal_hook, caption_prompt, lyrics, song_structure, audio_characteristics, comfyui_prompt_id, comfyui_workflow, file_name, duration_sec, similarity_score, status)
-     VALUES ($1,$2,'Amapiano + Afrobeats Fusion',$3,$4,$5,$6,$7,$8::jsonb,$9::jsonb,$10,$11::jsonb,$12,$13,$14,'completed')`,
-    [
-      trackId,
-      params.title,
-      params.bpm,
-      params.musicalKey,
-      params.vocalHook,
-      params.captionPrompt,
-      params.lyrics,
-      JSON.stringify(params.songStructure),
-      JSON.stringify(params.audioCharacteristics || {}),
-      comfyPromptId,
-      JSON.stringify(workflow),
-      fileName,
-      actualDuration,
-      params.similarityScore,
-    ]
-  );
+  if (params.precreatedTrackId) {
+    await query(
+      `UPDATE music_tracks
+       SET title = $2, bpm = $3, musical_key = $4, vocal_hook = $5, caption_prompt = $6, lyrics = $7,
+           song_structure = $8::jsonb, audio_characteristics = $9::jsonb, comfyui_prompt_id = $10,
+           comfyui_workflow = $11::jsonb, file_name = $12, duration_sec = $13, similarity_score = $14,
+           status = 'completed', error_message = NULL
+       WHERE id = $1`,
+      [
+        trackId,
+        params.title,
+        params.bpm,
+        params.musicalKey,
+        params.vocalHook,
+        params.captionPrompt,
+        params.lyrics,
+        JSON.stringify(params.songStructure),
+        JSON.stringify(params.audioCharacteristics || {}),
+        comfyPromptId,
+        JSON.stringify(workflow),
+        fileName,
+        actualDuration,
+        params.similarityScore,
+      ]
+    );
+  } else {
+    await query(
+      `INSERT INTO music_tracks
+        (id, title, genre, bpm, musical_key, vocal_hook, caption_prompt, lyrics, song_structure, audio_characteristics, comfyui_prompt_id, comfyui_workflow, file_name, duration_sec, similarity_score, status)
+       VALUES ($1,$2,'Amapiano + Afrobeats Fusion',$3,$4,$5,$6,$7,$8::jsonb,$9::jsonb,$10,$11::jsonb,$12,$13,$14,'completed')`,
+      [
+        trackId,
+        params.title,
+        params.bpm,
+        params.musicalKey,
+        params.vocalHook,
+        params.captionPrompt,
+        params.lyrics,
+        JSON.stringify(params.songStructure),
+        JSON.stringify(params.audioCharacteristics || {}),
+        comfyPromptId,
+        JSON.stringify(workflow),
+        fileName,
+        actualDuration,
+        params.similarityScore,
+      ]
+    );
+  }
 
   return { trackId, fileName, filePath, durationSec: actualDuration, comfyPromptId, workflow };
 }
 
 export async function startStandaloneMusicTask(dataDir: string, customTheme?: string) {
-  const plan = await generateStandaloneMusicPlan(customTheme);
-  const targetDur = 22 + crypto.randomInt(0, 4);
-  const res = await executeMusicGenerationOnComfyUI({
-    dataDir,
-    title: plan.title,
-    bpm: plan.bpm,
-    musicalKey: plan.musical_key,
-    vocalHook: plan.vocal_hook,
-    songStructure: plan.song_structure,
-    captionPrompt: plan.caption_prompt,
-    lyrics: plan.lyrics,
-    audioCharacteristics: plan.audio_characteristics,
-    durationSec: targetDur,
-    similarityScore: plan.similarity_score,
-  });
-  const rows = await query(`SELECT * FROM music_tracks WHERE id = $1`, [res.trackId]);
+  const trackId = 'trk_' + crypto.randomUUID().slice(0, 12);
+  await query(
+    `INSERT INTO music_tracks
+      (id, title, genre, bpm, musical_key, vocal_hook, caption_prompt, lyrics, duration_sec, status)
+     VALUES ($1,$2,'Amapiano + Afrobeats Fusion',114,'F minor','','Synthesizing concept via NVIDIA Nemotron...','Generating lyrics...',24,'generating')`,
+    [trackId, customTheme ? String(customTheme).slice(0, 60) : 'Original Fusion Track (Generating...)']
+  );
+
+  ACTIVE_IN_MEMORY_JOBS.add(trackId);
+  (async () => {
+    try {
+      const plan = await generateStandaloneMusicPlan(customTheme);
+      const targetDur = 22 + crypto.randomInt(0, 4);
+      await query(
+        `UPDATE music_tracks SET title = $2, bpm = $3, musical_key = $4, vocal_hook = $5, caption_prompt = $6, lyrics = $7, song_structure = $8::jsonb, audio_characteristics = $9::jsonb, similarity_score = $10 WHERE id = $1`,
+        [trackId, plan.title, plan.bpm, plan.musical_key, plan.vocal_hook, plan.caption_prompt, plan.lyrics, JSON.stringify(plan.song_structure), JSON.stringify(plan.audio_characteristics || {}), plan.similarity_score]
+      );
+      await executeMusicGenerationOnComfyUI({
+        dataDir,
+        title: plan.title,
+        bpm: plan.bpm,
+        musicalKey: plan.musical_key,
+        vocalHook: plan.vocal_hook,
+        songStructure: plan.song_structure,
+        captionPrompt: plan.caption_prompt,
+        lyrics: plan.lyrics,
+        audioCharacteristics: plan.audio_characteristics,
+        durationSec: targetDur,
+        similarityScore: plan.similarity_score,
+        precreatedTrackId: trackId,
+      });
+    } catch (err: any) {
+      await query(`UPDATE music_tracks SET status = 'failed', error_message = $2 WHERE id = $1`, [trackId, err?.message || String(err)]);
+    } finally {
+      ACTIVE_IN_MEMORY_JOBS.delete(trackId);
+    }
+  })();
+
+  const rows = await query(`SELECT * FROM music_tracks WHERE id = $1`, [trackId]);
   return rows[0];
 }
 
@@ -512,7 +569,7 @@ async function executeAndFinalizeH3Video(opts: {
         diffusion_height: 448,
         width: 720,
         height: 1280,
-        steps: 4,
+        steps: 3,
       }),
     });
 
@@ -730,6 +787,40 @@ export async function recoverInFlightGenerations(dataDir: string): Promise<void>
         );
       } finally {
         ACTIVE_IN_MEMORY_JOBS.delete(row.id);
+      }
+    })();
+  }
+
+  // Also recover any in-flight standalone music tracks
+  const inflightMusic = await query<any>(
+    `SELECT * FROM music_tracks WHERE status = 'generating' AND created_at >= NOW() - INTERVAL '30 minutes'`
+  );
+  for (const mrow of inflightMusic) {
+    if (ACTIVE_IN_MEMORY_JOBS.has(mrow.id)) continue;
+    const rjid = mrow.comfyui_workflow?.remote_music_job_id;
+    if (!rjid) continue;
+    ACTIVE_IN_MEMORY_JOBS.add(mrow.id);
+    (async () => {
+      try {
+        await executeMusicGenerationOnComfyUI({
+          dataDir,
+          title: mrow.title || 'Recovered Track',
+          bpm: Number(mrow.bpm || 114),
+          musicalKey: mrow.musical_key || 'F minor',
+          vocalHook: mrow.vocal_hook || '',
+          songStructure: Array.isArray(mrow.song_structure) ? mrow.song_structure : [],
+          captionPrompt: mrow.caption_prompt || '',
+          lyrics: mrow.lyrics || '',
+          audioCharacteristics: mrow.audio_characteristics || {},
+          durationSec: Number(mrow.duration_sec || 24),
+          similarityScore: Number(mrow.similarity_score || 0),
+          existingRemoteJobId: rjid,
+          precreatedTrackId: mrow.id,
+        });
+      } catch (err: any) {
+        await query(`UPDATE music_tracks SET status = 'failed', error_message = $2 WHERE id = $1`, [mrow.id, err?.message || String(err)]);
+      } finally {
+        ACTIVE_IN_MEMORY_JOBS.delete(mrow.id);
       }
     })();
   }
