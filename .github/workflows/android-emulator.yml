@@ -1,4 +1,4 @@
-name: Android Virtual Phone (4h Zero-Downtime Rotation)
+name: Android Live Phone — deployment and session rotation
 
 on:
   schedule:
@@ -6,6 +6,10 @@ on:
     - cron: '0 */4 * * *'
   workflow_dispatch:
     inputs:
+      gateway_only:
+        description: 'Deploy gateway UI/transport without replacing the current Android OS session'
+        type: boolean
+        default: false
       rotation_minutes:
         description: 'Minutes to keep this emulator active before dispatching successor (default: 240 = 4 hours)'
         required: false
@@ -108,7 +112,7 @@ jobs:
   android-emulator:
     name: ReactiveCircus Android 14 (Pixel 6 · KVM)
     needs: ensure-gateway
-    if: needs.ensure-gateway.outputs.should_boot == 'true'
+    if: needs.ensure-gateway.outputs.should_boot == 'true' && inputs.gateway_only != true
     runs-on: ubuntu-latest
     timeout-minutes: 355
     env:

@@ -46,6 +46,7 @@ interface AgentSession {
   promotedAt: number | null;
   lastHeartbeatAt: number;
   videoConfig?: Buffer | null;
+  videoGop?: Buffer[];
   lastFrame: Buffer | null;
   lastFrameAt: number;
   pendingRpc: Map<string, { resolve: (val: any) => void; reject: (err: Error) => void; timer: NodeJS.Timeout }>;
@@ -780,7 +781,11 @@ wssAgent.on('connection', (ws: WebSocket, req: http.IncomingMessage) => {
       // Binary frame packet: 1-byte header 0x01 + JPEG bytes
       if(data[0]===2) {
         if(data.length<13)return;
-        if(data.readBigUInt64BE(1)&(1n<<63n))session.videoConfig=Buffer.from(data);
+        session.deviceInfo.stream_transport='scrcpy-h264';
+        const flags=data.readBigUInt64BE(1);
+        if(flags&(1n<<63n)){session.videoConfig=Buffer.from(data);session.videoGop=[];}
+        else if(flags&(1n<<62n))session.videoGop=[Buffer.from(data)];
+        else if(session.videoGop?.length && session.videoGop.length<90)session.videoGop.push(Buffer.from(data));
         session.lastFrameAt=Date.now();
         if(session.sessionId===activeSessionId)broadcastViewerFrame(data);
         return;
@@ -858,8 +863,8 @@ wssViewer.on('connection', (ws: WebSocket) => {
       device_info: active ? active.deviceInfo : null,
     })
   );
-  if(active?.videoConfig)ws.send(active.videoConfig,{binary:true});
-  if (active?.lastFrame) {
+  if(active?.videoConfig){ws.send(active.videoConfig,{binary:true});for(const packet of active.videoGop || [])ws.send(packet,{binary:true});}
+  if (!active?.videoConfig && active?.lastFrame) {
     ws.send(active.lastFrame, { binary: true });
   }
 
