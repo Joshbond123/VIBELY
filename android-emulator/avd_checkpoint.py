@@ -34,19 +34,44 @@ def hashed(s):
     return hashlib.sha256(s.encode()).hexdigest()
 
 
+def canonical_permissions(dump):
+    # Discard dumpsys timestamps, heap object addresses, unrelated resolver tables
+    # and package-manager statistics. Preserve the actual grant + Android flags.
+    package, user, runtime = None, None, False
+    grants = {}
+    for line in dump.splitlines():
+        p = re.match(r'\s*Package \[([^\]]+)\]', line)
+        if p:
+            package, user, runtime = p.group(1), None, False
+        u = re.match(r'\s*User (\d+):', line)
+        if u:
+            user, runtime = u.group(1), False
+        if line.strip() == 'runtime permissions:':
+            runtime = True
+        g = re.match(r'\s*([\w.]+): granted=(true|false), flags=\[([^\]]*)\]', line)
+        if runtime and package and user is not None and g:
+            flags = sorted(x.strip() for x in g.group(3).split('|') if x.strip())
+            grants[package + ':' + user + ':' + g.group(1)] = [g.group(2), flags]
+    return json.dumps(grants, sort_keys=True)
+
+
 def guest_evidence():
     # Only hashes are persisted for account identifiers. Never log dumpsys account.
-    accounts = adb("dumpsys account | grep 'Account {name=' | sort")
+    # dumpsys also contains timestamped account history and transient object IDs.
+    # Compare actual account records, not the diagnostic history containing them.
+    account_dump = adb('dumpsys account')
+    accounts = '\n'.join(sorted(re.findall(r'^\s*Account \{name=([^}]+)\}\s*$', account_dump, re.M)))
     packages = adb('pm list packages -f | sort')
-    permissions = adb('dumpsys package | sed -n "/runtime permissions:/,/Queries:/p"')
+    permission_dump = adb('dumpsys package')
+    permissions = canonical_permissions(permission_dump)
     foreground = adb("dumpsys activity activities | grep ResumedActivity")
     component = re.search(r' u\d+ ([^ /]+/[^ ]+)', foreground)
-    return {'account_hash': hashed(accounts), 'account_count': accounts.count('Account {name='),
+    return {'account_hash': hashed(accounts), 'account_count': len(accounts.splitlines()),
             'packages_hash': hashed(packages), 'permissions_hash': hashed(permissions),
             'tiktok_installed': bool(adb('pm path com.zhiliaoapp.musically 2>/dev/null || true')),
             'foreground': component.group(1) if component else None,
             'android_id_hash': hashed(adb('settings get secure android_id')),
-            'settings_hash': hashed('\n'.join(adb('settings list ' + x) for x in ('system', 'secure'))),
+            'settings_hash': hashed('\n'.join('\n'.join(sorted(adb('settings list ' + x).splitlines())) for x in ('system', 'secure'))),
             'build_fingerprint': adb('getprop ro.build.fingerprint'),
             'boot': adb('getprop sys.boot_completed') == '1'}
 
@@ -95,6 +120,12 @@ def capture(avd, destination, hold=False):
                     else: p.unlink()
             if not (stage/'snapshots/vibely-checkpoint').is_dir():
                 raise RuntimeError('Saved RAM snapshot missing')
+        except BaseException:
+            # --hold is only valid after a SUCCESSFUL capture. Any failed
+            # capture must release the original phone, including copy errors.
+            if stopped and hold:
+                console('avd', 'start')
+            raise
         finally:
             if stopped and not hold:
                 console('avd', 'start')
@@ -161,7 +192,10 @@ def verify(expected):
             'settings': current['settings_hash'] == wanted['settings_hash'],
             'userdata': current['android_id_hash'] == wanted['android_id_hash'] and current['permissions_hash'] == wanted['permissions_hash'],
             'foreground': current['foreground'] == wanted['foreground'],
-            'tiktok_installed': current['tiktok_installed']}
+            'tiktok_installed': current['tiktok_installed'],
+            'account_count_before': wanted['account_count'], 'account_count_after': current['account_count'],
+            'android_id_match': current['android_id_hash'] == wanted['android_id_hash'],
+            'permissions_match': current['permissions_hash'] == wanted['permissions_hash']}
 
 
 def main():
