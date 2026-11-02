@@ -169,7 +169,7 @@ jobs:
       - name: Prepare emulator agent & lifecycle scripts
         run: |
           chmod +x ./android-emulator/pre-launch.sh ./android-emulator/state-manager.sh ./android-emulator/run-session.sh
-          chmod +x ./android-emulator/restore-whole-avd.sh ./android-emulator/save-whole-avd.sh
+          chmod +x ./android-emulator/restore-whole-avd.sh ./android-emulator/save-whole-avd.sh ./android-emulator/device-realism.sh
           cd ./android-emulator && npm install --no-audit --no-fund
 
       - name: Restore encrypted whole-AVD from GitHub (if any)
@@ -210,7 +210,15 @@ jobs:
           emulator-boot-timeout: 480
           disable-animations: true
           enable-hw-keyboard: true
-          emulator-options: -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back emulated -camera-front emulated -dns-server 8.8.8.8,1.1.1.1
+          emulator-options: >-
+            -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim
+            -camera-back emulated -camera-front emulated
+            -dns-server 8.8.8.8,1.1.1.1
+            -prop ro.build.fingerprint=google/oriole/oriole:14/AP2A.240805.005/12025142:user/release-keys
+            -prop ro.product.model=Pixel 6
+            -prop ro.product.device=oriole
+            -prop ro.product.manufacturer=Google
+            -prop ro.product.brand=google
           pre-emulator-launch-script: ./android-emulator/pre-launch.sh
           script: ./android-emulator/run-session.sh
 
