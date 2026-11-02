@@ -48,3 +48,17 @@ identity, anatomy, foot contact, motion and centering; verify varied angles.
 Report true native resolution, useful per-GPU work, cold start, diffusion,
 VAE and total elapsed times. Reject rather than label a playable but visibly
 incorrect output as success. Android tasks remain independently active.
+
+## Executed candidate and music failure
+
+Real post-change job `vid_e79e2108-92a` was submitted on deployed `695ee8b`.
+Its music worker hit its hard 900-second Comfy output deadline; the parent
+record is failed, not accepted. The actual visual worker continued rendering
+(`vid_4d4bb0e53a31cc8665ab`, scene 2 observed), with useful T4 diffusion work.
+A separate observer is preserving that in-flight output rather than rerendering
+it or treating the parent status as proof that GPU work stopped.
+
+The next music worker has a bounded 1800-second output deadline. This does not
+prove why inference exceeded 900 seconds; logs/step timing still need review.
+Standalone music now accepts an explicit duration so a fresh 26-second score
+can be generated without an unnecessary second full visual render.

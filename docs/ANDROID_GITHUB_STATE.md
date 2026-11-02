@@ -146,3 +146,37 @@ Android tests pass, including rejection of unheld-source promotion.
 not a host whole-AVD checkpoint/update RPC. Restoring an isolated zero-account
 phone does not retrofit or back up that signed-in source. No clean replacement
 or perpetual-continuity guarantee is authorized by these test results.
+
+## User-approved emergency guest-disk recovery
+
+Read-only audit of the existing signed-in source found UID 0 and Google's
+`sdk_gphone64_x86_64` API34 userdebug/dev-keys image. This is NOT the official
+Play image used by the passing isolated validation runs. Root was already
+present; this work did not enable it.
+
+The user explicitly approved a consistent frozen guest-disk recovery attempt,
+understanding that host AVD configuration/RAM are absent and restoration remains
+unproven. A static helper successfully froze /metadata and /data briefly, the
+existing authenticated RPC remained usable, and the source was explicitly
+thawed. Helper SHA256:
+`e42a9d19065b41680e44db059a3ab1014e5fa5c207f819ed0af97065eeff240c`.
+
+The receiver runs only on GitHub Actions. GitHub credentials and encryption keys
+are never sent to Android. Six raw virtual disks are compressed in bounded
+chunks, encrypted into draft GitHub Release assets, then compared against
+independent source-side whole-volume hashes. Source is thawed before complete
+GitHub authenticated read-back. Only a completely verified manifest is published.
+An independent 3600-second thaw watchdog protects the phone if the receiver dies.
+This is labelled `guest-disks-v1-NOT-FULL-AVD`; it never overwrites a whole-AVD
+checkpoint pointer or claims Google restoration success.
+
+An initial unbounded-buffer receiver was cancelled before acceptance, the
+source explicitly thawed, and corrected bounded receiver **41458762494** started.
+Draft Release **431536212** has partial encrypted disks; completion is pending.
+Real isolated overlapping handover **41458767088** is also running, independently
+of the public phone. No success is claimed for either unfinished run.
+
+Full 915-second inactivity test FAILED (display remained awake). Browser
+transport recovery previously sent a wake key on every reconnect. The candidate
+fix distinguishes a real page visit from automatic reconnects; it requires
+live retesting and is not yet a passed 15-minute lock result.

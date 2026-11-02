@@ -319,7 +319,7 @@ export async function executeMusicGenerationOnComfyUI(params: {
   return { trackId, fileName, filePath, durationSec: actualDuration, comfyPromptId, workflow };
 }
 
-export async function startStandaloneMusicTask(dataDir: string, customTheme?: string) {
+export async function startStandaloneMusicTask(dataDir: string, customTheme?: string, requestedDurationSec?: number) {
   const trackId = 'trk_' + crypto.randomUUID().slice(0, 12);
   await query(
     `INSERT INTO music_tracks
@@ -332,7 +332,7 @@ export async function startStandaloneMusicTask(dataDir: string, customTheme?: st
   (async () => {
     try {
       const plan = await generateStandaloneMusicPlan(customTheme);
-      const targetDur = 22 + crypto.randomInt(0, 4);
+      const targetDur = Number.isFinite(requestedDurationSec) ? Math.max(20, Math.min(180, Number(requestedDurationSec))) : 22 + crypto.randomInt(0, 4);
       await query(
         `UPDATE music_tracks SET title = $2, bpm = $3, musical_key = $4, vocal_hook = $5, caption_prompt = $6, lyrics = $7, song_structure = $8::jsonb, audio_characteristics = $9::jsonb, similarity_score = $10 WHERE id = $1`,
         [trackId, plan.title, plan.bpm, plan.musical_key, plan.vocal_hook, plan.caption_prompt, plan.lyrics, JSON.stringify(plan.song_structure), JSON.stringify(plan.audio_characteristics || {}), plan.similarity_score]

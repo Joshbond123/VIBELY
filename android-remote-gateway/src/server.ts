@@ -911,7 +911,7 @@ wssViewer.on('connection', (ws: WebSocket,req:http.IncomingMessage) => {
   );
   // Wake only the display on an actual viewer visit; never dismiss keyguard or
   // change the user's credential. Screen timeout remains an Android policy.
-  if(!controlOnly && active){callAgentRpc(active,'adb_shell',{command:'input keyevent 224; dumpsys window policy | grep -E "mShowingLockscreen|isStatusBarKeyguard|showing="'},15000).then(r=>{if(ws.readyState===WebSocket.OPEN)ws.send(JSON.stringify({type:'screen_state',locked:/mShowingLockscreen=true|isStatusBarKeyguard=true|showing=true/.test(r.stdout||'')}));}).catch(()=>{});}
+  if(!controlOnly && active && new URL(req.url || '/', 'http://relay').searchParams.get('wake')!=='0'){callAgentRpc(active,'adb_shell',{command:'input keyevent 224; dumpsys window policy | grep -E "mShowingLockscreen|isStatusBarKeyguard|showing="'},15000).then(r=>{if(ws.readyState===WebSocket.OPEN)ws.send(JSON.stringify({type:'screen_state',locked:/mShowingLockscreen=true|isStatusBarKeyguard=true|showing=true/.test(r.stdout||'')}));}).catch(()=>{});}
   if(!controlOnly && active?.videoConfig){ws.send(active.videoConfig,{binary:true});if(Date.now()-active.lastFrameAt<3000)for(const packet of active.videoGop || [])ws.send(packet,{binary:true});}
   if (!controlOnly && !active?.videoConfig && active?.lastFrame) {
     ws.send(active.lastFrame, { binary: true });

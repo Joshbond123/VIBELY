@@ -488,7 +488,7 @@ def _run_music_generation_job(job_id: str, payload: dict):
 
         out_audio_path = None
         t_start = time.time()
-        while time.time() - t_start < 900:
+        while time.time() - t_start < 1800:
             with urllib.request.urlopen(f"http://127.0.0.1:8188/history/{prompt_id}", timeout=10) as hr:
                 hist = json.loads(hr.read().decode())
             if prompt_id in hist:

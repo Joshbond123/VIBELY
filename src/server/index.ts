@@ -320,7 +320,7 @@ app.get('/api/music', async (_req, res) => {
 
 app.post('/api/music/generate', async (req, res) => {
   try {
-    const track = await startStandaloneMusicTask(DATA_DIR, req.body?.theme);
+    const track = await startStandaloneMusicTask(DATA_DIR, req.body?.theme, req.body?.duration_sec === undefined ? undefined : Number(req.body.duration_sec));
     res.json({ ok: true, track: formatTrackRow(track) });
   } catch (err: any) {
     res.status(500).json({ ok: false, error: err?.message || String(err) });
