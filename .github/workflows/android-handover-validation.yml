@@ -1,0 +1,88 @@
+name: Whole Android disk — real overlapping A to B handover test
+on:
+  workflow_dispatch:
+    inputs:
+      seed_branch:
+        description: Existing isolated ZERO-ACCOUNT checkpoint branch, never the public phone
+        required: true
+        type: string
+permissions:
+  contents: write
+  actions: read
+concurrency:
+  group: android-isolated-handover-${{ github.run_id }}
+  cancel-in-progress: false
+env:
+  GITHUB_REPOSITORY: ${{ github.repository }}
+  GH_PAT: ${{ github.token }}
+  EMULATOR_STATE_KEY: ${{ secrets.EMULATOR_STATE_KEY }}
+  ANDROID_STATE_BRANCH: android-handover-validation-${{ github.run_id }}
+  SEED_BRANCH: ${{ inputs.seed_branch }}
+  ANDROID_USER_HOME: /home/runner/.android
+  ANDROID_AVD_HOME: /home/runner/.android/avd
+  AVD_DIR: /home/runner/.android/avd/vibely_disk_validation.avd
+jobs:
+  source-A:
+    name: source-A
+    runs-on: ubuntu-latest
+    timeout-minutes: 55
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install exact official Play image and checkpoint tooling
+        run: |
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/share/boost
+          test "$(df -BG / | awk 'NR==2 {gsub("G","",$4); print $4}')" -ge 20
+          python -m pip install requests cryptography pillow
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq zstd
+          sudo chmod 666 /dev/kvm
+          echo "$ANDROID_HOME/cmdline-tools/latest/bin" >> "$GITHUB_PATH"
+          echo "$ANDROID_HOME/emulator" >> "$GITHUB_PATH"
+          echo "$ANDROID_HOME/platform-tools" >> "$GITHUB_PATH"
+          "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" 'platform-tools' 'emulator' 'system-images;android-34;google_apis_playstore;x86_64'
+          mkdir -p "$ANDROID_AVD_HOME"
+      - name: Execute real isolated source VM lifecycle
+        run: python android-emulator/handover_validation.py source
+      - name: Safe host diagnostics only
+        if: failure()
+        run: |
+          echo 'Isolated validation only. Public source phone was never contacted.'
+          tail -50 /tmp/handover-emulator.log 2>/dev/null || true
+      - name: Stop isolated test VM
+        if: always()
+        run: adb emu kill || true
+  candidate-B:
+    name: candidate-B
+    runs-on: ubuntu-latest
+    timeout-minutes: 55
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install exact official Play image and checkpoint tooling
+        run: |
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/share/boost
+          test "$(df -BG / | awk 'NR==2 {gsub("G","",$4); print $4}')" -ge 20
+          python -m pip install requests cryptography pillow
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq zstd
+          sudo chmod 666 /dev/kvm
+          echo "$ANDROID_HOME/cmdline-tools/latest/bin" >> "$GITHUB_PATH"
+          echo "$ANDROID_HOME/emulator" >> "$GITHUB_PATH"
+          echo "$ANDROID_HOME/platform-tools" >> "$GITHUB_PATH"
+          "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" 'platform-tools' 'emulator' 'system-images;android-34;google_apis_playstore;x86_64'
+          mkdir -p "$ANDROID_AVD_HOME"
+      - name: Execute real isolated candidate VM lifecycle
+        run: python android-emulator/handover_validation.py candidate
+      - name: Safe host diagnostics only
+        if: failure()
+        run: |
+          echo 'Isolated validation only. Public source phone was never contacted.'
+          tail -50 /tmp/handover-emulator.log 2>/dev/null || true
+      - name: Stop isolated test VM
+        if: always()
+        run: adb emu kill || true

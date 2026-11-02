@@ -122,3 +122,27 @@ Not a backup/restore of the signed-in public phone. No Google authentication,
 TikTok, Notes UI, lock acceptance or ownership handover is claimed.
 An independent read-only runner restore of branch
 `android-state-validation-41448567887` was dispatched; result pending.
+
+### Independent-runner and public lock results
+
+Independent read-only restore **41449634667** passed on another actual Actions
+runner, including the encrypted checkpoint, restored authorized ADB identity,
+boot/display/packages/settings/userdata/foreground, original marker contents,
+15-minute timeout setting and permissions. Again, zero accounts and no TikTok.
+
+Gateway-only **41449953559** deployed reconnect media-capability fixes without
+replacing the Android host. The actual browser sleep/reload/visible-native-lock/
+swipe-unlock test now **PASS**, with foreground app preserved. A full 915-second
+no-input idle-lock test is running; do not infer that result from the short test.
+
+A further isolated overlapping A→B→A-stop workflow and controller are being
+prepared. They refuse signed-in seed phones and never contact the public gateway.
+The protocol now refuses promotion of a merely prewarmed candidate: final
+checkpoint metadata must state that capture held A stopped, and the pending
+handover must be explicitly armed after that final checkpoint. Eight local
+Android tests pass, including rejection of unheld-source promotion.
+
+**Still blocked:** current public agent exposes guest ADB and legacy backup,
+not a host whole-AVD checkpoint/update RPC. Restoring an isolated zero-account
+phone does not retrofit or back up that signed-in source. No clean replacement
+or perpetual-continuity guarantee is authorized by these test results.

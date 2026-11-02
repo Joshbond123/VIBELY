@@ -102,7 +102,7 @@ def capture(avd, destination, hold=False):
     if destination.is_relative_to(avd):
         raise ValueError('Archive must not be stored inside its own source AVD')
     evidence = {'schema': 1, 'guest': guest_evidence(), 'sdk': sdk_evidence(),
-                'avd_name': avd.name.removesuffix('.avd'), 'snapshot': 'vibely-checkpoint', 'created_at': int(time.time())}
+                'avd_name': avd.name.removesuffix('.avd'), 'snapshot': 'vibely-checkpoint', 'created_at': int(time.time()), 'source_held': bool(hold)}
     if not evidence['guest']['boot']:
         raise RuntimeError('Unbooted Android is not a valid checkpoint')
     destination.parent.mkdir(parents=True, exist_ok=True)

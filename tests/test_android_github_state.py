@@ -55,19 +55,28 @@ class Tests(unittest.TestCase):
         s=FakeStore()
         with self.assertRaises(m.Conflict):s.owner('B')
         with tempfile.TemporaryDirectory() as t:
-            p=Path(t)/'disk';p.write_bytes(b'disk');cp=s.publish(p,'A',{})
-            s.prepare('A','B')
+            p=Path(t)/'disk';p.write_bytes(b'disk');cp=s.publish(p,'A',{'source_held':True})
+            s.prepare('A','B',source_held=True)
             with self.assertRaises(ValueError):s.promote('B',cp,{'boot':True})
             self.assertEqual(s.state['owner'],'A')
             proof={k:True for k in ['boot','display','packages','account_hash','settings','userdata','foreground']}
             s.promote('B',cp,proof)
             self.assertEqual(s.state['owner'],'B')
             with self.assertRaises(m.Conflict):s.owner('A')
+    def test_prewarm_cannot_promote_unheld_source(self):
+        s=FakeStore()
+        with tempfile.TemporaryDirectory() as t:
+            p=Path(t)/'disk';p.write_bytes(b'disk');cp=s.publish(p,'A',{'source_held':False})
+            with self.assertRaises(ValueError):s.prepare('A','B',source_held=True)
+            s.prepare('A','B')
+            proof={k:True for k in ['boot','display','packages','account_hash','settings','userdata','foreground']}
+            with self.assertRaises(ValueError):s.promote('B',cp,proof)
+            self.assertEqual(s.state['owner'],'A')
     def test_stale_candidate_rejected(self):
         s=FakeStore()
         with tempfile.TemporaryDirectory() as t:
-            p=Path(t)/'disk';p.write_bytes(b'disk');cp=s.publish(p,'A',{})
-            s.prepare('A','B');s.publish(p,'A',{})
+            p=Path(t)/'disk';p.write_bytes(b'disk');cp=s.publish(p,'A',{'source_held':True})
+            s.prepare('A','B',source_held=True);s.publish(p,'A',{})
             with self.assertRaises(m.Conflict):s.promote('B',cp,{k:True for k in ['boot','display','packages','account_hash','settings','userdata','foreground']})
 
 if __name__=='__main__':unittest.main()

@@ -190,13 +190,17 @@ class Store:
                 errors.append(type(e).__name__)
         raise RuntimeError('No verified checkpoint available; clean boot forbidden. Failures: ' + ','.join(errors))
 
-    def prepare(self, owner, candidate):
+    def prepare(self, owner, candidate, source_held=False):
         head, state = self.owner(owner)
         if state.get('pending') and state['pending']['candidate'] != candidate:
             raise Conflict('Another handover already owns the candidate lock')
         if not state.get('current'):
             raise ValueError('Cannot hand over without a verified whole-AVD checkpoint')
-        state['pending'] = {'candidate': candidate, 'source': owner, 'checkpoint': state['current'],
+        if source_held:
+            manifest = json.loads(decrypt(self.download_asset(state['current']['manifest']), self.password))
+            if manifest['metadata'].get('source_held') is not True or manifest['source_owner'] != owner:
+                raise ValueError('Final promotion requires a checkpoint captured with the source held')
+        state['pending'] = {'source_held': bool(source_held), 'candidate': candidate, 'source': owner, 'checkpoint': state['current'],
                             'prepared_generation': state['generation']}
         self.cas(head, state)
 
@@ -208,6 +212,8 @@ class Store:
         pending = state.get('pending') or {}
         if pending.get('candidate') != candidate or pending.get('checkpoint') != checkpoint or state['current'] != checkpoint:
             raise Conflict('Stale/unprepared candidate cannot become the active writer')
+        if pending.get('source_held') is not True:
+            raise ValueError('A prewarmed candidate cannot replace a source that is still accepting writes')
         state.update(owner=candidate, pending=None, generation=state['generation']+1)
         self.cas(head, state)
 
