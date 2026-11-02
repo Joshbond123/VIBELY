@@ -178,14 +178,22 @@ async function main() {
     const artifact = gzipSync(Buffer.from(JSON.stringify(Object.fromEntries(['server.js','phoneUi.js'].map(name=>[name,fs.readFileSync(path.join(gwDir,'dist',name),'utf8')]))))).toString('base64');
     const shellQuote = (v) => "'" + v.replace(/'/g, "'\\''") + "'";
     async function runArtifactCommand(js) {
-      const r=await mcp('apps_run',{app:appId,command:'NODE_OPTIONS= node -e '+shellQuote(js),confirm:true});
-      if(r.isError) throw new Error('Artifact install: '+r.texts.join(' '));
-      for(const t of r.texts) { try {const j=JSON.parse(t);if(j.exitCode || j.exit_code) throw new Error('Artifact command failed');} catch(e) {if(e.message==='Artifact command failed')throw e;} }
+      for(let attempt=0;attempt<50;attempt++) {
+        const r=await mcp('apps_run',{app:appId,command:'NODE_OPTIONS= node -e '+shellQuote(js),confirm:true});
+        const message=r.texts.join(' ');
+        if(r.isError) {
+          if(/not running|starting|wake it|rate limit|too many|429/i.test(message)){console.log('Waiting for hosting process/rate limit before installing artifact...');await sleep(10000);continue;}
+          throw new Error('Artifact install: '+message);
+        }
+        for(const t of r.texts){try{const j=JSON.parse(t);if(j.exitCode || j.exit_code)throw new Error('Artifact command failed: '+String(j.output || ''));}catch(e){if(e.message.startsWith('Artifact command failed'))throw e;}}
+        return;
+      }
+      throw new Error('Hosting process did not become available for verified artifact installation');
     }
     await runArtifactCommand("require('fs').writeFileSync('/app/data/gateway-artifact.b64','')");
     for(let offset=0;offset<artifact.length;offset+=1300) {
-      await runArtifactCommand("require('fs').appendFileSync('/app/data/gateway-artifact.b64','"+artifact.slice(offset,offset+1300)+"')");
-      await sleep(3500); // respect host's 20 command/minute limit
+      await runArtifactCommand("const fs=require('fs'),p='/app/data/gateway-artifact.b64',v=fs.readFileSync(p,'utf8'),part='"+artifact.slice(offset,offset+1300)+"';if(v.length==="+offset+")fs.appendFileSync(p,part);else if(v.slice("+offset+","+(offset+1300)+")!==part)throw new Error('Artifact chunk offset mismatch');");
+      await sleep(4200); // respect host's 20 command/minute limit
     }
     const bootSource=JSON.stringify("await import('/app/data/gateway/dist/server.js');\nawait new Promise(() => {});\n");
     await runArtifactCommand(`const fs=require('fs'),z=require('zlib'),p='/app/data/gateway';fs.mkdirSync(p+'/dist',{recursive:true});const files=JSON.parse(z.gunzipSync(Buffer.from(fs.readFileSync('/app/data/gateway-artifact.b64','utf8'),'base64')));for(const [name,content] of Object.entries(files))fs.writeFileSync(p+'/dist/'+name+'.next',content);for(const name of ['phoneUi.js','server.js'])fs.renameSync(p+'/dist/'+name+'.next',p+'/dist/'+name);fs.writeFileSync(p+'/package.json',JSON.stringify({type:'module'}));if(!fs.existsSync(p+'/node_modules'))fs.symlinkSync('/app/node_modules',p+'/node_modules','dir');fs.writeFileSync(p+'/boot-hijack.mjs',${bootSource});`);
