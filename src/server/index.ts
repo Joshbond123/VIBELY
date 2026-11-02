@@ -135,7 +135,7 @@ app.get('/api/gpu', async (_req,res)=>{
   catch(e:any){res.status(500).json({ok:false,error:e.message});}
 });
 app.get('/api/video-engine/readiness',async(_req,res)=>{
-  res.json({ok:true,current_engine:LEGACY_VIDEO_ENGINE,candidate:FRONTIER_VIDEO_CANDIDATE,
+  res.json({ok:true,current_engine:LEGACY_VIDEO_ENGINE,current_engine_role:'configured legacy engine; query /api/gpu for actual availability',candidate:FRONTIER_VIDEO_CANDIDATE,
     acceptance_requirement:'New video generated through deployed VIBELY; real timing and per-GPU telemetry; frame-by-frame visual acceptance. No sample or mock substitution.'});
 });
 app.post('/api/gpu/startup-failed',async(req,res)=>{

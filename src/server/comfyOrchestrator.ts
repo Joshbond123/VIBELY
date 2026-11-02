@@ -145,6 +145,8 @@ async function getReadyEndpoint(serviceId:string,jobId:string):Promise<ModelEndp
   while(Date.now()-start<20*60000) {
     const [ep]=await query<ModelEndpointRecord>('SELECT * FROM model_endpoints WHERE service_id=$1',[serviceId]);
     const [session]=await query<any>('SELECT * FROM gpu_sessions WHERE service_id=$1',[serviceId]);
+    // A terminated failed startup must not silently re-dispatch in this same wait loop.
+    if(session?.state==='OFF' && session?.error) throw new Error(session.error);
     if(session?.state==='OFF') await acquireGpu(serviceId,jobId);
     if(session?.state==='ERROR') throw new Error(session.error || 'GPU startup failed');
     if(ep?.comfyui_ready && ep.extra_meta?.worker_version==='lifecycle-v3' && session?.state==='ON') return ep;
