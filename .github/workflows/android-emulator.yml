@@ -129,6 +129,8 @@ jobs:
       ROTATION_MINUTES: ${{ inputs.rotation_minutes || '240' }}
       RAPID_TEST_CYCLES: ${{ inputs.rapid_test_cycles || '0' }}
       SIMULATE_BOOT_FAILURE: ${{ inputs.simulate_boot_failure || 'false' }}
+      ANDROID_CHECKPOINT_IMAGE_FAMILY: google_apis_playstore
+      ANDROID_STATE_BRANCH: android-state-v1
 
     steps:
       - name: Checkout VIBELY repository
@@ -152,36 +154,63 @@ jobs:
             df -h /
           fi
 
-      - name: Cache Android 14 (API 34 google_apis x86_64) system image
+      - name: Cache Android 14 Play Store system image
         uses: actions/cache@v4
         with:
           path: |
-            /usr/local/lib/android/sdk/system-images/android-34/google_apis/x86_64
-          key: android-sysimg-34-google_apis-x86_64-v1
+            /usr/local/lib/android/sdk/system-images/android-34/google_apis_playstore/x86_64
+          key: android-sysimg-34-google_apis_playstore-x86_64-v1
+
+      - name: Install Python crypto deps for whole-AVD persistence
+        run: |
+          python3 -m pip install --quiet requests cryptography
+          sudo apt-get update -qq && sudo apt-get install -y -qq zstd jq
 
       - name: Prepare emulator agent & lifecycle scripts
         run: |
           chmod +x ./android-emulator/pre-launch.sh ./android-emulator/state-manager.sh ./android-emulator/run-session.sh
+          chmod +x ./android-emulator/restore-whole-avd.sh ./android-emulator/save-whole-avd.sh
           cd ./android-emulator && npm install --no-audit --no-fund
 
-      - name: Boot Android 14 Virtual Phone & Run Coordinated Session
+      - name: Restore encrypted whole-AVD from GitHub (if any)
+        env:
+          GH_PAT: ${{ secrets.GH_PAT }}
+          EMULATOR_STATE_KEY: ${{ secrets.EMULATOR_STATE_KEY }}
+          ANDROID_CHECKPOINT_IMAGE_FAMILY: google_apis_playstore
+          ANDROID_STATE_BRANCH: android-state-v1
+          AVD_NAME: vibely_pixel6_api34
+        run: ./android-emulator/restore-whole-avd.sh
+
+      - name: Decide whether AVD must be force-created
+        id: avd
+        run: |
+          AVD="$HOME/.android/avd/vibely_pixel6_api34.avd"
+          if [[ -d "$AVD" ]] && ls "$AVD"/userdata* >/dev/null 2>&1; then
+            echo "force=false" >> "$GITHUB_OUTPUT"
+            echo "Restored/existing AVD detected; will not force-create"
+          else
+            echo "force=true" >> "$GITHUB_OUTPUT"
+            echo "No userdata AVD; first-boot create with Play Store image"
+          fi
+
+      - name: Boot Android 14 Play Store phone & run coordinated session
         uses: reactivecircus/android-emulator-runner@v2
         with:
           api-level: 34
-          target: google_apis
+          target: google_apis_playstore
           arch: x86_64
           profile: pixel_6
           cores: 4
           ram-size: 4096M
           heap-size: 512M
-          disk-size: 6144M
-          sdcard-path-or-size: 1024M
+          disk-size: 8192M
+          sdcard-path-or-size: 2048M
           avd-name: vibely_pixel6_api34
-          force-avd-creation: true
-          emulator-boot-timeout: 300
+          force-avd-creation: ${{ steps.avd.outputs.force }}
+          emulator-boot-timeout: 480
           disable-animations: true
           enable-hw-keyboard: true
-          emulator-options: -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back emulated -camera-front emulated -dns-server 8.8.8.8,1.1.1.1 -no-snapshot
+          emulator-options: -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back emulated -camera-front emulated -dns-server 8.8.8.8,1.1.1.1 -snapshot-not-writable
           pre-emulator-launch-script: ./android-emulator/pre-launch.sh
           script: ./android-emulator/run-session.sh
 
