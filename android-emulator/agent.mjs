@@ -696,13 +696,30 @@ async function main() {
 
     // 1. Local ADB & system health check + heartbeat
     try {
-      const { stdout } = await adbShell('getprop sys.boot_completed');
-      if (!stdout.trim().startsWith('1')) {
-        log('Warning: sys.boot_completed not 1 during health check');
-      }
-      if (wsClient && wsClient.readyState === WebSocket.OPEN) {
-        const di = await collectDeviceInfo();
-        wsClient.send(JSON.stringify({ type: 'heartbeat', sessionId: SESSION_ID, deviceInfo: di }));
+      const devices = await execFileAsync('adb', ['devices'], { timeout: 10000 }).then(r => r.stdout || '').catch(e => e.message);
+      if (!/emulator-\d+\s+device/.test(devices)) {
+        log('CRITICAL: adb has no emulator device — control/stream will appear stuck. Attempting soft recovery keyevents is impossible without a device.');
+        // Best-effort: leave heartbeat with degraded flag so gateway/UI can show recovery state
+        if (wsClient && wsClient.readyState === WebSocket.OPEN) {
+          wsClient.send(JSON.stringify({ type: 'heartbeat', sessionId: SESSION_ID, deviceInfo: { degraded: true, adbDevices: devices } }));
+        }
+      } else {
+        const { stdout } = await adbShell('getprop sys.boot_completed');
+        if (!stdout.trim().startsWith('1')) {
+          log('Warning: sys.boot_completed not 1 during health check');
+        }
+        // Clear Gmail permission traps while healthy
+        try {
+          const focus = await adbShell("dumpsys window | grep -E 'mCurrentFocus|mFocusedApp'", 12000);
+          if (/com\.google\.android\.gm/i.test(focus.stdout || '')) {
+            await adbShell('am force-stop com.google.android.gm', 10000).catch(() => {});
+            await adbShell('input keyevent 3', 8000).catch(() => {});
+          }
+        } catch (_) {}
+        if (wsClient && wsClient.readyState === WebSocket.OPEN) {
+          const di = await collectDeviceInfo();
+          wsClient.send(JSON.stringify({ type: 'heartbeat', sessionId: SESSION_ID, deviceInfo: di }));
+        }
       }
     } catch (err) {
       log(`Health check warning: ${err.message}`);
