@@ -1,0 +1,63 @@
+name: Whole Android disk — independent runner restore test
+run-name: Independent restore of ${{ inputs.state_branch }}
+on:
+  workflow_dispatch:
+    inputs:
+      state_branch:
+        description: 'Existing verified checkpoint control branch; never create a fresh phone'
+        required: true
+        type: string
+permissions:
+  contents: read
+concurrency:
+  group: android-state-readonly-candidate-${{ github.run_id }}
+  cancel-in-progress: false
+jobs:
+  restore-only-candidate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    env:
+      GITHUB_REPOSITORY: ${{ github.repository }}
+      # This candidate has read-only credentials and cannot publish or take ownership.
+      GH_PAT: ${{ github.token }}
+      EMULATOR_STATE_KEY: ${{ secrets.EMULATOR_STATE_KEY }}
+      ANDROID_STATE_BRANCH: ${{ inputs.state_branch }}
+      ANDROID_AVD_HOME: /home/runner/.android/avd
+      AVD_DIR: /home/runner/.android/avd/vibely_disk_validation.avd
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install exact required image family and checkpoint tooling
+        run: |
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/share/boost
+          python -m pip install requests cryptography pillow
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq zstd
+          sudo chmod 666 /dev/kvm
+          echo "$ANDROID_HOME/cmdline-tools/latest/bin" >> "$GITHUB_PATH"
+          echo "$ANDROID_HOME/emulator" >> "$GITHUB_PATH"
+          echo "$ANDROID_HOME/platform-tools" >> "$GITHUB_PATH"
+          "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" 'platform-tools' 'emulator' 'system-images;android-34;google_apis_playstore;x86_64'
+          mkdir -p "$ANDROID_AVD_HOME"
+      - name: Download and authenticate existing GitHub whole-AVD checkpoint
+        run: |
+          python android-emulator/github_state.py restore --archive /tmp/restore.tar.zst
+          python android-emulator/avd_checkpoint.py extract --avd "$AVD_DIR" --archive /tmp/restore.tar.zst
+      - name: Boot restored disk and RAM on this independent runner
+        run: |
+          nohup emulator -avd vibely_disk_validation -no-window -gpu swiftshader_indirect -no-audio -no-boot-anim -snapshot vibely-checkpoint -no-snapshot-save -memory 3072 > /tmp/restored-emulator.log 2>&1 &
+          timeout 420 bash -c 'until adb shell getprop sys.boot_completed 2>/dev/null | grep -q 1; do sleep 4; done'
+          python android-emulator/avd_checkpoint.py verify --manifest /tmp/restore.tar.zst.restored.json
+          adb shell cat /sdcard/Download/vibely-persistence-test.txt | grep -x whole-disk-validation-rewritten-content
+          test "$(adb shell settings get system screen_off_timeout | tr -d '\r')" = 900000
+          echo 'PASS: independent-runner restoration. NOT a public handover or authenticated Google/TikTok test.'
+      - name: Safe failure diagnostics
+        if: failure()
+        run: |
+          echo 'Candidate failed; no ownership or public routing was changed.'
+          tail -70 /tmp/restored-emulator.log 2>/dev/null || true
+      - name: Stop isolated read-only candidate
+        if: always()
+        run: adb emu kill || true

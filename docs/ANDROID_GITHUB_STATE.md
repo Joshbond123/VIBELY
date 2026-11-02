@@ -36,7 +36,8 @@ The user permits the existing Blitz gateway **only as the browser/stream relay**
 * `android-emulator/github_state.py`: Scrypt-derived AES-256-GCM encryption with fresh salt/nonce per part, encrypted manifest, SHA-256 checks, read-back authentication, versioned release publication, dedicated Git state-ref commit point, owner fencing, current/previous fallback and prepared-candidate promotion methods. An upload failure does not replace the committed checkpoint. A stale candidate or owner cannot commit a new state head.
 * `android-emulator/validation_roundtrip.py`: actual authenticated GitHub publish/download integration and full archive hash comparison; not a mock storage test.
 * `.github/workflows/android-state-validation.yml`: isolated native Google Play AVD, encrypted GitHub roundtrip, complete emulator shutdown, archive restore and native display/file/settings/foreground verification. No gateway connection or public-phone promotion. Unique per-run concurrency group, `cancel-in-progress: false`.
-* `tests/test_android_github_state.py`: local fault-injection unit tests, explicitly **not** Android acceptance.
+* `tests/test_android_github_state.py` and `tests/test_android_avd_checkpoint.py`: seven local crypto/fault-injection/capture-safety/canonical-evidence tests, explicitly **not** Android acceptance.
+* `.github/workflows/android-state-restore.yml`: a separate read-only runner restores an existing encrypted checkpoint; never initializes an empty AVD, writes ownership, or connects to the public gateway. Its cross-runner test has not passed yet.
 * `tests/live_display_recovery.mjs`: deployed browser checks of real H.264 decoding, unchanged buffered pixels during outage, honest disconnected state and renewed decoding in the same OS session.
 
 ## Commit protocol
@@ -81,7 +82,11 @@ Other incomplete items: cross-runner exact SDK/emulator packaging, final-delta t
 * Gateway TypeScript build: PASS.
 * Deployed actual H.264 decode, buffered-frame retention during outage, reconnect/resumed decode in same session: PASS in `emu_41424314059_c4be3a`.
 * Isolated official Google Play Android boot and genuine package paths: PASS in Actions run 41442317701.
-* Whole-disk restore: still under investigation; do not report PASS until the complete Actions workflow succeeds.
+* Actions run 41442803421: actual encrypted GitHub roundtrip and complete archive hash comparison PASS; real ciphertext Release 431423502 contains 9 assets totaling 1,956,141,271 bytes. Restored Android boot, non-black display, packages, settings and foreground checks passed. The full test FAILED account/userdata comparisons, so no persistence acceptance was claimed. Transient dumpsys diagnostics were included in the old comparison; canonical grant/account parsing is now being retested rather than assuming those failures were harmless.
+* Actions run 41443664480: capture compression failed; host-operation stderr reporting and isolated-runner disk headroom were added. No incomplete checkpoint replaced a valid committed state.
+* Latest full-disk acceptance remains pending; do not report PASS until the complete Actions workflow succeeds.
+* Gateway-only Actions deployment 41443025516: PASS. Re-executed the three deployed decoding/outage/reconnect assertions after deployment: PASS, same phone session.
+* Lock-screen-specific tests: FAILED. The live phone had keyguard disabled. Enabled the real credential-free keyguard without setting a PIN/password; screen-off/wake/decoded-frame/unlock sequence remains inconsistent and is not accepted. A real Android lock-screen JPEG was observed, but that alone is not proof the live lock stream is fixed. Future agent code no longer dismisses keyguard or uses stay-awake; encoder initialization no longer powers on the display as a side effect. Those agent changes are not rolled into the signed-in phone yet.
 * Tests A–F in the mission, authenticated Play/TikTok, full 4-hour handover and account/permission persistence: NOT ACCEPTED.
 
 ## Platform constraints and primary sources
