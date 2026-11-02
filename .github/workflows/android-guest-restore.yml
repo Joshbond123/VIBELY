@@ -1,0 +1,56 @@
+name: Isolated signed-in guest rescue restore (no public cutover)
+on:
+  workflow_dispatch:
+    inputs:
+      release_id:
+        description: Approved encrypted guest rescue release; waits for authenticated publication
+        type: string
+        required: true
+permissions:
+  contents: write
+concurrency:
+  group: android-isolated-signed-in-restore
+  cancel-in-progress: false
+jobs:
+  restore-original-guest-disks:
+    runs-on: ubuntu-latest
+    timeout-minutes: 100
+    env:
+      GITHUB_REPOSITORY: ${{ github.repository }}
+      GH_PAT: ${{ github.token }}
+      EMULATOR_STATE_KEY: ${{ secrets.EMULATOR_STATE_KEY }}
+      RESCUE_RELEASE_ID: ${{ inputs.release_id }}
+      ANDROID_STATE_BRANCH: android-recovered-source-${{ github.run_id }}
+      ANDROID_USER_HOME: /home/runner/.android
+      ANDROID_AVD_HOME: /home/runner/.android/avd
+      ANDROID_CHECKPOINT_IMAGE_FAMILY: google_apis
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Prepare matching platform without booting blank userdata
+        run: |
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/share/boost
+          sudo chmod 666 /dev/kvm
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq zstd iproute2
+          python -m pip install requests cryptography pillow
+          echo "$ANDROID_HOME/cmdline-tools/latest/bin" >> "$GITHUB_PATH"
+          echo "$ANDROID_HOME/emulator" >> "$GITHUB_PATH"
+          echo "$ANDROID_HOME/platform-tools" >> "$GITHUB_PATH"
+          "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" 'platform-tools' 'emulator' 'system-images;android-34;google_apis;x86_64'
+          mkdir -p "$ANDROID_AVD_HOME"
+          echo no | "$ANDROID_HOME/cmdline-tools/latest/bin/avdmanager" create avd -n vibely_pixel6_api34 -k 'system-images;android-34;google_apis;x86_64' -d pixel_6 -f
+      - name: Prefetch encrypted draft, require publication, restore original disks, test offline native boot/account, checkpoint full AVD
+        run: python -u android-emulator/guest_disk_restore.py
+      - name: Upload non-identifying evidence only
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: isolated-source-restore-evidence
+          path: |
+            /home/runner/guest-recovery/restore-evidence.json
+            /home/runner/guest-recovery/whole-checkpoint.json
+          if-no-files-found: ignore
+          retention-days: 14

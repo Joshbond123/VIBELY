@@ -87,9 +87,11 @@ def guest_evidence():
 def sdk_evidence():
     sdk = Path(os.environ.get('ANDROID_SDK_ROOT') or os.environ['ANDROID_HOME'])
     files = [sdk/'emulator/source.properties']
-    files += list((sdk/'system-images/android-34/google_apis_playstore/x86_64').glob('source.properties'))
+    family=os.environ.get('ANDROID_CHECKPOINT_IMAGE_FAMILY','google_apis_playstore')
+    if family not in ('google_apis_playstore','google_apis'):raise RuntimeError('Unsupported checkpoint image family')
+    files += list((sdk/('system-images/android-34/'+family+'/x86_64')).glob('source.properties'))
     if len(files) != 2:
-        raise RuntimeError('Expected official API34 Google Play image not found')
+        raise RuntimeError('Expected exact API34 image family not found')
     return {str(p.relative_to(sdk)): hashed(p.read_text()) for p in files}
 
 
