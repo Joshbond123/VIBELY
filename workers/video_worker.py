@@ -341,6 +341,14 @@ def setup_comfyui(model_paths: dict):
     for rname in os.listdir(REFS_DIR):
         shutil.copy2(os.path.join(REFS_DIR, rname), os.path.join(comfy_inp, rname))
 
+    # Derive a face-only reference without altering facial pixels. The original
+    # portrait includes torso; shrinking it to the generation canvas loses face detail.
+    from PIL import Image
+    with Image.open(os.path.join(comfy_inp, "scarlett_ref_3.jpg")) as im:
+        w, h = im.size
+        im.crop((round(w*.20), round(h*.035), round(w*.81), round(h*.43))).save(
+            os.path.join(comfy_inp, "scarlett_identity_face.png"))
+
     # On pre-Ampere GPUs (Tesla T4 SM 7.5), MiniMaxH3 & Qwen3-VL-32B activations exceed 65,504 (FP16_MAX) and overflow float16 to NaN,
     # while software-emulated bfloat16 is 0.5 TFLOPS. Configure native 8-exponent-bit hardware torch.float32 (8.1 TFLOPS, 3.4e38 range, zero NaNs)!
     hv_fp = os.path.join(COMFY_DIR, "comfy/text_encoders/hunyuan_video.py")
@@ -370,6 +378,13 @@ def setup_comfyui(model_paths: dict):
         text=text.replace(marker,marker+"    if torch.cuda.is_available() and torch.cuda.device_count() > 1:\n        return torch.device('cuda:1')\n",1)
         open(mm,"w").write(text)
         log("Text encoder assigned to GPU1; diffusion stays on GPU0")
+
+    marker="def vae_device():\n"
+    if marker not in text:
+        raise RuntimeError("Upstream VAE device function changed; refusing an unverified GPU assignment")
+    text=text.replace(marker,marker+"    if torch.cuda.is_available() and torch.cuda.device_count() > 1:\n        return torch.device('cuda:1')\n",1)
+    open(mm,"w").write(text)
+    log("Video/audio VAE assigned to GPU1; measure actual work, not allocated memory")
 
     log("Linked all MiniMax H3 Ref2VA models and Scarlett Monroe persistent reference images into ComfyUI.")
 
@@ -459,7 +474,7 @@ def build_ref2va_scene_workflow(prompt: str, ref_images: list, ref_audio_file: s
         r2v_inputs["ref_audios.ref_audio_0"] = [aid, 0]
 
     wf["11"] = {"class_type": "MiniMaxH3ReferenceToVideo", "inputs": r2v_inputs}
-    wf["12"] = {"class_type": "KSamplerSelect", "inputs": {"sampler_name": "res_multistep"}}
+    wf["12"] = {"class_type": "KSamplerSelect", "inputs": {"sampler_name": "euler"}}
     wf["13"] = {"class_type": "BasicScheduler", "inputs": {"model": ["2", 0], "scheduler": "simple", "steps": steps, "denoise": 1.0}}
     wf["14"] = {"class_type": "BasicGuider", "inputs": {"model": ["2", 0], "conditioning": ["11", 0]}}
     wf["15"] = {"class_type": "RandomNoise", "inputs": {"noise_seed": seed}}
@@ -586,7 +601,7 @@ def _run_multiscene_video_job_locked(job_id: str, payload: dict):
 
         scene_mp4s = []
         comfy_prompt_ids = []
-        prev_last_frame_name = None
+        prev_tail_video_name = None
         total_scenes = len(scenes)
 
         for idx, sc in enumerate(scenes):
@@ -594,7 +609,11 @@ def _run_multiscene_video_job_locked(job_id: str, payload: dict):
             scene_started=time.monotonic()
             sc_dur=scene_frames[idx]/24
             sc_start = float(sc.get("start_sec") or sum(float(x.get("duration_sec", 7.0)) for x in scenes[:idx]))
-            gen_dur = sc_dur + (overlap_sec if idx < total_scenes - 1 else 0.0)
+            # Native 22-frame guide carries motion direction/velocity, not just a
+            # still pose. Discard the generated guide prefix exactly once at assembly.
+            guide_frames = 22 if prev_tail_video_name else 0
+            gen_dur = (scene_frames[idx] + guide_frames) / 24
+            audio_start = max(0.0, sc_start - guide_frames / 24)
             frame_len = align_h3_frames(gen_dur, 24)
 
             with JOBS_LOCK:
@@ -612,20 +631,23 @@ def _run_multiscene_video_job_locked(job_id: str, payload: dict):
                 ref_audio_name = f"{job_id}_sc{sc_num}_audio.wav"
                 slice_dst = os.path.join(comfy_inp, ref_audio_name)
                 subprocess.run([
-                    "ffmpeg", "-y", "-ss", f"{sc_start:.2f}", "-t", f"{gen_dur:.2f}",
+                    "ffmpeg", "-y", "-ss", f"{audio_start:.6f}", "-t", f"{gen_dur:.6f}",
                     "-i", master_audio_path, "-ar", "32000", "-ac", "2", slice_dst
                 ], check=False, capture_output=True)
                 if not os.path.exists(slice_dst) or os.path.getsize(slice_dst) < 1000:
                     ref_audio_name = ""
 
             # Fixed reference order avoids changing identity/body conditioning roles.
-            ref_imgs=["scarlett_ref_1.jpg","scarlett_ref_3.jpg","scarlett_ref_2.jpg"]
+            ref_imgs=["scarlett_ref_1.jpg","scarlett_identity_face.png","scarlett_ref_2.jpg"]
             ref_prefix=("Natural live-action footage. Same adult Scarlett Monroe as <Picture 1>; face and hair from <Picture 2>, body proportions from <Picture 3>. "
                 "Keep skeletal dimensions and body volume fixed: no growth, inflation or reshaping during exercise. "
                 "Normal real-time motion, grounded feet, stable exposure, natural skin texture and fabric. "
-                "One location, same clothing and camera axis; no cuts, no slow-motion, no exaggerated body physics. ")
+                "One location and same clothing; one continuous take, no slow-motion or exaggerated body physics. "
+                "Keep the entire head, hands and both shoes visible with floor margin throughout. "
+                "Keep the pelvis near the frame center; fixed focal length and constant camera distance. "
+                "Use the planned gradual change in viewing angle, never a push-in or lateral drift. ")
 
-            audio_clause = "Synchronize every body movement, hip bounce, and dance beat seamlessly with <Audio 1>. " if ref_audio_name else ""
+            audio_clause = "Coordinate the planned movement timing with <Audio 1> without changing normal human mechanics. " if ref_audio_name else ""
             full_prompt = ref_prefix + audio_clause + (sc.get("comfy_prompt") or sc.get("prompt") or "")
 
             wf = build_ref2va_scene_workflow(
@@ -639,9 +661,10 @@ def _run_multiscene_video_job_locked(job_id: str, payload: dict):
                 steps=steps,
                 prefix=f"video/{job_id}_scene_{sc_num}"
             )
-            if prev_last_frame_name:
-                wf["50"]={"class_type":"LoadImage","inputs":{"image":prev_last_frame_name}}
-                wf["51"]={"class_type":"MiniMaxH3AddGuide","inputs":{"positive":["11",0],"latent":["11",1],"vae":["4",0],"image":["50",0],"frame_idx":0}}
+            if prev_tail_video_name:
+                wf["50"]={"class_type":"LoadVideo","inputs":{"file":prev_tail_video_name}}
+                wf["52"]={"class_type":"GetVideoComponents","inputs":{"video":["50",0]}}
+                wf["51"]={"class_type":"MiniMaxH3AddGuide","inputs":{"positive":["11",0],"latent":["11",1],"vae":["4",0],"image":["52",0],"frame_idx":0}}
                 wf["14"]["inputs"]["conditioning"]=["51",0]
             inference_started=time.monotonic()
             pid, raw_clip = run_comfy_and_wait_video(wf,job_id=job_id)
@@ -652,22 +675,21 @@ def _run_multiscene_video_job_locked(job_id: str, payload: dict):
             subprocess.run([
                 "ffmpeg", "-y", "-i", raw_clip,
                 "-frames:v", str(scene_frames[idx]),
-                "-vf", f"scale={out_width}:{out_height}:force_original_aspect_ratio=decrease:flags=lanczos,pad={out_width}:{out_height}:(ow-iw)/2:(oh-ih)/2,fps=24,format=yuv420p",
+                "-vf", f"trim=start_frame={guide_frames},setpts=PTS-STARTPTS,scale={out_width}:{out_height}:force_original_aspect_ratio=decrease:flags=lanczos,pad={out_width}:{out_height}:(ow-iw)/2:(oh-ih)/2,fps=24,format=yuv420p",
                 "-an", "-c:v", "libx264", "-preset", "fast", "-crf", "18",
                 norm_clip
             ], check=True, capture_output=True)
             scene_mp4s.append((norm_clip, gen_dur))
-            scene_timings.append({"scene":sc_num,"inference_sec":round(inference_elapsed,3),"total_sec":round(time.monotonic()-scene_started,3),"rendered_frames":frame_len,"output_frames":scene_frames[idx]})
+            scene_timings.append({"scene":sc_num,"inference_sec":round(inference_elapsed,3),"total_sec":round(time.monotonic()-scene_started,3),"rendered_frames":frame_len,"guide_frames":guide_frames,"output_frames":scene_frames[idx]})
 
-            # Extract final frame for seamless temporal continuity into Scene s+1
-            last_frame_name = f"{job_id}_sc{sc_num}_last.png"
-            last_frame_path = os.path.join(comfy_inp, last_frame_name)
-            subprocess.run([
-                "ffmpeg", "-y", "-sseof", "-0.08", "-i", norm_clip,
-                "-frames:v", "1", "-update", "1", last_frame_path
-            ], check=False, capture_output=True)
-            if os.path.exists(last_frame_path) and os.path.getsize(last_frame_path) > 1000:
-                prev_last_frame_name = last_frame_name
+            # Persist exactly the last 22 unique output frames as native video context.
+            tail_name = f"{job_id}_sc{sc_num}_tail.mp4"
+            tail_path = os.path.join(comfy_inp, tail_name)
+            subprocess.run(["ffmpeg","-y","-i",norm_clip,"-vf",
+                f"trim=start_frame={scene_frames[idx]-22},setpts=PTS-STARTPTS",
+                "-frames:v","22","-an","-c:v","libx264","-crf","12",tail_path],
+                check=True,capture_output=True)
+            prev_tail_video_name = tail_name
 
         with JOBS_LOCK:
             JOBS[job_id].update({
@@ -734,6 +756,8 @@ def _run_multiscene_video_job_locked(job_id: str, payload: dict):
                 "progress": 100,
                 "output_path": final_mp4,
                 "duration_sec": final_dur,
+                "quality_profile":"ref2va-motion-v1",
+                "sampling":{"sampler":"euler","scheduler":"simple","steps":steps,"native_resolution":[diff_width,diff_height],"temporal_guide_frames":22,"face_reference":"crop_of_scarlett_ref_3"},
                 "timings":{"scenes":scene_timings,"total_processing_sec":round(time.monotonic()-job_started,3)},
                 "comfyui_prompt_ids": comfy_prompt_ids,
                 "completed_at": time.time(),
@@ -824,6 +848,7 @@ def start_cloudflared_and_heartbeat():
             return
         payload_dict = {
             "worker_version":"lifecycle-v3",
+            "quality_profile":"ref2va-motion-v1",
             "worker_started_at":STATE["started_at"],
             "service": "minimax_h3_ref2va",
             "username": KAGGLE_USERNAME,
@@ -883,6 +908,7 @@ def main():
         return {
             "ok": True,
             "worker_version":"lifecycle-v3",
+            "quality_profile":"ref2va-motion-v1",
             "worker_started_at":STATE["started_at"],
             "service": "minimax_h3_ref2va",
             "username": KAGGLE_USERNAME,

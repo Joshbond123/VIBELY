@@ -106,3 +106,19 @@ GitHub-hosted jobs have a six-hour execution ceiling and Actions schedules/queue
 Run 41444550365 failed first-boot readiness because ADB was unauthorized, not because a blank emulator was accepted as restored. The pending fix provisions the legitimate ADB host key before the isolated emulator boots and includes that host identity only inside the encrypted whole-AVD archive. An independent runner must restore it before starting its ADB server; weakening adbd authorization is not used. This change still needs native verification.
 
 The same public phone remains connected at the latest check. This is not evidence that its current Google account is restore-protected. The 26-second video is complete but still fails visual acceptance; no improved Gym video or replacement-model inference has been validated. Video quality/camera work remains active after the bounded Android checkpoint test.
+
+## Native whole-phone restore breakthrough (2026-11-02)
+
+Run **41448567887** passed actual official-Play AVD pause/capture, encrypted
+GitHub Release upload/download (Release **431464711**), writer fencing, complete
+VM shutdown and restored VM boot. Native verification returned true for boot,
+display, packages, account hash, settings, userdata, foreground, Android ID and
+permissions. Original authorized host ADB keys were preserved within the
+encrypted archive and restored before starting ADB. This resolved run
+41444550365's unauthorized-ADB boot timeout.
+
+**Scope:** isolated validation phone, zero accounts before/after, no TikTok.
+Not a backup/restore of the signed-in public phone. No Google authentication,
+TikTok, Notes UI, lock acceptance or ownership handover is claimed.
+An independent read-only runner restore of branch
+`android-state-validation-41448567887` was dispatched; result pending.

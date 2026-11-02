@@ -10,6 +10,7 @@ class WorkflowTests(unittest.TestCase):
    n=ns['align_h3_frames'](sec);self.assertEqual(n%17,5);self.assertGreaterEqual(n,round(sec*24))
   w=ns['build_ref2va_scene_workflow']('real motion',['scarlett_ref_1.jpg','scarlett_ref_3.jpg','scarlett_ref_2.jpg'],'',320,576,175,42,4,'test')
   self.assertEqual(w['13']['inputs']['steps'],4)
+  self.assertEqual(w['12']['inputs']['sampler_name'],'euler')
   self.assertEqual(w['11']['inputs']['ref_image_size'],'match')
   self.assertEqual(w['11']['inputs']['width'],320)
   self.assertEqual(w['19']['inputs']['fps'],24.0)
@@ -18,6 +19,10 @@ class WorkflowTests(unittest.TestCase):
   self.assertIn('"class_type":"MiniMaxH3AddGuide"',s)
   self.assertNotIn('xfade=transition',s)
   self.assertNotIn('base_seed + idx',s)
+  self.assertIn('guide_frames = 22 if prev_tail_video_name else 0',s)
+  self.assertIn('trim=start_frame={guide_frames}',s)
+  self.assertIn('\"class_type\":\"GetVideoComponents\"',s)
+  self.assertNotIn('hip bounce, and dance beat',s)
  def test_worker_sources_have_no_credentials(self):
   import re
   for p in (ROOT/'workers').glob('*.py'):
