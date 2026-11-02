@@ -88,6 +88,7 @@ for v in manifest['volumes']:
     block=gzip.decompress(data[offset:offset+n]);offset+=n
     whole.update(block);ph.update(block);total+=len(block);pn+=len(block);sparse_write(f,block)
    if ph.hexdigest()!=part['raw_sha256'] or pn!=part['raw_bytes']:raise ValueError('Part plaintext integrity mismatch')
+   p.unlink() # GitHub remains authoritative; avoid holding ciphertext plus plaintext copies.
   f.truncate(total)
  if total!=v['bytes'] or whole.hexdigest()!=v['sha256']:raise ValueError('Whole volume integrity mismatch')
  d=v['device']
@@ -136,6 +137,9 @@ try:
  if max(stats.mean)<2 or max(stats.stddev)<1:raise ValueError('Restored native display black')
  evidence={'native_boot':True,'original_platform':True,'whole_volume_hashes':True,'account_count':meta['account_count'],'account_rows_match':True,'display':True,'isolated_offline':True,'google_online_authentication_tested':False,'original_host_private_adb_key_available':False,'public_phone_replaced':False,'official_play_image':False}
  (ROOT/'restore-evidence.json').write_text(json.dumps(evidence,indent=2));emit('PASS_ISOLATED_ORIGINAL_GUEST_RESTORE',**evidence)
+ # The recovered AVD embeds the original system/vendor. Drop duplicate SDK
+ # payloads only AFTER a successful native boot; keep version evidence/boot files.
+ for name in ['system.img','vendor.img','userdata.img']:(sdk/name).unlink(missing_ok=True)
  # Promote the reconstructed clone to a genuine whole-AVD/RAM checkpoint for
  # independent restore testing. This is a recovery branch, not production owner.
  archive=ROOT/'whole-avd.tar.zst';run(*(prefix+['env','ANDROID_CHECKPOINT_IMAGE_FAMILY=google_apis','python3','android-emulator/avd_checkpoint.py','capture','--avd',str(AVD),'--archive',str(archive)]),timeout=1800)

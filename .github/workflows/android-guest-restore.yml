@@ -17,7 +17,7 @@ jobs:
     timeout-minutes: 100
     env:
       GITHUB_REPOSITORY: ${{ github.repository }}
-      GH_PAT: ${{ github.token }}
+      GH_PAT: ${{ secrets.GH_PAT || github.token }}
       EMULATOR_STATE_KEY: ${{ secrets.EMULATOR_STATE_KEY }}
       RESCUE_RELEASE_ID: ${{ inputs.release_id }}
       ANDROID_STATE_BRANCH: android-recovered-source-${{ github.run_id }}
@@ -31,7 +31,7 @@ jobs:
           python-version: '3.12'
       - name: Prepare matching platform without booting blank userdata
         run: |
-          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/share/boost
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/share/boost /usr/local/lib/android/sdk/ndk /opt/hostedtoolcache/CodeQL /usr/local/share/powershell /usr/share/swift
           sudo chmod 666 /dev/kvm
           sudo apt-get update -qq
           sudo apt-get install -y -qq zstd iproute2
