@@ -152,19 +152,36 @@ async function prepareDevicePermissions() {
 }
 
 async function recoverAdbConnection() {
-  log('ADB recovery: reconnect / restart server');
+  log('ADB recovery: full reconnect (fixes stuck screen when emulator-5554 vanishes)');
   try { await execFileAsync('adb', ['reconnect'], { timeout: 15000 }); } catch (_) {}
+  try { await execFileAsync('adb', ['disconnect'], { timeout: 10000 }); } catch (_) {}
   try { await execFileAsync('adb', ['kill-server'], { timeout: 15000 }); } catch (_) {}
-  await sleep(1000);
+  await sleep(1200);
   try { await execFileAsync('adb', ['start-server'], { timeout: 20000 }); } catch (_) {}
   await sleep(1500);
-  try { await execFileAsync('adb', ['wait-for-device'], { timeout: 60000 }); } catch (e) { log('wait-for-device: ' + e.message); }
-  try { await execFileAsync('adb', ['root'], { timeout: 15000 }); } catch (_) {}
-  await sleep(1000);
+  // Emulator console ports commonly used on Actions runners
+  for (const endpoint of ['127.0.0.1:5555', '127.0.0.1:5557', 'emulator-5554']) {
+    try { await execFileAsync('adb', ['connect', endpoint], { timeout: 8000 }); } catch (_) {}
+  }
+  try { await execFileAsync('adb', ['wait-for-device'], { timeout: 90000 }); } catch (e) { log('wait-for-device: ' + e.message); }
+  // Prefer device state; do not leave adb as root (looks rooted + can desync serial)
+  try { await execFileAsync('adb', ['unroot'], { timeout: 10000 }); } catch (_) {}
+  await sleep(800);
   try {
-    const { stdout } = await execFileAsync('adb', ['devices'], { timeout: 10000 });
+    const { stdout } = await execFileAsync('adb', ['devices', '-l'], { timeout: 10000 });
     log('ADB devices after recovery: ' + String(stdout).trim());
-    return /emulator-\d+\s+device/.test(stdout || '');
+    const ok = /emulator-\d+\s+device|\d+\.\d+\.\d+\.\d+:\d+\s+device/.test(stdout || '');
+    if (ok && liveDevice?.ensureHealthy) {
+      try {
+        const h = await liveDevice.ensureHealthy();
+        log('Post-ADB scrcpy ensureHealthy: ' + JSON.stringify(h));
+      } catch (e) { log('ensureHealthy after ADB: ' + e.message); }
+    }
+    // Wake display so stream is not a frozen black/last frame
+    try {
+      await execFileAsync('adb', ['shell', 'input keyevent 224; input keyevent 82; svc power stayon true'], { timeout: 15000 });
+    } catch (_) {}
+    return ok;
   } catch (e) {
     log('ADB devices failed: ' + e.message);
     return false;
@@ -782,12 +799,33 @@ async function main() {
         // Soft-clear stuck system permission dialogs only (never force-stop apps)
         try { await prepareDevicePermissions(); } catch (_) {}
 
+        // Keep display awake — frozen black/last-frame is often a sleeping surface
+        try {
+          await adbShell('svc power stayon true; input keyevent 224', 12000);
+        } catch (_) {}
+
+        // Revive scrcpy control/video if either channel died (root cause of "stuck screen")
+        if (liveDevice?.ensureHealthy) {
+          try {
+            const h = await liveDevice.ensureHealthy();
+            if (!h.ok) log('scrcpy ensureHealthy degraded: ' + JSON.stringify(h));
+          } catch (e) {
+            log('ensureHealthy warning: ' + e.message);
+          }
+        }
+
         const { stdout } = await adbShell('getprop sys.boot_completed');
         if (!stdout.trim().startsWith('1')) {
           log('Warning: sys.boot_completed not 1 during health check');
         }
         if (wsClient && wsClient.readyState === WebSocket.OPEN) {
           const di = await collectDeviceInfo();
+          try {
+            if (liveDevice) {
+              di.control_alive = true;
+              di.stream_profile = liveDevice.profile;
+            }
+          } catch (_) {}
           wsClient.send(JSON.stringify({ type: 'heartbeat', sessionId: SESSION_ID, deviceInfo: di }));
         }
       }
