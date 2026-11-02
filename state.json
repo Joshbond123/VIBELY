@@ -1,1 +1,1 @@
-{"current": null, "generation": 0, "owner": "validation-41448567887", "pending": null, "previous": null, "schema": 1}
+{"current": {"created_at": 1793624364, "format": "whole-avd-v1", "manifest": {"bytes": 2437, "id": 701773606, "name": "manifest.gcm", "sha256": "1bb02953663cf6e8230c6f32dadb16c5f476171a341f94bee2fe860a3a97530b"}, "release_id": 431464711, "tag": "android-checkpoint-1-a6306fe4c1f0491d85f0e87c09fc3b0b"}, "generation": 1, "owner": "validation-41448567887", "pending": null, "previous": null, "schema": 1}
