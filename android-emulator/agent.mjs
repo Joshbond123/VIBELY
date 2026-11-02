@@ -25,7 +25,7 @@ const ROTATION_MINUTES = Math.max(2, Number(process.env.ROTATION_MINUTES || 240)
 const RAPID_TEST_CYCLES = Math.max(0, Number(process.env.RAPID_TEST_CYCLES || 0));
 const SIMULATE_BOOT_FAILURE = String(process.env.SIMULATE_BOOT_FAILURE || 'false').toLowerCase() === 'true';
 
-const SESSION_ID = `emu_${RUN_ID}_${crypto.randomBytes(3).toString('hex')}`;
+const SESSION_ID = process.env.GITHUB_AVD_ONLY==='true' && process.env.EMULATOR_SESSION_ID ? process.env.EMULATOR_SESSION_ID : `emu_${RUN_ID}_${crypto.randomBytes(3).toString('hex')}`;
 process.env.EMULATOR_SESSION_ID = SESSION_ID;
 
 const SCRIPTS_DIR = path.dirname(new URL(import.meta.url).pathname);
