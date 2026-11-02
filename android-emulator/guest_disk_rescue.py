@@ -3,7 +3,7 @@
 Credentials remain on the Actions receiver. Nothing is committed from phone data.
 """
 import base64, concurrent.futures, gzip, hashlib, json, os, signal, struct, time, uuid
-import requests
+import requests, re
 from github_state import Store, encrypt, decrypt
 
 BASE=os.environ['EMULATOR_GATEWAY_URL'].rstrip('/')
@@ -16,15 +16,15 @@ release=None;frozen=False
 
 def emit(event,**kw):print(json.dumps({'event':event,**kw}),flush=True)
 def rpc(command,retry=False):
- for attempt in range(3 if retry else 1):
+ for attempt in range(12 if retry else 1):
   try:
    r=requests.post(BASE+'/api/internal/recovery/rpc',headers=HEADERS,json={'session_id':SOURCE,'command':command},timeout=(15,60))
    r.raise_for_status();d=r.json()
    if not d.get('ok') or d.get('session_id')!=SOURCE:raise RuntimeError('RPC target changed or source failed')
    return d.get('stdout','')
   except requests.RequestException:
-   if not retry or attempt==2:raise
-   time.sleep(2)
+   if not retry or attempt==11:raise
+   time.sleep(3)
 def interrupted(*_):raise SystemExit('Receiver interrupted; source thaw attempted')
 signal.signal(signal.SIGTERM,interrupted)
 
@@ -47,8 +47,16 @@ try:
  tag='android-guest-rescue-'+os.environ['GITHUB_RUN_ID']+'-'+uuid.uuid4().hex[:8]
  release=store.api('POST','/releases',json={'tag_name':tag,'target_commitish':'main','name':tag,'draft':True,'prerelease':True,
    'body':'User-approved encrypted frozen guest-disk recovery. NOT a full AVD/RAM snapshot. Restore not yet tested.'})
+ account_dump=rpc('dumpsys account')
+ accounts='\n'.join(sorted(re.findall(r'^\s*Account \{name=([^}]+)\}\s*$',account_dump,re.M)))
+ counts=re.findall(r'^\s*Accounts:\s*(\d+)\s*$',account_dump,re.M)
+ if not counts or sum(map(int,counts))!=len(accounts.splitlines()) or not accounts:raise RuntimeError('Signed-in account proof incomplete; rescue not started')
+ metadata['account_count']=len(accounts.splitlines());metadata['account_hash']=hashlib.sha256(accounts.encode()).hexdigest()
+ # Bound frozen-state diagnostic CLI waits without stopping framework/apps.
+ rpc('touch /dev/vibely-fastdiag-stop; sleep 1; rm /dev/vibely-fastdiag-stop; nohup sh /dev/vibely-fastdiag.sh >/dev/null 2>&1 </dev/null & echo DIAGNOSTIC_GUARD_STARTED')
  # An old short-test watchdog must not thaw this new freeze.
  rpc('if test -f /dev/vibely-rescue-watchdog.pid; then p=$(cat /dev/vibely-rescue-watchdog.pid); case "$(readlink /proc/$p/exe 2>/dev/null)" in */vibely-freeze) kill "$p" 2>/dev/null || true;; esac; fi; '+HELPER+' thaw')
+ frozen=True # An ambiguous freeze response must still trigger emergency thaw.
  out=rpc(HELPER+' freeze 3600')
  if 'FROZEN' not in out:raise RuntimeError('Source freeze not confirmed')
  frozen=True;emit('SOURCE_FILESYSTEMS_FROZEN',watchdog_seconds=3600,release_id=release['id'])
@@ -67,7 +75,14 @@ try:
   for start in range(0,len(args),16):
    yield from executor.map(fetch_chunk,args[start:start+16])
  for volume in volumes:
-  device=volume['device'];remaining=volume['bytes'];count=(remaining+CHUNK-1)//CHUNK
+  device=volume['device']
+  if device=='vda' and frozen:
+   # vda is the read-only system image. Its independent frozen-time hash is
+   # compared below; thaw writable volumes before copying unchanged RO bytes.
+   out=rpc(HELPER+' thaw; touch /dev/vibely-fastdiag-stop')
+   if 'THAWED' not in out:raise RuntimeError('Source thaw not confirmed')
+   frozen=False;emit('SOURCE_THAWED_COPYING_READONLY_SYSTEM')
+  remaining=volume['bytes'];count=(remaining+CHUNK-1)//CHUNK
   vh=hashlib.sha256();volume['parts']=[];part=bytearray();part_raw=0;part_hash=hashlib.sha256()
   args=[(device,i,min(CHUNK,remaining-i*CHUNK)) for i in range(count)]
   with concurrent.futures.ThreadPoolExecutor(max_workers=6) as executor:
@@ -75,7 +90,7 @@ try:
     vh.update(raw);part_hash.update(raw);part_raw+=len(raw)
     part.extend(struct.pack('<I',len(compressed)));part.extend(compressed)
     if (index+1)%16==0 or index==count-1:
-     if 'FROZEN_OK' not in rpc('test ! -e /dev/vibely-rescue-watchdog-fired && echo FROZEN_OK'):raise RuntimeError('Watchdog fired: mixed-time backup rejected')
+     if frozen and 'FROZEN_OK' not in rpc('test ! -e /dev/vibely-rescue-watchdog-fired && echo FROZEN_OK'):raise RuntimeError('Watchdog fired: mixed-time backup rejected')
      number=len(volume['parts']);encrypted=encrypt(bytes(part),store.password)
      asset=store.upload_asset(release,f'{device}-{number:05d}.gcm',encrypted)
      volume['parts'].append({'asset':asset,'raw_bytes':part_raw,'raw_sha256':part_hash.hexdigest(),'encoding':'gzip-records-le32'})
@@ -86,8 +101,8 @@ try:
  hashes={line.split()[1].split('/')[-1]:line.split()[0] for line in rpc('cat /dev/vibely-rescue-source-sha256').splitlines()}
  for v in volumes:
   if hashes.get(v['device'])!=v['sha256']:raise RuntimeError('Source/receiver whole-volume hash mismatch')
- if 'FROZEN_OK' not in rpc('test ! -e /dev/vibely-rescue-watchdog-fired && echo FROZEN_OK'):raise RuntimeError('Freeze deadline exceeded')
- out=rpc(HELPER+' thaw')
+ if frozen and 'FROZEN_OK' not in rpc('test ! -e /dev/vibely-rescue-watchdog-fired && echo FROZEN_OK'):raise RuntimeError('Freeze deadline exceeded')
+ out=rpc(HELPER+' thaw; touch /dev/vibely-fastdiag-stop')
  if 'THAWED' not in out:raise RuntimeError('Source thaw not confirmed')
  frozen=False;emit('SOURCE_THAWED_VOLUME_HASHES_MATCH')
  # Authenticated GitHub read-back after thaw minimizes the pause on the real phone.
@@ -108,5 +123,5 @@ try:
  emit('ENCRYPTED_GUEST_DISK_RESCUE_COMPLETE',release_id=release['id'],tag=tag,restore_tested=False,full_avd=False)
 finally:
  if frozen:
-  try:emit('EMERGENCY_THAW',result='THAWED' in rpc(HELPER+' thaw'))
+  try:emit('EMERGENCY_THAW',result='THAWED' in rpc(HELPER+' thaw; touch /dev/vibely-fastdiag-stop'))
   except Exception:emit('THAW_RPC_FAILED_WATCHDOG_REMAINS',seconds_max=3600)
