@@ -183,7 +183,7 @@ async function collectDeviceInfo() {
       info.installedPackages.push(l.slice(8).trim());
     }
   }
-  if(liveDevice)info.stream_transport='scrcpy-h264';
+  if(liveDevice){info.stream_transport='scrcpy-h264';info.separate_video_channel=true;info.stream_profile=liveDevice.profile;}
   return info;
 }
 

@@ -17,6 +17,7 @@ jobs:
       EMULATOR_STATE_KEY: ${{ secrets.EMULATOR_STATE_KEY }}
       ANDROID_STATE_BRANCH: android-state-validation-${{ github.run_id }}
       AVD_NAME: vibely_disk_validation
+      ANDROID_USER_HOME: /home/runner/.android
       ANDROID_AVD_HOME: /home/runner/.android/avd
       AVD_DIR: /home/runner/.android/avd/vibely_disk_validation.avd
     steps:
@@ -50,6 +51,10 @@ jobs:
           echo 'disk.dataPartition.size=6144M' >> "$AVD_DIR/config.ini"
       - name: Boot actual Android, prepare persistent marker
         run: |
+          mkdir -p "$ANDROID_USER_HOME"
+          if [[ ! -f "$ANDROID_USER_HOME/adbkey" ]]; then adb keygen "$ANDROID_USER_HOME/adbkey" >/dev/null; fi
+          chmod 600 "$ANDROID_USER_HOME/adbkey"
+          adb start-server
           nohup emulator -avd "$AVD_NAME" -no-window -gpu swiftshader_indirect -no-audio -no-boot-anim -no-snapshot-load -no-snapshot-save -memory 3072 > /tmp/validation-emulator.log 2>&1 &
           echo $! > /tmp/validation-emulator.pid
           timeout 420 bash -c 'until adb shell getprop sys.boot_completed 2>/dev/null | grep -q 1; do sleep 4; done'

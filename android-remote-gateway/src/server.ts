@@ -795,6 +795,9 @@ server.on('upgrade', (req, socket, head) => {
 wssAgentVideo.on('connection',(ws:WebSocket,req:http.IncomingMessage)=>{
  const id=new URL(req.url || '/','http://localhost').searchParams.get('sessionId') || '';
  const session=sessions.get(id);if(!session){ws.close(4004,'Control session not registered');return;}
+ // An authenticated media connection is actual evidence of the separate transport,
+ // including legacy agents whose reconnect hello omitted its capability flag.
+ (session.deviceInfo as any).separate_video_channel=true;
  ws.on('message',(raw:Buffer,binary:boolean)=>{if(binary && sessions.get(id)===session)handleAgentFrame(session,raw);});
  ws.on('error',()=>{});
 });

@@ -100,3 +100,9 @@ GitHub-hosted jobs have a six-hour execution ceiling and Actions schedules/queue
 * https://docs.github.com/en/site-policy/github-terms/github-terms-for-additional-products-and-features
 * https://developer.android.com/studio/run/emulator-console
 * https://developer.android.com/studio/run/managing-avds
+
+## Latest checkpoint — continuation
+
+Run 41444550365 failed first-boot readiness because ADB was unauthorized, not because a blank emulator was accepted as restored. The pending fix provisions the legitimate ADB host key before the isolated emulator boots and includes that host identity only inside the encrypted whole-AVD archive. An independent runner must restore it before starting its ADB server; weakening adbd authorization is not used. This change still needs native verification.
+
+The same public phone remains connected at the latest check. This is not evidence that its current Google account is restore-protected. The 26-second video is complete but still fails visual acceptance; no improved Gym video or replacement-model inference has been validated. Video quality/camera work remains active after the bounded Android checkpoint test.

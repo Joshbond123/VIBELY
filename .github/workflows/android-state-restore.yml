@@ -22,6 +22,7 @@ jobs:
       GH_PAT: ${{ github.token }}
       EMULATOR_STATE_KEY: ${{ secrets.EMULATOR_STATE_KEY }}
       ANDROID_STATE_BRANCH: ${{ inputs.state_branch }}
+      ANDROID_USER_HOME: /home/runner/.android
       ANDROID_AVD_HOME: /home/runner/.android/avd
       AVD_DIR: /home/runner/.android/avd/vibely_disk_validation.avd
     steps:
@@ -47,6 +48,7 @@ jobs:
           python android-emulator/avd_checkpoint.py extract --avd "$AVD_DIR" --archive /tmp/restore.tar.zst
       - name: Boot restored disk and RAM on this independent runner
         run: |
+          adb start-server
           nohup emulator -avd vibely_disk_validation -no-window -gpu swiftshader_indirect -no-audio -no-boot-anim -snapshot vibely-checkpoint -no-snapshot-save -memory 3072 > /tmp/restored-emulator.log 2>&1 &
           timeout 420 bash -c 'until adb shell getprop sys.boot_completed 2>/dev/null | grep -q 1; do sleep 4; done'
           python android-emulator/avd_checkpoint.py verify --manifest /tmp/restore.tar.zst.restored.json

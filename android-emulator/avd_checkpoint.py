@@ -109,6 +109,18 @@ def capture(avd, destination, hold=False):
     with tempfile.TemporaryDirectory(prefix='vibely-avd-') as tmp:
         os.chmod(tmp, 0o700)
         stage = Path(tmp)/'avd'
+        # A production Google Play image authorizes this HOST key. A new runner
+        # with a different ADB key is legitimately unauthorized after restore.
+        # Keep the key only inside the encrypted archive, never in logs/artifacts.
+        host_keys = Path(tmp)/'host-adb'
+        host_keys.mkdir(mode=0o700)
+        android_home = Path(os.environ.get('ANDROID_USER_HOME', str(Path.home()/'.android')))
+        for name in ('adbkey', 'adbkey.pub'):
+            key = android_home/name
+            if not key.is_file():
+                raise RuntimeError('Original ADB host key missing; portable restore refused')
+            shutil.copyfile(key, host_keys/name)
+            os.chmod(host_keys/name, 0o600)
         stopped = False
         try:
             adb('sync')
@@ -140,7 +152,7 @@ def capture(avd, destination, hold=False):
         Path(tmp, 'manifest.json').write_text(json.dumps(evidence, sort_keys=True))
         partial = destination.with_suffix(destination.suffix + '.partial')
         try:
-            run('tar', '--sparse', '--zstd', '-cf', str(partial), '-C', tmp, 'avd', 'manifest.json', timeout=900)
+            run('tar', '--sparse', '--zstd', '-cf', str(partial), '-C', tmp, 'avd', 'manifest.json', 'host-adb', timeout=900)
             os.chmod(partial, 0o600)
             # Validate the entire compressed stream, not merely archive headers.
             run('zstd', '-t', str(partial), timeout=600)
@@ -180,6 +192,17 @@ def extract(archive, avd):
         # Never overwrite a preexisting phone implicitly, even on a failed restore.
         if avd.exists():
             raise RuntimeError('Destination already exists; explicit isolated destination required')
+        # Done before starting this isolated runner's ADB server/emulator.
+        # Refuse legacy archives without authorized host keys; do not weaken adbd.
+        host_keys = Path(tmp)/'host-adb'
+        if not all((host_keys/name).is_file() for name in ('adbkey', 'adbkey.pub')):
+            raise RuntimeError('Checkpoint lacks original authorized ADB host identity')
+        android_home = Path(os.environ.get('ANDROID_USER_HOME', str(Path.home()/'.android')))
+        android_home.mkdir(parents=True, exist_ok=True)
+        subprocess.run(['adb', 'kill-server'], capture_output=True, timeout=20)
+        for name in ('adbkey', 'adbkey.pub'):
+            shutil.copyfile(host_keys/name, android_home/name)
+            os.chmod(android_home/name, 0o600)
         os.replace(restored, avd)
         ini = avd.with_suffix('.ini')
         ini.write_text('avd.ini.encoding=UTF-8\npath=' + str(avd) + '\ntarget=android-34\n')
