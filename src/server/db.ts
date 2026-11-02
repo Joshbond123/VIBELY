@@ -142,6 +142,7 @@ async function runMigrations(client: pg.PoolClient): Promise<void> {
     ALTER TABLE video_generations ADD COLUMN IF NOT EXISTS last_activity_at TIMESTAMPTZ NOT NULL DEFAULT NOW();
     ALTER TABLE video_generations ADD COLUMN IF NOT EXISTS stage_timings JSONB NOT NULL DEFAULT '[]'::jsonb;
 
+    ALTER TABLE video_generations ADD COLUMN IF NOT EXISTS min_duration_sec REAL NOT NULL DEFAULT 20;
     CREATE TABLE IF NOT EXISTS gpu_sessions (
       service_id TEXT PRIMARY KEY, state TEXT NOT NULL DEFAULT 'OFF', requested_at TIMESTAMPTZ,
       started_at TIMESTAMPTZ, worker_started_at DOUBLE PRECISION NOT NULL DEFAULT 0,

@@ -36,6 +36,10 @@ export async function acquireGpu(service:string,jobId:string) {
   } else if(booting.has(service)) await booting.get(service);
 }
 
+export async function releaseGpuLease(service:string,jobId:string) {
+  await query('DELETE FROM gpu_leases WHERE service_id=$1 AND job_id=$2',[service,jobId]);
+}
+
 export async function releaseGpuJob(jobId:string) {
   await query('DELETE FROM gpu_leases WHERE job_id=$1',[jobId]);
 }

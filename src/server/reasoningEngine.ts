@@ -1,3 +1,4 @@
+import {planVideoFrames} from './videoDuration.js';
 import crypto from 'crypto';
 import {
   ContentSeriesSpec,
@@ -17,6 +18,7 @@ export interface SceneProductionSpec {
   start_sec: number;
   end_sec: number;
   duration_sec: number;
+  frame_count: number;
   story_beat: string;
   character_position_and_movement: string;
   choreography: string;
@@ -165,8 +167,8 @@ export async function generateFullVideoProductionPlan(options?: {
     ? SCARLETT_CONTENT_SERIES.find((s) => s.id === options.forceSeriesId) || selectWeightedSeries()
     : selectWeightedSeries();
 
-  // Total duration strictly inside 20-40s (3 seamless connected scenes of ~7.3-8.7s => 22-26s default, honoring 20-40s custom)
-  const targetTotal = Math.min(40, Math.max(20, options?.targetDurationSec || (22 + crypto.randomInt(0, 4))));
+  // 26s uses the H3 17n+5 frame grid efficiently without changing inference quality.
+  const targetTotal = Math.min(40, Math.max(25, options?.targetDurationSec ?? 26));
   const includeTwerk = selectedSeries.allowTwerkAccent && crypto.randomInt(0, 100) < 38;
   const history = await getRecentHistorySummary(20);
 
@@ -185,7 +187,7 @@ You MUST obey Scarlett Monroe's Permanent Identity Directive strictly:
 ${SCARLETT_PERMANENT_IDENTITY_PROMPT}
 
 CRITICAL PRODUCTION RULES:
-1. Total video duration MUST equal ${targetTotal} seconds (strictly between 20 and 40 seconds), split across EXACTLY 3 connected, continuous scenes whose durations sum to ${targetTotal} seconds (e.g. 3 scenes of ${(targetTotal / 3).toFixed(1)}s each).
+1. Total video duration MUST equal ${targetTotal} seconds (between 25 and 40 seconds), split across EXACTLY 3 connected, continuous scenes whose durations sum to ${targetTotal} seconds (e.g. 3 scenes of ${(targetTotal / 3).toFixed(1)}s each).
 2. Every scene MUST follow seamlessly from the previous scene: Scene N's entry_pose MUST match Scene (N-1)'s exit_pose, maintaining exact facial identity, platinum-blonde hair, icy-blue eyes, hourglass body proportions, lighting, and location${selectedSeries.outfitTransition ? ' (except at the planned beat-matched outfit transition from stylish casual wear into a glamorous figure-hugging bodycon dress in Scene 2)' : ' and exact outfit continuity across all 3 scenes'}.
 3. Music MUST be an original, non-copyrighted AMAPIANO + AFROBEATS FUSION song (${suggestedBpm} BPM, ${suggestedKey}) featuring catchy female vocals, infectious Amapiano log drums, crisp Afrobeats percussion, deep punchy bass, and all 6 required sections: [Intro], [Verse] with distinctive vocal hook, [Chorus] catchy & repetitive, [Instrumental] dance-friendly break, [Bridge]/[Drop] energetic musical drop, and [Outro] satisfying ending.
 4. For gym_challenge choose ONE simple continuous exercise progression (standing setup -> controlled squats -> standing recovery), at normal speed, fixed focal length and camera axis. No moving to a different bench, no orbiting behind the subject, no abrupt scale/framing changes. Keep lighting and outfit descriptions identical in every scene. Avoid exaggerated anatomy and bounce language: reproduce the reference proportions without amplification.
@@ -263,7 +265,7 @@ Ensure "scenes" has ALL 3 connected scenes (scene_number 1, 2, 3) covering 0s to
 
     const normalizedScenes = normalizeSceneTimeline(parsed.scenes || [], targetTotal, parsed);
     const totalDur = Number(
-      normalizedScenes.reduce((acc, s) => acc + s.duration_sec, 0).toFixed(1)
+      normalizedScenes.reduce((acc, s) => acc + s.frame_count, 0) / 24
     );
 
     const candidatePlan: FullProductionPlan = {
@@ -396,16 +398,16 @@ Return JSON:
 
 function normalizeSceneTimeline(rawScenes: any[], targetTotalSec: number, root: any): SceneProductionSpec[] {
   const count = 3;
-  const clampedTotal = Math.min(40, Math.max(21, targetTotalSec));
-  const perScene = Number((clampedTotal / count).toFixed(2));
+  const frameCounts=planVideoFrames(targetTotalSec,count);
   const out: SceneProductionSpec[] = [];
   let cursor = 0;
 
   for (let i = 0; i < count; i++) {
     const src = rawScenes[i] || {};
-    const dur = i === count - 1 ? Number((clampedTotal - cursor).toFixed(2)) : perScene;
-    const start = Number(cursor.toFixed(2));
-    const end = Number((cursor + dur).toFixed(2));
+    const frames=frameCounts[i];
+    const dur=frames/24;
+    const start=cursor;
+    const end=cursor+dur;
     cursor = end;
 
     const prevExit = i > 0 ? out[i - 1].exit_pose : 'Confident standing model stance facing camera with soft hip angle';
@@ -421,6 +423,7 @@ function normalizeSceneTimeline(rawScenes: any[], targetTotalSec: number, root: 
       start_sec: start,
       end_sec: end,
       duration_sec: dur,
+      frame_count: frames,
       story_beat: String(src.story_beat || `Scene ${i + 1}`),
       character_position_and_movement: String(src.character_position_and_movement || 'Natural fluid full-body movement with realistic weight transfer'),
       choreography: String(src.choreography || root.choreography_summary || 'Rhythmic beat-locked choreography'),

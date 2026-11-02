@@ -498,12 +498,15 @@ def watch_comfy_progress(job_id):
                     job["last_progress_at"]=time.time()
                     if kind=="executing":
                         job["node_id"]=d.get("node")
+                        job["step"]=None;job["step_max"]=None
+                        job["progress_kind"]="sampling" if str(d.get("node"))=="16" else "preprocessing"
                         job.setdefault("node_events",[]).append({"node":d.get("node"),"at":time.time()})
                     if kind=="progress":
                         job["step"]=d.get("value");job["step_max"]=d.get("max")
                         base=(job.get("current_scene",1)-1)/max(1,job.get("total_scenes",1))
                         fraction=float(d.get("value",0))/max(1,float(d.get("max",1)))
-                        job["progress"]=round(5+80*(base+fraction/max(1,job.get("total_scenes",1))))
+                        if job.get("progress_kind")=="sampling":
+                            job["progress"]=round(5+80*(base+fraction/max(1,job.get("total_scenes",1))))
                 if kind in ("execution_success","execution_error") or (kind=="executing" and d.get("node") is None):return
         except Exception as e: log("Progress stream closed: "+str(e))
         finally:ws.close()
@@ -555,6 +558,12 @@ def _run_multiscene_video_job_locked(job_id: str, payload: dict):
         if not scenes:
             raise ValueError("scenes list is required for multi-scene video generation")
 
+        scene_frames=[int(sc.get("frame_count") or round(float(sc.get("duration_sec",0))*24)) for sc in scenes]
+        if any(n<=0 for n in scene_frames) or not 600<=sum(scene_frames)<=959:
+            raise ValueError("New video timeline must contain 600–959 real frames at 24fps (25–40 seconds)")
+        planned_duration=sum(scene_frames)/24
+        job_started=time.monotonic()
+        scene_timings=[]
         diff_width = int(payload.get("diffusion_width") or 256)
         diff_height = int(payload.get("diffusion_height") or 448)
         diff_width = min(384, max(256, (diff_width // 32) * 32))
@@ -582,7 +591,8 @@ def _run_multiscene_video_job_locked(job_id: str, payload: dict):
 
         for idx, sc in enumerate(scenes):
             sc_num = idx + 1
-            sc_dur = float(sc.get("duration_sec") or 7.0)
+            scene_started=time.monotonic()
+            sc_dur=scene_frames[idx]/24
             sc_start = float(sc.get("start_sec") or sum(float(x.get("duration_sec", 7.0)) for x in scenes[:idx]))
             gen_dur = sc_dur + (overlap_sec if idx < total_scenes - 1 else 0.0)
             frame_len = align_h3_frames(gen_dur, 24)
@@ -633,18 +643,21 @@ def _run_multiscene_video_job_locked(job_id: str, payload: dict):
                 wf["50"]={"class_type":"LoadImage","inputs":{"image":prev_last_frame_name}}
                 wf["51"]={"class_type":"MiniMaxH3AddGuide","inputs":{"positive":["11",0],"latent":["11",1],"vae":["4",0],"image":["50",0],"frame_idx":0}}
                 wf["14"]["inputs"]["conditioning"]=["51",0]
+            inference_started=time.monotonic()
             pid, raw_clip = run_comfy_and_wait_video(wf,job_id=job_id)
+            inference_elapsed=time.monotonic()-inference_started
             comfy_prompt_ids.append(pid)
 
             norm_clip = os.path.join(job_work, f"scene_{sc_num}_norm.mp4")
             subprocess.run([
                 "ffmpeg", "-y", "-i", raw_clip,
-                "-t", f"{gen_dur:.2f}",
+                "-frames:v", str(scene_frames[idx]),
                 "-vf", f"scale={out_width}:{out_height}:force_original_aspect_ratio=decrease:flags=lanczos,pad={out_width}:{out_height}:(ow-iw)/2:(oh-ih)/2,fps=24,format=yuv420p",
                 "-an", "-c:v", "libx264", "-preset", "fast", "-crf", "18",
                 norm_clip
             ], check=True, capture_output=True)
             scene_mp4s.append((norm_clip, gen_dur))
+            scene_timings.append({"scene":sc_num,"inference_sec":round(inference_elapsed,3),"total_sec":round(time.monotonic()-scene_started,3),"rendered_frames":frame_len,"output_frames":scene_frames[idx]})
 
             # Extract final frame for seamless temporal continuity into Scene s+1
             last_frame_name = f"{job_id}_sc{sc_num}_last.png"
@@ -672,13 +685,15 @@ def _run_multiscene_video_job_locked(job_id: str, payload: dict):
                 for clip,_ in scene_mp4s: cf.write("file '"+clip+"'\n")
             subprocess.run(["ffmpeg","-y","-f","concat","-safe","0","-i",concat_file,"-c","copy",assembled_visual],check=True,capture_output=True)
 
-        # Probe visual length & enforce strict 20-40s requirement
+        # Validate real visual media; never extend short clips with duplicate frames.
         pr_v = subprocess.run(
             ["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "default=noprint_wrappers=1:nokey=1", assembled_visual],
-            capture_output=True, text=True
+            capture_output=True, text=True, check=True
         )
-        vis_dur = float((pr_v.stdout or "24.0").strip())
-        target_total = min(40.0, max(20.0, vis_dur))
+        vis_dur = float(pr_v.stdout.strip())
+        if not 25<=vis_dur<=40:
+            raise ValueError(f"Assembled visual duration {vis_dur}s outside 25–40 seconds")
+        target_total=planned_duration
 
         final_mp4 = os.path.join(JOBS_DIR, f"{job_id}.mp4")
         if master_audio_path and os.path.exists(master_audio_path):
@@ -703,9 +718,11 @@ def _run_multiscene_video_job_locked(job_id: str, payload: dict):
 
         pr_f = subprocess.run(
             ["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "default=noprint_wrappers=1:nokey=1", final_mp4],
-            capture_output=True, text=True
+            capture_output=True, text=True, check=True
         )
-        final_dur = float((pr_f.stdout or str(target_total)).strip())
+        final_dur = float(pr_f.stdout.strip())
+        if not 25<=final_dur<=40:
+            raise ValueError(f"Actual final MP4 duration {final_dur}s outside 25–40 seconds")
 
         # Clean up temporary intermediate job scene files while keeping final MP4 and persistent models/refs
         shutil.rmtree(job_work, ignore_errors=True)
@@ -716,7 +733,8 @@ def _run_multiscene_video_job_locked(job_id: str, payload: dict):
                 "stage": "completed",
                 "progress": 100,
                 "output_path": final_mp4,
-                "duration_sec": round(final_dur, 2),
+                "duration_sec": final_dur,
+                "timings":{"scenes":scene_timings,"total_processing_sec":round(time.monotonic()-job_started,3)},
                 "comfyui_prompt_ids": comfy_prompt_ids,
                 "completed_at": time.time(),
             })

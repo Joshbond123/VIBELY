@@ -479,7 +479,7 @@ export default function App() {
                       <Film className="w-4 h-4 text-fuchsia-400" />
                     </div>
                     <div className="text-2xl font-bold mt-2">{stats.active_videos || 0}</div>
-                    <div className="text-[11px] text-zinc-500 mt-1">20–40s 9:16 Continuous MP4s</div>
+                    <div className="text-[11px] text-zinc-500 mt-1">25–40s 9:16 Continuous MP4s</div>
                   </div>
                   <div className="p-4 rounded-2xl bg-zinc-900/70 border border-zinc-800/80">
                     <div className="text-xs text-zinc-400 flex items-center justify-between">
@@ -621,7 +621,7 @@ export default function App() {
                     </div>
                     {videos.length === 0 ? (
                       <div className="py-10 text-center text-xs text-zinc-500">
-                        No completed videos in library yet. Click &ldquo;Generate Video&rdquo; to produce Scarlett Monroe&apos;s next 20–40s reel.
+                        No completed videos in library yet. Click &ldquo;Generate Video&rdquo; to produce Scarlett Monroe&apos;s next 25–40s reel.
                       </div>
                     ) : (
                       <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
@@ -668,7 +668,7 @@ export default function App() {
                 <div>
                   <h1 className="text-2xl font-bold tracking-tight">Generate Scarlett Monroe Video</h1>
                   <p className="text-sm text-zinc-400 mt-0.5">
-                    Creates an original 20–40s multi-scene photorealistic video with synced Amapiano + Afrobeats Fusion song
+                    Creates an original 25–40s multi-scene photorealistic video with synced Amapiano + Afrobeats Fusion song
                   </p>
                 </div>
 
@@ -714,7 +714,7 @@ export default function App() {
                     </div>
                     <div className="p-3 rounded-xl bg-zinc-950/70 border border-zinc-800/80">
                       <div className="font-semibold text-zinc-200">Target Duration</div>
-                      <div>Strict 20–40 Seconds</div>
+                      <div>Strict 25–40 Seconds</div>
                     </div>
                     <div className="p-3 rounded-xl bg-zinc-950/70 border border-zinc-800/80">
                       <div className="font-semibold text-zinc-200">Audio Engine</div>
@@ -1105,7 +1105,7 @@ export default function App() {
                   <div>
                     <h1 className="text-2xl font-bold tracking-tight">Video Library</h1>
                     <p className="text-sm text-zinc-400 mt-0.5">
-                      Retained 20–40s photorealistic Scarlett Monroe videos ({videos.length} active)
+                      Retained 25–40s photorealistic Scarlett Monroe videos ({videos.length} active)
                     </p>
                   </div>
                   <button

@@ -1,10 +1,11 @@
+import {assertActualVideoDuration} from './videoDuration.js';
 import crypto from 'crypto';
 import fs from 'fs';
 import path from 'path';
 import { execFile } from 'child_process';
 import { promisify } from 'util';
 import { query } from './db.js';
-import {acquireGpu,releaseGpuJob,acknowledgeGpuOutput,gpuEvent} from './gpuLifecycle.js';
+import {acquireGpu,releaseGpuLease,releaseGpuJob,acknowledgeGpuOutput,gpuEvent} from './gpuLifecycle.js';
 import { generateSocialMetadata } from './socialMetadata.js';
 import {
   FullProductionPlan,
@@ -47,7 +48,7 @@ const KAGGLE_WORKERS = [
   {
     service_id: 'minimax_music_3',
     username: 'happink',
-    slug: 'vibely-minimax-music-3-q4-0-gguf-server',
+    slug: 'vibely-music-gpu-worker',
     endpointDataset: 'happink/vibely-music3-live-endpoint',
     tokenEnv: 'KAGGLE_HAPPINK_TOKEN',
     urlRegex: /VIBELY_MUSIC_TUNNEL_URL=(https:\/\/[a-z0-9-]+\.trycloudflare\.com)/g,
@@ -81,90 +82,25 @@ async function readKaggleEndpointDataset(datasetSlug: string, kToken: string): P
   }
 }
 
-export async function syncKaggleEndpointsAndHealth(): Promise<ModelEndpointRecord[]> {
-  for (const w of KAGGLE_WORKERS) {
-    const kToken = process.env[w.tokenEnv];
-    try {
-      const rows = await query<ModelEndpointRecord>(
-        `SELECT * FROM model_endpoints WHERE service_id = $1`,
-        [w.service_id]
-      );
-      const current = rows[0];
-      let url = current?.endpoint_url || '';
-
-      // Probe current URL if set
-      let healthy = false;
-      if (url) {
-        healthy = await probeWorkerHealth(w.service_id, url);
-      }
-
-      // If no URL or current tunnel unreachable, query Kaggle endpoint dataset + kernel output/status!
-      if (!healthy && kToken) {
-        const epMeta = await readKaggleEndpointDataset(w.endpointDataset, kToken);
-        if (epMeta?.endpoint_url) {
-          url = String(epMeta.endpoint_url).replace(/\/$/, '');
-          if (epMeta.api_key) {
-            await query(
-              `INSERT INTO model_endpoints (service_id, username, model_name, endpoint_url, api_key, status)
-               VALUES ($1, $2, $3, $4, $5, 'probing')
-               ON CONFLICT (service_id) DO UPDATE SET endpoint_url = EXCLUDED.endpoint_url, api_key = EXCLUDED.api_key`,
-              [w.service_id, epMeta.username || w.username, epMeta.model_name || w.service_id, url, epMeta.api_key]
-            );
-          }
-          healthy = await probeWorkerHealth(w.service_id, url);
-        }
-      }
-
-      if (!healthy && kToken) {
-        const statusResp = await workerFetch(
-          `https://www.kaggle.com/api/v1/kernels/status?userName=${w.username}&kernelSlug=${w.slug}`,
-          { headers: { Authorization: `Bearer ${kToken}` } }
-        );
-        let kStatus = 'unknown';
-        if (statusResp.ok) {
-          const sj: any = await statusResp.json();
-          kStatus = sj?.status || 'unknown';
-        }
-
-        const outResp = await workerFetch(
-          `https://www.kaggle.com/api/v1/kernels/output?userName=${w.username}&kernelSlug=${w.slug}`,
-          { headers: { Authorization: `Bearer ${kToken}` } }
-        );
-        if (outResp.ok) {
-          const outJson: any = await outResp.json();
-          const logStr = JSON.stringify(outJson?.log || '');
-          const matches = Array.from(logStr.matchAll(w.urlRegex));
-          if (matches.length > 0) {
-            const latestUrl = matches[matches.length - 1][1];
-            if (latestUrl && latestUrl !== url) {
-              url = latestUrl;
-              healthy = await probeWorkerHealth(w.service_id, url);
-            }
-          }
-        }
-
-        if (!healthy) {
-          await query(
-            `UPDATE model_endpoints
-             SET status = $2, extra_meta = jsonb_set(COALESCE(extra_meta, '{}'::jsonb), '{kaggle_kernel_status}', to_jsonb($3::text)), updated_at = NOW()
-             WHERE service_id = $1`,
-            [w.service_id, kStatus === 'running' ? 'booting_gpu' : kStatus, kStatus]
-          );
-        }
-      }
-    } catch (err: any) {
-      console.warn(`[KaggleSync] ${w.service_id} check note:`, err?.message || err);
-    }
+let syncingEndpoints=false;
+export async function syncKaggleEndpointsAndHealth():Promise<ModelEndpointRecord[]> {
+  // Authenticated heartbeat registration is authoritative. Archived endpoint
+  // datasets must never overwrite a newer worker or block readiness polling.
+  if(!syncingEndpoints){
+    syncingEndpoints=true;
+    try{
+      const current=await query<ModelEndpointRecord>('SELECT * FROM model_endpoints');
+      await Promise.all(current.filter(ep=>ep.endpoint_url && ep.comfyui_ready).map(ep=>probeWorkerHealth(ep.service_id,ep.endpoint_url)));
+    }finally{syncingEndpoints=false;}
   }
-
-  return query<ModelEndpointRecord>(`SELECT * FROM model_endpoints ORDER BY service_id ASC`);
+  return query<ModelEndpointRecord>('SELECT * FROM model_endpoints');
 }
 
 export async function probeWorkerHealth(serviceId: string, baseUrl: string): Promise<boolean> {
   try {
     const ctrl = new AbortController();
     const timer = setTimeout(() => ctrl.abort(), 8000);
-    const resp = await workerFetch(`${baseUrl.replace(/\/$/, '')}/health`, { signal: ctrl.signal });
+    const resp = await fetch(`${baseUrl.replace(/\/$/, '')}/health`, { signal: ctrl.signal });
     clearTimeout(timer);
     if (!resp.ok) return false;
     const h: any = await resp.json();
@@ -207,14 +143,13 @@ async function getReadyEndpoint(serviceId:string,jobId:string):Promise<ModelEndp
   await acquireGpu(serviceId,jobId);
   const start=Date.now();
   while(Date.now()-start<20*60000) {
-    await syncKaggleEndpointsAndHealth();
     const [ep]=await query<ModelEndpointRecord>('SELECT * FROM model_endpoints WHERE service_id=$1',[serviceId]);
     const [session]=await query<any>('SELECT * FROM gpu_sessions WHERE service_id=$1',[serviceId]);
     if(session?.state==='OFF') await acquireGpu(serviceId,jobId);
     if(session?.state==='ERROR') throw new Error(session.error || 'GPU startup failed');
     if(ep?.comfyui_ready && ep.extra_meta?.worker_version==='lifecycle-v3' && session?.state==='ON') return ep;
     if(serviceId==='minimax_h3_ref2va') await updateVideoStage(jobId,'generating_video',`Video GPU ${session?.state || 'UNKNOWN'} — waiting for model/ComfyUI readiness`,42);
-    await new Promise(r=>setTimeout(r,8000));
+    await new Promise(r=>setTimeout(r,2000));
   }
   throw new Error(`GPU startup deadline exceeded for ${serviceId}; check Kaggle quota and session availability`);
 }
@@ -323,6 +258,7 @@ export async function executeMusicGenerationOnComfyUI(params: {
   const arrayBuf = await audioResp.arrayBuffer();
   fs.writeFileSync(filePath, Buffer.from(arrayBuf),{flush:true});
 
+  await execFileAsync('ffmpeg',['-v','error','-i',filePath,'-f','null','-'],{timeout:60000});
   const actualDuration = Number(completedJob.duration_sec || params.durationSec);
   const comfyPromptId = String(completedJob.comfyui_prompt_id || '');
   const workflow = completedJob.workflow_used || {};
@@ -377,9 +313,9 @@ export async function executeMusicGenerationOnComfyUI(params: {
   }
 
   if (params.parentVideoGenId) await query("UPDATE video_generations SET music_track_id=$2, stage_timings=stage_timings || jsonb_build_array(jsonb_build_object('stage','music_completed','at',NOW())) WHERE id=$1",[params.parentVideoGenId,trackId]);
-  await execFileAsync('ffmpeg',['-v','error','-i',filePath,'-f','null','-'],{timeout:60000});
+
   await acknowledgeGpuOutput('minimax_music_3',remoteJobId,{sha256:crypto.createHash('sha256').update(fs.readFileSync(filePath)).digest('hex'),bytes:fs.statSync(filePath).size,playable:true,file:fileName});
-  if(!params.parentVideoGenId) await releaseGpuJob(params.precreatedTrackId || trackId);
+  await releaseGpuLease('minimax_music_3',params.parentVideoGenId || params.precreatedTrackId || trackId);
   return { trackId, fileName, filePath, durationSec: actualDuration, comfyPromptId, workflow };
 }
 
@@ -447,8 +383,8 @@ export async function launchVideoGenerationPipeline(params: {
   const autoDeleteEnabled = setRows[0]?.value?.enabled !== false;
 
   await query(
-    `INSERT INTO video_generations (id, trigger_type, schedule_id, status, current_stage, progress, content_series, series_id, width, height, auto_delete_enabled)
-     VALUES ($1, $2, $3, 'reasoning', 'Layer 1: NVIDIA AI Reasoning creating concept & weighted series...', 5, 'Selecting weighted series...', 'pending', 720, 1280, $4)`,
+    `INSERT INTO video_generations (id, trigger_type, schedule_id, status, current_stage, progress, content_series, series_id, width, height, auto_delete_enabled, min_duration_sec)
+     VALUES ($1, $2, $3, 'reasoning', 'Layer 1: NVIDIA AI Reasoning creating concept & weighted series...', 5, 'Selecting weighted series...', 'pending', 720, 1280, $4, 25)`,
     [genId, params.triggerType, params.scheduleId || null, autoDeleteEnabled]
   );
 
@@ -706,10 +642,16 @@ async function executeAndFinalizeH3Video(opts: {
       '-of', 'default=noprint_wrappers=1:nokey=1', videoFilePath,
     ]);
     const parsedDur = parseFloat(stdout.trim());
-    if (!Number.isNaN(parsedDur) && parsedDur > 0) {
-      verifiedDuration = Number(parsedDur.toFixed(2));
+    if (!Number.isFinite(parsedDur) || parsedDur<=0) throw new Error("Invalid ffprobe duration");
+    if (parsedDur > 0) {
+      verifiedDuration = parsedDur;
     }
-  } catch {}
+  } catch(e:any) {throw new Error('Cannot verify actual rendered duration: '+e.message);}
+  const [durationPolicy]=await query<any>('SELECT min_duration_sec FROM video_generations WHERE id=$1',[genId]);
+  const minimum=Number(durationPolicy?.min_duration_sec || 20);
+  assertActualVideoDuration(verifiedDuration,minimum);
+
+  await execFileAsync('ffmpeg',['-v','error','-i',videoFilePath,'-f','null','-'],{timeout:120000});
 
   const thumbFileName = `${genId}_thumb.jpg`;
   const thumbFilePath = path.join(videosDir, thumbFileName);
