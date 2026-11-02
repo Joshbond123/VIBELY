@@ -16,7 +16,12 @@ import time
 
 
 def run(*args, timeout=120):
-    return subprocess.run(args, check=True, capture_output=True, timeout=timeout).stdout
+    try:
+        return subprocess.run(args, check=True, capture_output=True, timeout=timeout).stdout
+    except subprocess.CalledProcessError as e:
+        if args[0] in ('tar', 'zstd', 'cp'):
+            raise RuntimeError('Host checkpoint operation failed: ' + e.stderr.decode(errors='replace')[-1800:]) from None
+        raise
 
 
 def adb(command):
@@ -61,6 +66,9 @@ def guest_evidence():
     # Compare actual account records, not the diagnostic history containing them.
     account_dump = adb('dumpsys account')
     accounts = '\n'.join(sorted(re.findall(r'^\s*Account \{name=([^}]+)\}\s*$', account_dump, re.M)))
+    counts = re.findall(r'^\s*Accounts:\s*(\d+)\s*$', account_dump, re.M)
+    if not counts or sum(map(int, counts)) != len(accounts.splitlines()):
+        raise RuntimeError('Account inventory could not be parsed completely; verification refused')
     packages = adb('pm list packages -f | sort')
     permission_dump = adb('dumpsys package')
     permissions = canonical_permissions(permission_dump)

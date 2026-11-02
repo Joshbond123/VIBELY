@@ -22,7 +22,7 @@ export async function startLiveDevice(onPacket,onStatus=()=>{}){
  // pinned artifact, so ownership/cleanup belongs to the agent, not either server.
  async function launch(scid,port,options){
   await exec('adb',['forward','tcp:'+port,'localabstract:scrcpy_'+scid]);
-  const server=spawn('adb',['shell','CLASSPATH=/data/local/tmp/vibely-scrcpy.jar','app_process','/','com.genymobile.scrcpy.Server','3.3.4','scid='+scid,'tunnel_forward=true','audio=false','send_dummy_byte=false','send_device_meta=false','cleanup=false',...options],{stdio:['ignore','pipe','pipe']});
+  const server=spawn('adb',['shell','CLASSPATH=/data/local/tmp/vibely-scrcpy.jar','app_process','/','com.genymobile.scrcpy.Server','3.3.4','scid='+scid,'tunnel_forward=true','audio=false','send_dummy_byte=false','send_device_meta=false','cleanup=false','power_on=false',...options],{stdio:['ignore','pipe','pipe']});
   server.stdout.on('data',d=>console.log('[scrcpy '+scid+']',String(d).trim()));server.stderr.on('data',d=>console.error('[scrcpy '+scid+']',String(d).trim()));
   // An adb forward accepts TCP even BEFORE its Android socket exists. A TCP
   // connect alone is not readiness and can prematurely close the encoder.
