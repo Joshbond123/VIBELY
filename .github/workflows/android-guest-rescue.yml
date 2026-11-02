@@ -1,0 +1,32 @@
+name: User-approved existing-phone frozen guest-disk rescue
+on:
+  workflow_dispatch:
+    inputs:
+      source_session:
+        description: Exact existing signed-in session; never replace it
+        required: true
+        type: string
+permissions:
+  contents: write
+concurrency:
+  group: android-original-guest-rescue
+  cancel-in-progress: false
+jobs:
+  receive-encrypted-guest-disks:
+    runs-on: ubuntu-latest
+    timeout-minutes: 85
+    env:
+      GITHUB_REPOSITORY: ${{ github.repository }}
+      GH_PAT: ${{ github.token }}
+      EMULATOR_STATE_KEY: ${{ secrets.EMULATOR_STATE_KEY }}
+      EMULATOR_GATEWAY_URL: ${{ secrets.EMULATOR_GATEWAY_URL }}
+      EMULATOR_GATEWAY_SECRET: ${{ secrets.EMULATOR_GATEWAY_SECRET }}
+      RESCUE_SOURCE_SESSION: ${{ inputs.source_session }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install requests cryptography
+      - name: Freeze, receive, encrypt, thaw, and authenticate GitHub read-back
+        run: python -u android-emulator/guest_disk_rescue.py
