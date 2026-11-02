@@ -666,6 +666,15 @@ async function main() {
 
   // Clear stuck permission dialogs and grant notification perms before user interaction
   await prepareDevicePermissions();
+  // Device realism: Pixel-6-aligned props, sensors, telephony, hide common emulator markers
+  try {
+    const realism = path.join(SCRIPTS_DIR, 'device-realism.sh');
+    const { stdout, stderr } = await execFileAsync('bash', [realism], { timeout: 120000, maxBuffer: 4 * 1024 * 1024 });
+    if (stdout) log(String(stdout).trim().slice(-2000));
+    if (stderr) log('device-realism note: ' + String(stderr).trim().slice(-500));
+  } catch (e) {
+    log('device-realism warning: ' + e.message);
+  }
   // Save a clean initial checkpoint right after promotion
   await runStateManager('backup').catch((e) => log(`Initial backup note: ${e.message}`));
 
