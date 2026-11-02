@@ -1,3 +1,4 @@
+import {FRONTIER_VIDEO_CANDIDATE,LEGACY_VIDEO_ENGINE,validateRequestedVideoEngine,redactStartupError} from './videoEnginePolicy.js';
 import crypto from 'crypto';
 import { gpuDashboard, acceptGpuHeartbeat } from './gpuLifecycle.js';
 import { generateSocialMetadata } from './socialMetadata.js';
@@ -133,6 +134,21 @@ app.get('/api/gpu', async (_req,res)=>{
   try {res.json({ok:true,workers:await gpuDashboard()});}
   catch(e:any){res.status(500).json({ok:false,error:e.message});}
 });
+app.get('/api/video-engine/readiness',async(_req,res)=>{
+  res.json({ok:true,current_engine:LEGACY_VIDEO_ENGINE,candidate:FRONTIER_VIDEO_CANDIDATE,
+    acceptance_requirement:'New video generated through deployed VIBELY; real timing and per-GPU telemetry; frame-by-frame visual acceptance. No sample or mock substitution.'});
+});
+app.post('/api/gpu/startup-failed',async(req,res)=>{
+  if(!process.env.VIBELY_MODEL_REGISTRY_SECRET || req.header('X-Registry-Secret')!==process.env.VIBELY_MODEL_REGISTRY_SECRET){res.status(401).json({ok:false});return;}
+  const service=String(req.body.service_id || '');const started=Number(req.body.attempt_started_at);
+  if(!['minimax_h3_ref2va','minimax_music_3'].includes(service) || !Number.isFinite(started) || Math.abs(Date.now()/1000-started)>1800){res.status(400).json({ok:false,error:'Invalid or expired startup failure'});return;}
+  const error=redactStartupError(req.body.error);
+  const rows=await query<any>(`UPDATE gpu_sessions SET state='ERROR',error=$2,telemetry=NULL,telemetry_at=NULL
+    WHERE service_id=$1 AND state IN ('STARTING','INITIALIZING') AND requested_at<=to_timestamp($3)
+    AND requested_at>=to_timestamp($3)-interval '20 minutes' RETURNING service_id`,[service,error,started]);
+  if(rows.length)await query("INSERT INTO gpu_events(service_id,event,detail) VALUES($1,'STARTUP_FAILED',$2::jsonb)",[service,JSON.stringify({error,source:'GitHub worker deployment'})]);
+  res.json({ok:true,applied:rows.length>0});
+});
 app.post('/api/gpu/stopped',async(req,res)=>{
   if(!process.env.VIBELY_MODEL_REGISTRY_SECRET || req.header('X-Registry-Secret')!==process.env.VIBELY_MODEL_REGISTRY_SECRET){res.status(401).json({ok:false});return;}
   await query("UPDATE gpu_sessions SET state='STOPPING',telemetry=NULL,telemetry_at=NULL WHERE service_id=$1 AND worker_started_at=$2",[req.body.service_id,Number(req.body.worker_started_at)]);
@@ -253,6 +269,9 @@ app.get('/api/videos/:id', async (req, res) => {
 });
 
 app.post('/api/videos/generate', async (req, res) => {
+  const engineError=validateRequestedVideoEngine(req.body?.generation_engine);
+  if(engineError){res.status(409).json({ok:false,error:engineError});return;}
+
   try {
     const forceSeriesId = req.body?.series_id && req.body.series_id !== 'weighted_random' ? String(req.body.series_id) : undefined;
     const genId = await launchVideoGenerationPipeline({
