@@ -1,0 +1,16 @@
+{
+  "source_hashes": {
+    "vdb": "c39628d11159632d1d5b20a1bde5a0c96cc105ea2b4701dd80985fa6bc34d343",
+    "vdd": "f89a4e34206f79ded3f4566a8c4d8248d628c8e4a526d955161856051f0192d4",
+    "vde": "9e4d323f98a35f5c61b24ab25c13908bee6fdc96fa12161d4beb69479e043dd6",
+    "vdc": "65165f6ff5c02239614b9d9aefb3e8c24fdff2ca9f77d6bf32016a3b27b075e0",
+    "vdf": "95549ac877f2f4590a9b38d77f9f3ce7e7e6735f5e780eabe7635f05df630457",
+    "vda": "156534aa2c707edfb57026f7b573a561e513433d7643d9ce3230ae6d65804c7a"
+  },
+  "expected_account": {
+    "account_count": 1,
+    "account_hash": "ef8149c2ea33a83e240400ff9ea477c21284496ad30748cdd30f57127a0eb25c"
+  },
+  "source_freeze_run": "41461984062",
+  "source_freeze_at": "2026-11-02T14:28:21Z"
+}
