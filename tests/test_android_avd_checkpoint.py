@@ -10,6 +10,8 @@ class CaptureSafety(unittest.TestCase):
     def test_failed_copy_releases_even_final_hold(self):
         with tempfile.TemporaryDirectory() as tmp:
             avd=Path(tmp)/'phone.avd';avd.mkdir();(avd/'config.ini').touch();(avd/'userdata-qemu.img').touch()
+            (Path(tmp)/'adbkey').write_text('UNIT-TEST-ONLY-NOT-A-REAL-KEY')
+            (Path(tmp)/'adbkey.pub').write_text('UNIT-TEST-ONLY-PUBLIC-FIXTURE')
             calls=[]
             def console(*args):
                 calls.append(args)
@@ -17,17 +19,19 @@ class CaptureSafety(unittest.TestCase):
             def run(*args,**kwargs):
                 if args[0]=='cp':raise OSError('injected disk copy failure')
                 return b''
-            with patch.object(m,'guest_evidence',return_value={'boot':True}),patch.object(m,'sdk_evidence',return_value={}),patch.object(m,'adb'),patch.object(m,'console',side_effect=console),patch.object(m,'run',side_effect=run):
+            with patch.dict(m.os.environ,{'ANDROID_USER_HOME':tmp}),patch.object(m,'guest_evidence',return_value={'boot':True}),patch.object(m,'sdk_evidence',return_value={}),patch.object(m,'adb'),patch.object(m,'console',side_effect=console),patch.object(m,'run',side_effect=run):
                 with self.assertRaises(OSError):m.capture(avd,Path(tmp)/'archive.zst',hold=True)
             self.assertIn(('avd','start'),calls)
             self.assertFalse((Path(tmp)/'archive.zst').exists())
     def test_running_vm_copy_refused_and_resumed(self):
         with tempfile.TemporaryDirectory() as tmp:
             avd=Path(tmp)/'phone.avd';avd.mkdir();(avd/'config.ini').touch();(avd/'userdata-qemu.img').touch()
+            (Path(tmp)/'adbkey').write_text('UNIT-TEST-ONLY-NOT-A-REAL-KEY')
+            (Path(tmp)/'adbkey.pub').write_text('UNIT-TEST-ONLY-PUBLIC-FIXTURE')
             calls=[]
             def console(*args):
                 calls.append(args);return 'running\nOK' if args==('avd','status') else 'OK'
-            with patch.object(m,'guest_evidence',return_value={'boot':True}),patch.object(m,'sdk_evidence',return_value={}),patch.object(m,'adb'),patch.object(m,'console',side_effect=console),patch.object(m,'run') as copy:
+            with patch.dict(m.os.environ,{'ANDROID_USER_HOME':tmp}),patch.object(m,'guest_evidence',return_value={'boot':True}),patch.object(m,'sdk_evidence',return_value={}),patch.object(m,'adb'),patch.object(m,'console',side_effect=console),patch.object(m,'run') as copy:
                 with self.assertRaises(RuntimeError):m.capture(avd,Path(tmp)/'archive.zst')
                 copy.assert_not_called()
             self.assertIn(('avd','start'),calls)
