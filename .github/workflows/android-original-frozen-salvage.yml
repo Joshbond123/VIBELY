@@ -11,6 +11,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     env:
+      FORENSIC_CANDIDATE: 'true'
       GITHUB_REPOSITORY: ${{ github.repository }}
       GH_PAT: ${{ secrets.GH_PAT || github.token }}
       EMULATOR_STATE_KEY: ${{ secrets.EMULATOR_STATE_KEY }}

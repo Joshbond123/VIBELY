@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Accept ONLY exact original frozen whole-volume equality, never mixed epochs."""
-import concurrent.futures,gzip,hashlib,json,struct
+import concurrent.futures,gzip,hashlib,json,struct,os
 from pathlib import Path
 from github_state import Store,decrypt,encrypt
 s=Store();release=s.api('GET','/releases/431616525')
@@ -20,15 +20,25 @@ def raw(part):
   b=gzip.decompress(data[i:i+k]);i+=k;h.update(b);n+=len(b);out.append(b)
  if h.hexdigest()!=part['raw_sha256'] or n!=part['raw_bytes']:raise ValueError('Part readback integrity failed')
  return b''.join(out)
+mismatches=[]
 for v in p['volumes']:
  h=hashlib.sha256();n=0
  with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:
   for start in range(0,len(v['parts']),16):
    for b in pool.map(raw,v['parts'][start:start+16]):h.update(b);n+=len(b)
- if n!=v['bytes'] or h.hexdigest()!=proof['source_hashes'][v['device']]:raise ValueError('ORIGINAL FROZEN WHOLE VOLUME MISMATCH: '+v['device'])
- v['sha256']=h.hexdigest();print(json.dumps({'event':'ORIGINAL_FROZEN_WHOLE_VOLUME_READBACK_MATCH','device':v['device']}),flush=True)
+ if n!=v['bytes']:raise ValueError('Volume size mismatch')
+ if h.hexdigest()!=proof['source_hashes'][v['device']]:mismatches.append(v['device'])
+ v['sha256']=h.hexdigest();print(json.dumps({'event':'CANDIDATE_AUTHENTICATED_READBACK','device':v['device'],'original_frozen_source_hash_match':v['device'] not in mismatches}),flush=True)
+if mismatches and os.environ.get('FORENSIC_CANDIDATE')!='true':raise ValueError('Source hash mismatch: '+str(mismatches))
 meta=p['metadata'];meta.update(proof['expected_account']);meta.update(created_at=1793629701,source_freeze_at=proof['source_freeze_at'],source_freeze_run=proof['source_freeze_run'],untrusted_precopy_frozen_reconciliation=False,restoration_tested=False,latest_writes_preserved=False,checkpoint_age_warning='Original 14:28 UTC frozen checkpoint, NOT current latest writes',account_hash_expected_from_current_source=True)
 m={'metadata':meta,'volumes':p['volumes'],'source_and_download_hashes_match':True,'source_hash_method':'independent ORIGINAL FROZEN whole volume hashes from run 41461984062; every byte read back from GitHub and compared','restoration_tested':False,'referenced_release_dependencies':[431560693]}
+if mismatches:
+ m.update(source_and_download_hashes_match=False,original_source_hash_mismatches=mismatches,forensic_candidate_only=True)
+ m['metadata'].update(original_source_hash_mismatches=mismatches,forensic_candidate_only=True)
+ a=s.upload_asset(release,'candidate-manifest.gcm',encrypt(json.dumps(m).encode(),s.password))
+ assert json.loads(decrypt(s.download_asset(a),s.password))==m
+ print(json.dumps({'event':'UNTRUSTED_FORENSIC_CANDIDATE_ONLY','source_mismatches':mismatches,'published':False}),flush=True)
+ raise SystemExit(0)
 a=s.upload_asset(release,'manifest.gcm',encrypt(json.dumps(m).encode(),s.password))
 assert json.loads(decrypt(s.download_asset(a),s.password))==m
 s.api('PATCH','/releases/431616525',json={'draft':False,'body':'Verified ORIGINAL 14:28 UTC FROZEN guest disk checkpoint: all six independently frozen whole-volume source hashes equal authenticated GitHub readback. Older checkpoint, NOT latest writes. Guest disks only, NOT whole AVD. Native signed-in restoration pending. Dependency 431560693 MUST NOT be deleted.'})

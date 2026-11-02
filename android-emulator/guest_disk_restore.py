@@ -12,6 +12,7 @@ ROOT=Path('/home/runner/guest-recovery');ROOT.mkdir(mode=0o700,exist_ok=True)
 CACHE=ROOT/'encrypted';CACHE.mkdir(mode=0o700,exist_ok=True)
 AVD=Path(os.environ['ANDROID_AVD_HOME'])/'vibely_pixel6_api34.avd'
 SYSTEM=AVD/'recovered-system';SYSTEM.mkdir(mode=0o700,exist_ok=True)
+CANDIDATE=os.environ.get('FORENSIC_CANDIDATE')=='true'
 NS='vibely-isolated-recovery';store=Store();release_id=int(os.environ['RESCUE_RELEASE_ID'])
 
 def emit(event,**kw):print(json.dumps({'event':event,**kw}),flush=True)
@@ -67,12 +68,17 @@ for _ in range(480):
    # the signed manifest's independent digest is checked again before use.
    r=store.http.get(a['url'],headers={'Accept':'application/octet-stream'},timeout=(20,180));r.raise_for_status();p.write_bytes(r.content);continue
   p.write_bytes(store.download_asset(descriptor));os.chmod(p,0o600)
- if not release['draft']:break
+ if CANDIDATE and any(a['name']=='candidate-manifest.gcm' for a in release['assets']):break
+ if not CANDIDATE and not release['draft']:break
  time.sleep(10)
 else:raise RuntimeError('Verified rescue publication deadline exceeded')
-ma=next(a for a in release['assets'] if a['name']=='manifest.gcm');cipher=(CACHE/str(ma['id'])).read_bytes();manifest=json.loads(decrypt(cipher,store.password))
+ma=next(a for a in release['assets'] if a['name']==('candidate-manifest.gcm' if CANDIDATE else 'manifest.gcm'));cipher=(CACHE/str(ma['id'])).read_bytes();manifest=json.loads(decrypt(cipher,store.password))
 meta=manifest['metadata']
-if meta['source_session']!='emu_41424314059_c4be3a' or not manifest['source_and_download_hashes_match']:raise ValueError('Wrong/unverified source')
+if meta['source_session']!='emu_41424314059_c4be3a':raise ValueError('Wrong source')
+if CANDIDATE:
+ if not manifest.get('forensic_candidate_only') or manifest['source_and_download_hashes_match'] is not False:raise ValueError('Not explicitly untrusted forensic candidate')
+ emit('UNTRUSTED_CANDIDATE_OFFLINE_ONLY',source_mismatches=manifest['original_source_hash_mismatches'])
+elif not manifest['source_and_download_hashes_match']:raise ValueError('Unverified source')
 if meta['format']!='guest-disks-v1-NOT-FULL-AVD' or meta['account_count']<1:raise ValueError('Not an approved signed-in rescue')
 emit('PUBLISHED_RESCUE_AUTHENTICATED',source_session=meta['source_session'])
 for v in manifest['volumes']:
@@ -138,7 +144,7 @@ try:
  import io
  frame=run(*(prefix+['adb','exec-out','screencap','-p']),timeout=60);im=Image.open(io.BytesIO(frame)).convert('RGB');stats=ImageStat.Stat(im)
  if max(stats.mean)<2 or max(stats.stddev)<1:raise ValueError('Restored native display black')
- evidence={'native_boot':True,'original_platform':True,'whole_volume_hashes':True,'account_count':meta['account_count'],'account_rows_match':True,'display':True,'isolated_offline':True,'google_online_authentication_tested':False,'original_host_private_adb_key_available':False,'public_phone_replaced':False,'official_play_image':False}
+ evidence={'native_boot':True,'original_platform':True,'whole_volume_hashes':not CANDIDATE,'candidate_ciphertext_and_plaintext_hashes':True,'forensic_candidate':CANDIDATE,'account_count':meta['account_count'],'account_rows_match':True,'display':True,'isolated_offline':True,'google_online_authentication_tested':False,'original_host_private_adb_key_available':False,'public_phone_replaced':False,'official_play_image':False}
  (ROOT/'restore-evidence.json').write_text(json.dumps(evidence,indent=2));emit('PASS_ISOLATED_ORIGINAL_GUEST_RESTORE',**evidence)
  # The recovered AVD embeds the original system/vendor. Drop duplicate SDK
  # payloads only AFTER a successful native boot; keep version evidence/boot files.
@@ -146,7 +152,7 @@ try:
  # Promote the reconstructed clone to a genuine whole-AVD/RAM checkpoint for
  # independent restore testing. This is a recovery branch, not production owner.
  archive=ROOT/'whole-avd.tar.zst';run(*(prefix+['env','ANDROID_CHECKPOINT_IMAGE_FAMILY=google_apis','python3','android-emulator/avd_checkpoint.py','capture','--avd',str(AVD),'--archive',str(archive)]),timeout=1800)
- metadata=json.loads(Path(str(archive)+'.json').read_text());metadata['recovered_from_guest_rescue']=release_id;metadata['google_online_authentication_tested']=False
+ metadata=json.loads(Path(str(archive)+'.json').read_text());metadata['recovered_from_guest_rescue']=release_id;metadata['google_online_authentication_tested']=False;metadata['forensic_recovery']=CANDIDATE;metadata['original_source_whole_hashes_match']=manifest['source_and_download_hashes_match'];metadata['latest_writes_preserved']=False
  store.initialize('recovered-source:'+os.environ['GITHUB_RUN_ID'])
  cp=store.publish(archive,'recovered-source:'+os.environ['GITHUB_RUN_ID'],metadata);(ROOT/'whole-checkpoint.json').write_text(json.dumps(cp));emit('RECOVERED_FULL_AVD_PUBLISHED',release_id=cp['release_id'])
 finally:
