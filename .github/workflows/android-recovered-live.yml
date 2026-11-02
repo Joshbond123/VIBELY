@@ -1,0 +1,59 @@
+name: Verified signed-in phone timeout recovery (never a clean replacement)
+on:
+  workflow_dispatch:
+    inputs:
+      seed_branch:
+        type: string
+        required: true
+      original_run:
+        type: string
+        required: true
+permissions:
+  contents: write
+concurrency:
+  group: android-verified-account-timeout-recovery
+  cancel-in-progress: false
+jobs:
+  preserve-native-recovered-phone:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    env:
+      GITHUB_REPOSITORY: ${{ github.repository }}
+      GH_PAT: ${{ secrets.GH_PAT || github.token }}
+      EMULATOR_STATE_KEY: ${{ secrets.EMULATOR_STATE_KEY }}
+      EMULATOR_GATEWAY_URL: ${{ secrets.EMULATOR_GATEWAY_URL }}
+      EMULATOR_GATEWAY_SECRET: ${{ secrets.EMULATOR_GATEWAY_SECRET }}
+      EMULATOR_ACCESS_TOKEN: ${{ secrets.EMULATOR_ACCESS_TOKEN }}
+      BLITZ_API_KEY: ${{ secrets.BLITZ_API_KEY }}
+      RECOVERY_SEED_BRANCH: ${{ inputs.seed_branch }}
+      ORIGINAL_SOURCE_RUN: ${{ inputs.original_run }}
+      ANDROID_STATE_BRANCH: android-live-recovery-${{ github.run_id }}
+      EMULATOR_SESSION_ID: emu_recovered_${{ github.run_id }}
+      ANDROID_USER_HOME: /home/runner/.android
+      ANDROID_AVD_HOME: /home/runner/.android/avd
+      AVD_DIR: /home/runner/.android/avd/vibely_pixel6_api34.avd
+      ANDROID_CHECKPOINT_IMAGE_FAMILY: google_apis
+      GITHUB_AVD_ONLY: 'true'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Prepare same platform; do not boot a blank phone
+        run: |
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/share/boost /usr/local/lib/android/sdk/ndk /opt/hostedtoolcache/CodeQL
+          sudo chmod 666 /dev/kvm
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq zstd
+          python -m pip install requests cryptography pillow
+          npm ci --prefix android-emulator
+          echo "$ANDROID_HOME/cmdline-tools/latest/bin" >> "$GITHUB_PATH"
+          echo "$ANDROID_HOME/emulator" >> "$GITHUB_PATH"
+          echo "$ANDROID_HOME/platform-tools" >> "$GITHUB_PATH"
+          "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" 'platform-tools' 'emulator' 'system-images;android-34;google_apis;x86_64'
+          mkdir -p "$ANDROID_AVD_HOME"
+      - name: Require native-verified recovered checkpoint; preserve working original; restore only after source ends
+        run: python -u android-emulator/recovered_live.py

@@ -482,6 +482,7 @@ app.post('/api/internal/handover', requireGatewayAuth, async (req: Request, res:
     }
 
     const oldSession = getActiveSession();
+    if(req.body?.expect_empty===true && oldSession && oldSession.sessionId!==newSession.sessionId){res.status(409).json({ok:false,error:'Working source preserved; emergency recovery requires an empty gateway'});return;}
     let stateSynced = false;
 
     // Step 1: If an active emulator is currently running, flush its live delta & apply to newSession BEFORE cutover!

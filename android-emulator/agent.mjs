@@ -125,8 +125,15 @@ async function adbShell(cmd, timeout = 30000) {
   return { stdout: stdout || '', stderr: stderr || '' };
 }
 
+let adoptedRecoveryCheckpoint=false;
 async function runStateManager(mode) {
   const run = async () => {
+    if(process.env.GITHUB_AVD_ONLY==='true'){
+      if(mode==='restore'){log('Native-verified whole AVD already restored; legacy logical restore is disabled.');return;}
+      if(!adoptedRecoveryCheckpoint){adoptedRecoveryCheckpoint=true;log('Adopted existing verified GitHub checkpoint; no new backup is claimed.');return;}
+      const {stdout,stderr}=await execFileAsync('python3',['android-emulator/github_live_checkpoint.py'],{timeout:1800000,maxBuffer:16*1024*1024,env:{...process.env,EMULATOR_SESSION_ID:SESSION_ID}});
+      if(stdout)process.stdout.write(stdout);if(stderr)process.stderr.write(stderr);return;
+    }
     const { stdout, stderr } = await execFileAsync('bash', [STATE_SCRIPT, mode], {
       timeout: 180000,
       maxBuffer: 16 * 1024 * 1024,
@@ -601,6 +608,7 @@ async function main() {
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
       new_session_id: SESSION_ID,
+      expect_empty: process.env.GITHUB_AVD_ONLY==='true',
       reason: RAPID_TEST_CYCLES > 0 ? 'rapid_e2e_rotation_verification' : 'automatic_4h_workflow_rotation',
     }),
   });
