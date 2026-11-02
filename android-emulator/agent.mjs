@@ -119,17 +119,55 @@ async function gatewayFetch(urlPath, opts = {}, retries = 5) {
 
 
 async function prepareDevicePermissions() {
-  // Soft grants only. NEVER force-stop Gmail/Play or inject Home/Back —
-  // that bounced users out of login and email flows.
-  const grants = [
-    'pm grant com.google.android.gm android.permission.POST_NOTIFICATIONS',
-    'pm grant com.android.vending android.permission.POST_NOTIFICATIONS',
-    'pm grant com.google.android.gms android.permission.POST_NOTIFICATIONS',
-    'cmd appops set com.google.android.gm POST_NOTIFICATION allow',
-    'cmd appops set com.android.vending POST_NOTIFICATION allow',
+  // Soft grants only. NEVER force-stop any user app (Gmail/VPN/TikTok) —
+  // force-stop was the stuck-loop that bounced users home mid-login.
+  const packages = [
+    'com.google.android.gm',
+    'com.android.vending',
+    'com.google.android.gms',
+    'com.android.chrome',
+    'ch.protonvpn.android',
+    'com.zhiliaoapp.musically',
+    'com.ss.android.ugc.trill',
   ];
-  for (const cmd of grants) {
-    try { await adbShell(cmd, 15000); } catch (e) { log('perm note: ' + cmd + ' -> ' + e.message); }
+  for (const pkg of packages) {
+    for (const perm of [
+      'android.permission.POST_NOTIFICATIONS',
+      'android.permission.ACCESS_NETWORK_STATE',
+      'android.permission.INTERNET',
+      'android.permission.FOREGROUND_SERVICE',
+    ]) {
+      try { await adbShell(`pm grant ${pkg} ${perm}`, 12000); } catch (_) {}
+    }
+    try { await adbShell(`cmd appops set ${pkg} POST_NOTIFICATION allow`, 12000); } catch (_) {}
+  }
+  // Only dismiss system permissioncontroller dialogs (never the app itself)
+  try {
+    const { stdout } = await adbShell("dumpsys window | grep -E 'mCurrentFocus|mFocusedApp'", 12000);
+    if (/permissioncontroller|packageinstaller|PermissionController/i.test(stdout || '')) {
+      log('System permission dialog focused — soft BACK once (not force-stop)');
+      await adbShell('input keyevent 4', 8000).catch(() => {});
+    }
+  } catch (_) {}
+}
+
+async function recoverAdbConnection() {
+  log('ADB recovery: reconnect / restart server');
+  try { await execFileAsync('adb', ['reconnect'], { timeout: 15000 }); } catch (_) {}
+  try { await execFileAsync('adb', ['kill-server'], { timeout: 15000 }); } catch (_) {}
+  await sleep(1000);
+  try { await execFileAsync('adb', ['start-server'], { timeout: 20000 }); } catch (_) {}
+  await sleep(1500);
+  try { await execFileAsync('adb', ['wait-for-device'], { timeout: 60000 }); } catch (e) { log('wait-for-device: ' + e.message); }
+  try { await execFileAsync('adb', ['root'], { timeout: 15000 }); } catch (_) {}
+  await sleep(1000);
+  try {
+    const { stdout } = await execFileAsync('adb', ['devices'], { timeout: 10000 });
+    log('ADB devices after recovery: ' + String(stdout).trim());
+    return /emulator-\d+\s+device/.test(stdout || '');
+  } catch (e) {
+    log('ADB devices failed: ' + e.message);
+    return false;
   }
 }
 
@@ -701,12 +739,18 @@ async function main() {
     try {
       const devices = await execFileAsync('adb', ['devices'], { timeout: 10000 }).then(r => r.stdout || '').catch(e => e.message);
       if (!/emulator-\d+\s+device/.test(devices)) {
-        log('CRITICAL: adb has no emulator device — control/stream will appear stuck. Attempting soft recovery keyevents is impossible without a device.');
-        // Best-effort: leave heartbeat with degraded flag so gateway/UI can show recovery state
+        log('CRITICAL: adb has no emulator device — running recoverAdbConnection()');
+        const ok = await recoverAdbConnection();
         if (wsClient && wsClient.readyState === WebSocket.OPEN) {
-          wsClient.send(JSON.stringify({ type: 'heartbeat', sessionId: SESSION_ID, deviceInfo: { degraded: true, adbDevices: devices } }));
+          wsClient.send(JSON.stringify({ type: 'heartbeat', sessionId: SESSION_ID, deviceInfo: { degraded: !ok, adbRecovered: ok, adbDevices: devices } }));
+        }
+        if (!ok) {
+          log('ADB recovery failed this cycle; will retry next health check');
         }
       } else {
+        // Soft-clear stuck system permission dialogs only (never force-stop apps)
+        try { await prepareDevicePermissions(); } catch (_) {}
+
         const { stdout } = await adbShell('getprop sys.boot_completed');
         if (!stdout.trim().startsWith('1')) {
           log('Warning: sys.boot_completed not 1 during health check');
