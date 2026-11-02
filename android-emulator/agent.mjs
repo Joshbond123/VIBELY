@@ -117,6 +117,34 @@ async function gatewayFetch(urlPath, opts = {}, retries = 5) {
   throw new Error(`Gateway unreachable at ${GATEWAY_URL}${urlPath}`);
 }
 
+
+async function prepareDevicePermissions() {
+  // Prevent Gmail/Play notification dialogs from trapping the UI during installs.
+  const grants = [
+    'pm grant com.google.android.gm android.permission.POST_NOTIFICATIONS',
+    'pm grant com.android.vending android.permission.POST_NOTIFICATIONS',
+    'pm grant com.google.android.gms android.permission.POST_NOTIFICATIONS',
+    'cmd appops set com.google.android.gm POST_NOTIFICATION allow',
+    'cmd appops set com.android.vending POST_NOTIFICATION allow',
+    'settings put secure location_mode 0',
+    // Unstick common system permission dialogs
+    'input keyevent 4',
+    'input keyevent 3',
+  ];
+  for (const cmd of grants) {
+    try { await adbShell(cmd, 15000); } catch (e) { log('perm note: ' + cmd + ' -> ' + e.message); }
+  }
+  // If Gmail is foreground with a blocking dialog, force-stop it so Play can resume.
+  try {
+    const { stdout } = await adbShell("dumpsys window | grep -E 'mCurrentFocus|mFocusedApp'", 15000);
+    if (/com\.google\.android\.gm/i.test(stdout)) {
+      log('Gmail focused; force-stopping to clear stuck notification dialog');
+      await adbShell('am force-stop com.google.android.gm', 15000).catch(() => {});
+      await adbShell('input keyevent 3', 10000).catch(() => {});
+    }
+  } catch (e) { log('focus check note: ' + e.message); }
+}
+
 async function adbShell(cmd, timeout = 30000) {
   const { stdout, stderr } = await execFileAsync('adb', ['shell', cmd], {
     timeout,
@@ -648,6 +676,8 @@ async function main() {
     log('Verified external android.aivideo.blitz.cloud user endpoint is live and routed to this emulator!');
   }
 
+  // Clear stuck permission dialogs and grant notification perms before user interaction
+  await prepareDevicePermissions();
   // Save a clean initial checkpoint right after promotion
   await runStateManager('backup').catch((e) => log(`Initial backup note: ${e.message}`));
 
@@ -658,6 +688,11 @@ async function main() {
   while (!retiring) {
     await sleep(20000);
     if (retiring) break;
+
+    // 0. Unstick Gmail/notification permission traps that block Play installs
+    if (Math.floor(activeMinutes * 60) % 120 < 25) {
+      try { await prepareDevicePermissions(); } catch (e) { log('unstick note: ' + e.message); }
+    }
 
     // 1. Local ADB & system health check + heartbeat
     try {
