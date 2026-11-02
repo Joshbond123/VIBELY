@@ -55,7 +55,8 @@ def extract_range(src,dest,start,size):
 # trust draft data: the authenticated published manifest is the acceptance gate.
 for _ in range(480):
  release=store.api('GET','/releases/'+str(release_id))
- for a in release['assets']:
+ dependencies=store.api('GET','/releases/431560693')['assets']
+ for a in release['assets']+dependencies:
   if not a['name'].endswith('.gcm'):continue
   p=CACHE/str(a['id'])
   if p.exists():continue
@@ -78,7 +79,9 @@ for v in manifest['volumes']:
  raw=ROOT/(v['device']+'.raw');whole=hashlib.sha256();total=0
  with raw.open('wb') as f:
   for part in v['parts']:
-   a=part['asset'];p=CACHE/str(a['id']);blob=p.read_bytes()
+   a=part['asset'];p=CACHE/str(a['id'])
+   if not p.exists():p.write_bytes(store.download_asset(a))
+   blob=p.read_bytes()
    if hashlib.sha256(blob).hexdigest()!=a['sha256'] or len(blob)!=a['bytes']:raise ValueError('Encrypted asset digest mismatch')
    data=decrypt(blob,store.password);offset=0;ph=hashlib.sha256();pn=0
    import gzip
