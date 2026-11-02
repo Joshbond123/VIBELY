@@ -22,7 +22,19 @@ export async function startLiveDevice(onPacket,onStatus=()=>{}){
   await exec('adb',['forward','tcp:'+port,'localabstract:scrcpy_'+scid]);
   const server=spawn('adb',['shell','CLASSPATH=/data/local/tmp/vibely-scrcpy.jar','app_process','/','com.genymobile.scrcpy.Server','3.3.4','scid='+scid,'tunnel_forward=true','audio=false','send_dummy_byte=false','send_device_meta=false','cleanup=true',...options],{stdio:['ignore','pipe','pipe']});
   server.stdout.on('data',d=>console.log('[scrcpy '+scid+']',String(d).trim()));server.stderr.on('data',d=>console.error('[scrcpy '+scid+']',String(d).trim()));
-  await delay(500);
+  // An adb forward accepts TCP even BEFORE its Android socket exists. A TCP
+  // connect alone is not readiness and can prematurely close the encoder.
+  let bound=false;
+  for(let i=0;i<60;i++){
+   const unix=await exec('adb',['shell','cat','/proc/net/unix']).catch(()=>({stdout:''}));
+   if(unix.stdout.includes('scrcpy_'+scid)){bound=true;break;}
+   if(server.exitCode!==null)break;
+   await delay(200);
+  }
+  if(!bound){
+   const diagnostic=await exec('adb',['shell','logcat','-d','-t','160','-s','AndroidRuntime:E','libc:F','DEBUG:F']).catch(()=>({stdout:''}));
+   console.error('[native startup diagnostic]',diagnostic.stdout);server.kill();throw new Error('Android abstract socket did not become ready: '+scid+'; exit='+server.exitCode);
+  }
   for(let i=0;i<40;i++){
    try{const socket=await new Promise((resolve,reject)=>{const s=net.connect(port,'127.0.0.1');s.once('connect',()=>resolve(s));s.once('error',reject);});return {server,socket};}catch{await delay(200);}
   }
@@ -53,7 +65,7 @@ export async function startLiveDevice(onPacket,onStatus=()=>{}){
    });
   });
   video.on('error',e=>console.error('[video]',e.message));
-  video.once('close',()=>{if(!stopped && generation===videoGeneration){current=-1;clearTimeout(recoverTimer);recoverTimer=setTimeout(()=>setProfile(requested).catch(e=>console.error('[video recovery]',e.message)),1000);}});
+  video.once('close',()=>{if(!stopped && generation===videoGeneration && current>=0){current=-1;clearTimeout(recoverTimer);recoverTimer=setTimeout(()=>setProfile(requested).catch(e=>console.error('[video recovery]',e.message)),1000);}});
   await ready;
  }
  function setProfile(level){
