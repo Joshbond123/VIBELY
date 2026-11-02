@@ -401,6 +401,19 @@ app.post('/api/internal/verify-standby/:sessionId', requireGatewayAuth, async (r
       return;
     }
 
+    // Never mark an account-less reconstruction READY to replace a signed-in
+    // phone. Only compare digests; do not log/return account identifiers.
+    const activePhone=getActiveSession();
+    if(activePhone && activePhone.sessionId!==s.sessionId){
+      const command="dumpsys account | grep 'Account {name=' | sort";
+      const [before,after]=await Promise.all([callAgentRpc(activePhone,'adb_shell',{command},25000),callAgentRpc(s,'adb_shell',{command},25000)]);
+      const original=String(before?.stdout||'').trim(),candidate=String(after?.stdout||'').trim();
+      if(original && crypto.createHash('sha256').update(original).digest('hex')!==crypto.createHash('sha256').update(candidate).digest('hex')){
+        s.verified=false;
+        res.status(412).json({ok:false,error:'Candidate did not preserve signed-in Android accounts; existing phone preserved. Whole-AVD migration required.'});return;
+      }
+    }
+
     const frameRes = await callAgentRpc(s, 'capture_frame', {}, 25000);
     const frameBuf = frameRes?.jpeg_base64 ? Buffer.from(frameRes.jpeg_base64, 'base64') : null;
     if (!frameBuf || frameBuf.length < 1500) {
