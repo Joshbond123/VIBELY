@@ -17,6 +17,7 @@ jobs:
       EMULATOR_STATE_KEY: ${{ secrets.EMULATOR_STATE_KEY }}
       ANDROID_STATE_BRANCH: android-state-validation-${{ github.run_id }}
       AVD_NAME: vibely_disk_validation
+      ANDROID_AVD_HOME: /home/runner/.android/avd
       AVD_DIR: /home/runner/.android/avd/vibely_disk_validation.avd
     steps:
       - uses: actions/checkout@v4
@@ -37,7 +38,8 @@ jobs:
         run: |
           yes | sdkmanager --licenses >/dev/null 2>&1 || true
           sdkmanager 'platform-tools' 'emulator' 'system-images;android-34;google_apis_playstore;x86_64'
-          echo no | avdmanager create avd -n "$AVD_NAME" -k 'system-images;android-34;google_apis_playstore;x86_64' --device pixel_6
+          mkdir -p "$ANDROID_AVD_HOME"
+          echo no | avdmanager create avd -n "$AVD_NAME" --path "$AVD_DIR" -k 'system-images;android-34;google_apis_playstore;x86_64' --device pixel_6
           echo 'hw.keyboard=yes' >> "$AVD_DIR/config.ini"
           echo 'disk.dataPartition.size=6144M' >> "$AVD_DIR/config.ini"
       - name: Boot actual Android, prepare persistent marker
