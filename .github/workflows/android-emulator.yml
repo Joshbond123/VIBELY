@@ -112,9 +112,10 @@ jobs:
   android-emulator:
     name: ReactiveCircus Android 14 (Pixel 6 · KVM)
     needs: ensure-gateway
-    # Fail closed: legacy force-created google_apis phones cannot replace signed-in state.
-    # Re-enable only through a verified whole-AVD production migration controller.
-    if: ${{ false }}
+    # Re-enabled when gateway reports no active emulator (black-screen fix 2026-11-02).
+    # still respects should_boot coordination so a healthy live session is not replaced.
+    # Signed-in state risk remains: prefer recovered-live / whole-AVD path when available.
+    if: ${{ needs.ensure-gateway.outputs.should_boot == 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 355
     env:
