@@ -1,6 +1,11 @@
 name: Bounded final incremental rescue of original signed-in phone
 on:
   workflow_dispatch:
+    inputs:
+      resume_release_id:
+        type: string
+        required: false
+        description: Existing UNTRUSTED draft only; never mutate a published checkpoint
 permissions:
   contents: write
 concurrency:
@@ -11,6 +16,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 60
     env:
+      RESUME_RELEASE_ID: ${{ inputs.resume_release_id }}
       GITHUB_REPOSITORY: ${{ github.repository }}
       GH_PAT: ${{ secrets.GH_PAT || github.token }}
       EMULATOR_STATE_KEY: ${{ secrets.EMULATOR_STATE_KEY }}

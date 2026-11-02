@@ -60,7 +60,7 @@ def hashes():
  began=time.monotonic()
  while True:
   budget()
-  if 'DONE' in rpc('test -f '+name+'.done && echo DONE'):break
+  if 'DONE' in rpc('test -f '+name+'.done && echo DONE; true'):break
   if time.monotonic()-began>240:raise TimeoutError('Source hash deadline')
   time.sleep(.5 if frozen else 2)
  rows=rpc('cat '+name).splitlines();result={}
@@ -95,20 +95,31 @@ try:
   volumes.append({'device':d,'bytes':n,'parts':[None]*((n+PART-1)//PART)})
  if len(volumes)!=6:raise ValueError('Original disk inventory incomplete')
  metadata={'fingerprint':rpc('getprop ro.build.fingerprint').strip(),'source_session':SID,'source_kind':'existing-root-userdebug','format':'guest-disks-v1-NOT-FULL-AVD','ram_included':False,'host_configuration_included':False,'created_at':int(time.time()),'account_restoration_tested':False,'untrusted_precopy_frozen_reconciliation':True}
- tag='android-guest-rescue-final-'+RUN;release=S.api('POST','/releases',json={'tag_name':tag,'target_commitish':'main','name':tag,'draft':True,'prerelease':True,'body':'UNTRUSTED live precopy. Accept only a published authenticated manifest after bounded frozen reconciliation. NOT full AVD.'})
- # Reuse encrypted partial data as UNTRUSTED precopy, not as a valid backup.
- old=S.api('GET','/releases/431560693');bydev={v['device']:v for v in volumes}
- for a in old['assets']:
-  match=re.fullmatch(r'(vd[a-f])-(\d+)\.gcm',a['name'])
-  if not match:continue
+ resume=os.environ.get('RESUME_RELEASE_ID','')
+ if resume:
+  release=S.api('GET','/releases/'+str(int(resume)))
+  if not release['draft']:raise ValueError('Refusing to mutate a published checkpoint')
+ else:
+  tag='android-guest-rescue-final-'+RUN;release=S.api('POST','/releases',json={'tag_name':tag,'target_commitish':'main','name':tag,'draft':True,'prerelease':True,'body':'UNTRUSTED live precopy. Accept only after bounded frozen reconciliation. NOT full AVD.'})
+ bydev={v['device']:v for v in volumes};assets=S.api('GET','/releases/431560693')['assets']
+ if resume:assets+=release['assets']
+ def load_precopy(a):
+  match=re.fullmatch(r'(vd[a-f])-(\d+)(?:-[a-z0-9]+)?\.gcm',a['name'])
+  if not match:return None
   d,index=match[1],int(match[2]);v=bydev[d]
   desc={'id':a['id'],'name':a['name'],'bytes':a['size'],'sha256':a['digest'].split(':')[-1]};blob=S.download_asset(desc);h,n=unpack(decrypt(blob,S.password))
   if n!=min(PART,v['bytes']-index*PART):raise ValueError('Partial format mismatch')
-  v['parts'][index]={'asset':desc,'raw_bytes':n,'raw_sha256':h,'encoding':'gzip-records-le32'}
+  return d,index,{'asset':desc,'raw_bytes':n,'raw_sha256':h,'encoding':'gzip-records-le32'}
+ with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:
+  for start in range(0,len(assets),16):
+   for item in pool.map(load_precopy,assets[start:start+16]):
+    if item:
+     d,index,part=item;bydev[d]['parts'][index]=part
  emit('UNTRUSTED_PARTIAL_PRECOPY_REUSED',parts=sum(p is not None for v in volumes for p in v['parts']),release_id=release['id'])
  for v in sorted(volumes,key=lambda v:{'vdc':0,'vdf':1,'vdb':2,'vdd':3,'vde':4,'vda':5}[v['device']]):
   for i,p in enumerate(v['parts']):
    if p is None:v['parts'][i]=copy_part(v,i);emit('UNTRUSTED_LIVE_PART',device=v['device'],part=i)
+ S.upload_asset(release,'untrusted-precopy-'+RUN+'.gcm',encrypt(json.dumps({'UNTRUSTED':True,'metadata':metadata,'volumes':volumes}).encode(),S.password))
  # Reduce the final delta while the phone remains live; still no accepted state.
  reconcile(hashes())
  dump=rpc('dumpsys account');accounts='\n'.join(sorted(re.findall(r'^\s*Account \{name=([^}]+)\}\s*$',dump,re.M)));counts=re.findall(r'^\s*Accounts:\s*(\d+)\s*$',dump,re.M)
@@ -128,11 +139,15 @@ try:
    if 'asset' not in p:p['asset']=S.upload_asset(release,f"{v['device']}-{i:05d}-final.gcm",pending[v['device'],i].read_bytes())
    if p['raw_sha256']!=final[v['device'],i]:raise ValueError('Final manifest does not match frozen source')
   full=hashlib.sha256()
-  for p in v['parts']:
-   plain=decrypt(S.download_asset(p['asset']),S.password);offset=0;ph=hashlib.sha256();n=0
+  def authenticated_plain(part):
+   plain=decrypt(S.download_asset(part['asset']),S.password);offset=0;blocks=[];ph=hashlib.sha256();n=0
    while offset<len(plain):
-    k=struct.unpack_from('<I',plain,offset)[0];offset+=4;b=gzip.decompress(plain[offset:offset+k]);offset+=k;full.update(b);ph.update(b);n+=len(b)
-   if ph.hexdigest()!=p['raw_sha256'] or n!=p['raw_bytes']:raise ValueError('Independent GitHub readback failed')
+    k=struct.unpack_from('<I',plain,offset)[0];offset+=4;b=gzip.decompress(plain[offset:offset+k]);offset+=k;blocks.append(b);ph.update(b);n+=len(b)
+   if ph.hexdigest()!=part['raw_sha256'] or n!=part['raw_bytes']:raise ValueError('Independent GitHub readback failed')
+   return b''.join(blocks)
+  with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:
+   for start in range(0,len(v['parts']),16):
+    for raw in pool.map(authenticated_plain,v['parts'][start:start+16]):full.update(raw)
   v['sha256']=full.hexdigest();emit('GITHUB_VOLUME_AUTHENTICATED',device=v['device'])
  manifest={'metadata':metadata,'volumes':volumes,'source_and_download_hashes_match':True,'source_hash_method':'independent 32MiB frozen block hashes','restoration_tested':False,'referenced_release_dependencies':[431560693]}
  ma=S.upload_asset(release,'manifest.gcm',encrypt(json.dumps(manifest).encode(),S.password))
