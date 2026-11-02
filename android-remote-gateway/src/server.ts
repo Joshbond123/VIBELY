@@ -49,6 +49,7 @@ interface AgentSession {
   videoGop?: Buffer[];
   lastFrame: Buffer | null;
   lastFrameAt: number;
+  lastJpegAt?: number;
   pendingRpc: Map<string, { resolve: (val: any) => void; reject: (err: Error) => void; timer: NodeJS.Timeout }>;
 }
 
@@ -408,7 +409,8 @@ app.post('/api/internal/verify-standby/:sessionId', requireGatewayAuth, async (r
     }
 
     s.lastFrame = frameBuf;
-    s.lastFrameAt = Date.now();
+    s.lastJpegAt = Date.now();
+    if(s.deviceInfo.stream_transport!=='scrcpy-h264')s.lastFrameAt=s.lastJpegAt;
     s.verified = true;
     if (probe?.deviceInfo) {
       s.deviceInfo = { ...s.deviceInfo, ...probe.deviceInfo };
@@ -617,11 +619,12 @@ app.get('/api/screen.jpg', requireUserAuth, async (_req: Request, res: Response)
     return;
   }
   try {
-    if (!active.lastFrame || Date.now() - active.lastFrameAt > 1500) {
+    if (!active.lastFrame || Date.now() - (active.lastJpegAt || 0) > 1500) {
       const r = await callAgentRpc(active, 'capture_frame', {}, 15000);
       if (r?.jpeg_base64) {
         active.lastFrame = Buffer.from(r.jpeg_base64, 'base64');
-        active.lastFrameAt = Date.now();
+        active.lastJpegAt = Date.now();
+        if(active.deviceInfo.stream_transport!=='scrcpy-h264')active.lastFrameAt=active.lastJpegAt;
       }
     }
     if (!active.lastFrame) {
@@ -809,6 +812,7 @@ wssAgent.on('connection', (ws: WebSocket, req: http.IncomingMessage) => {
     videoGop:existing?.videoGop,
     lastFrame: existing ? existing.lastFrame : null,
     lastFrameAt: existing ? existing.lastFrameAt : 0,
+    lastJpegAt:existing?.lastJpegAt,
     pendingRpc: new Map(),
   };
   sessions.set(sessionId, session);
