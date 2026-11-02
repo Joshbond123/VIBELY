@@ -9,7 +9,7 @@ import requests
 import github_state as gs
 from avd_checkpoint import extract,verify
 store=gs.Store();target=gs.BRANCH;seed=os.environ['RECOVERY_SEED_BRANCH'];avd=Path(os.environ['AVD_DIR']);archive=Path('/tmp/verified-recovered-avd.tar.zst');owner=os.environ['EMULATOR_SESSION_ID'];base=os.environ['EMULATOR_GATEWAY_URL'].rstrip('/');original_run=os.environ.get('ORIGINAL_SOURCE_RUN','41424314059')
-for _ in range(150):
+for _ in range(360):
  try:
   gs.BRANCH=seed;_,state=store.read();cp=state.get('current')
   if cp:

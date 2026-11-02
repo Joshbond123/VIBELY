@@ -121,16 +121,19 @@ run('sudo','ip','netns','add',NS);run('sudo','ip','-n',NS,'link','set','lo','up'
 # refresh Google tokens or act as a duplicate network writer before ownership.
 prefix=['sudo','ip','netns','exec',NS,'sudo','-u',os.environ['USER'],'env','HOME='+str(Path.home()),'ANDROID_HOME='+os.environ['ANDROID_HOME'],'ANDROID_AVD_HOME='+os.environ['ANDROID_AVD_HOME'],'PATH='+os.environ['PATH']]
 log=(ROOT/'emulator.log').open('wb')
-cmd=['emulator','-avd','vibely_pixel6_api34','-no-window','-no-audio','-no-boot-anim','-no-snapshot','-gpu','swiftshader_indirect','-memory','4096','-cores','4','-system',str(SYSTEM/'system.img'),'-vendor',str(SYSTEM/'vendor.img'),'-data',str(AVD/'userdata-qemu.img'),'-cache',str(AVD/'cache.img'),'-sdcard',str(AVD/'sdcard.img'),'-encryption-key',str(AVD/'encryptionkey.img')]
+cmd=['emulator','-avd','vibely_pixel6_api34','-no-window','-show-kernel','-no-audio','-no-boot-anim','-no-snapshot','-gpu','swiftshader_indirect','-memory','4096','-cores','4','-system',str(SYSTEM/'system.img'),'-vendor',str(SYSTEM/'vendor.img'),'-data',str(AVD/'userdata-qemu.img'),'-cache',str(AVD/'cache.img'),'-sdcard',str(AVD/'sdcard.img'),'-encryption-key',str(AVD/'encryptionkey.img')]
 run(*(prefix+['adb','start-server']))
 proc=subprocess.Popen(prefix+cmd,stdout=log,stderr=subprocess.STDOUT)
 def adb(*args):return run(*(prefix+['adb',*args]),timeout=60).decode(errors='replace').strip()
 def console(*args):return run(*(prefix+['adb','-s','emulator-5554','emu',*args]),timeout=20)
 def diagnostic(label):
  info={'label':label,'emulator_log':(ROOT/'emulator.log').read_text(errors='replace'),'adb_devices':adb('devices','-l')}
+ shots=ROOT/'native-shots';shots.mkdir(mode=0o700,exist_ok=True)
  shot=ROOT/'native-console.png'
  try:
-  console('screenrecord','screenshot',str(shot))
+  info['console_reply']=console('screenrecord','screenshot',str(shots)).decode(errors='replace')
+  found=sorted(shots.glob('*.png'),key=lambda p:p.stat().st_mtime)
+  if found:shutil.copyfile(found[-1],shot)
   if shot.exists():info['native_screenshot_png_base64']=base64.b64encode(shot.read_bytes()).decode()
  except Exception as e:info['console_error']=type(e).__name__
  store.upload_asset(release,'private-diagnostic-'+os.environ['GITHUB_RUN_ID']+'-'+label+'.gcm',encrypt(json.dumps(info).encode(),store.password))
