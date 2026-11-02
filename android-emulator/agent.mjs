@@ -181,20 +181,47 @@ async function adbShell(cmd, timeout = 30000) {
 
 let adoptedRecoveryCheckpoint=false;
 
+// Serialize whole-AVD checkpoints so live saves never overlap/corrupt each other
+let wholeAvdSaveInFlight = null;
 async function saveWholeAvd(hold = false) {
-  try {
-    const env = { ...process.env, CHECKPOINT_HOLD: hold ? 'true' : 'false', EMULATOR_SESSION_ID: SESSION_ID };
-    const { stdout, stderr } = await execFileAsync('bash', [path.join(SCRIPTS_DIR, 'save-whole-avd.sh')], {
-      timeout: 25 * 60 * 1000,
-      maxBuffer: 8 * 1024 * 1024,
-      env,
-    });
-    if (stdout) log(String(stdout).trim().slice(-1500));
-    if (stderr) log('save-whole-avd note: ' + String(stderr).trim().slice(-800));
-    log('Whole-AVD checkpoint attempt finished (hold=' + hold + ').');
-  } catch (e) {
-    log('Whole-AVD checkpoint warning: ' + e.message);
+  if (wholeAvdSaveInFlight) {
+    log('Whole-AVD checkpoint already in progress; waiting for it to finish...');
+    try { await wholeAvdSaveInFlight; } catch (_) {}
+    if (!hold) return; // skip non-hold duplicate; hold (rotation) always runs after
   }
+  const run = async () => {
+    try {
+      const env = { ...process.env, CHECKPOINT_HOLD: hold ? 'true' : 'false', EMULATOR_SESSION_ID: SESSION_ID };
+      const { stdout, stderr } = await execFileAsync('bash', [path.join(SCRIPTS_DIR, 'save-whole-avd.sh')], {
+        timeout: 25 * 60 * 1000,
+        maxBuffer: 8 * 1024 * 1024,
+        env,
+      });
+      if (stdout) log(String(stdout).trim().slice(-1500));
+      if (stderr) log('save-whole-avd note: ' + String(stderr).trim().slice(-800));
+      log('Whole-AVD checkpoint attempt finished (hold=' + hold + ').');
+    } catch (e) {
+      log('Whole-AVD checkpoint warning: ' + e.message);
+    } finally {
+      wholeAvdSaveInFlight = null;
+    }
+  };
+  wholeAvdSaveInFlight = run();
+  return wholeAvdSaveInFlight;
+}
+
+/** Live persistence: logical backup + optional full AVD image (never blocks duty loop forever). */
+async function livePersist(reason = 'periodic', { whole = false, hold = false } = {}) {
+  log(`Live persist start (${reason}, whole=${whole}, hold=${hold})`);
+  try {
+    await runStateManager('backup');
+  } catch (e) {
+    log(`Live logical backup warning (${reason}): ${e.message}`);
+  }
+  if (whole || hold) {
+    await saveWholeAvd(hold).catch((e) => log(`Live whole-AVD warning (${reason}): ${e.message}`));
+  }
+  log(`Live persist done (${reason})`);
 }
 
 async function runStateManager(mode) {
@@ -722,15 +749,19 @@ async function main() {
   } catch (e) {
     log('hide-root warning: ' + e.message);
   }
-  // Save a clean initial checkpoint right after promotion
-  await runStateManager('backup').catch((e) => log(`Initial backup note: ${e.message}`));
+  // Live persistence: full checkpoint immediately after promotion (login/apps after this are saved on the next cycles)
+  await livePersist('post-promotion', { whole: true, hold: false }).catch((e) => log(`Initial persist note: ${e.message}`));
 
-  // Active duty loop: health checks, 10m periodic backups, Blitz keep-alive, and 4-hour rotation trigger
-  let lastBackupMs = Date.now();
+  // Active duty loop: frequent live saves (not only at rotation), health, Blitz wake, 4h rotation
+  // Logical backup every 2 minutes; whole-AVD every 12 minutes (full userdata for restore)
+  const LIVE_LOGICAL_MS = 2 * 60 * 1000;
+  const LIVE_WHOLE_AVD_MS = 12 * 60 * 1000;
+  let lastBackupMs = 0; // force first logical save soon after promotion
+  let lastWholeAvdMs = Date.now(); // whole already done post-promotion
   let lastBlitzWakeMs = Date.now();
 
   while (!retiring) {
-    await sleep(20000);
+    await sleep(15000);
     if (retiring) break;
 
     const activeMinutes = (Date.now() - promotedAtMs) / 60000;
@@ -770,16 +801,22 @@ async function main() {
       await wakeGatewayOnBlitz();
     }
 
-    // 3. Periodic state backup every 10m
-    if (Date.now() - lastBackupMs >= 10 * 60 * 1000) {
+    // 3. Live logical backup every 2 minutes (accounts, apps metadata, settings)
+    if (Date.now() - lastBackupMs >= LIVE_LOGICAL_MS) {
       lastBackupMs = Date.now();
-      await runStateManager('backup').catch((e) => log(`Periodic backup warning: ${e.message}`));
+      await livePersist('live-2m', { whole: false }).catch((e) => log(`Live 2m persist warning: ${e.message}`));
+    }
+
+    // 3b. Live whole-AVD every 12 minutes so installs + Google login survive rotation without waiting 4h
+    if (Date.now() - lastWholeAvdMs >= LIVE_WHOLE_AVD_MS && !wholeAvdSaveInFlight) {
+      lastWholeAvdMs = Date.now();
+      // fire-and-continue: do not block health loop for 10–20m; lock prevents overlap
+      livePersist('live-12m-whole', { whole: true, hold: false }).catch((e) => log(`Live 12m whole warning: ${e.message}`));
     }
 
     // 4. Trigger 4-hour replacement workflow when rotation target is reached
     if (activeMinutes >= ROTATION_MINUTES && replacementDispatchedAt === 0) {
-      await runStateManager('backup').catch(() => {});
-      await saveWholeAvd(true);
+      await livePersist('pre-rotation', { whole: true, hold: true });
       await dispatchReplacementWorkflow();
     }
 
@@ -791,8 +828,7 @@ async function main() {
     // Hard safety ceiling at 345 minutes (15m before GitHub Actions' 360m hard job limit)
     if (activeMinutes >= 345) {
       log('Approaching GitHub Actions 6h runner ceiling (345m); performing final state backup before exit.');
-      await runStateManager('backup').catch(() => {});
-      await saveWholeAvd(true);
+      await livePersist('pre-exit-ceiling', { whole: true, hold: true });
       break;
     }
   }
