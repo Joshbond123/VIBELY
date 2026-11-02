@@ -35,7 +35,7 @@ jobs:
           sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/share/boost /usr/local/lib/android/sdk/ndk /opt/hostedtoolcache/CodeQL /usr/local/share/powershell /usr/share/swift
           sudo chmod 666 /dev/kvm
           sudo apt-get update -qq
-          sudo apt-get install -y -qq zstd iproute2
+          sudo apt-get install -y -qq zstd iproute2 tesseract-ocr
           python -m pip install requests cryptography pillow
           echo "$ANDROID_HOME/cmdline-tools/latest/bin" >> "$GITHUB_PATH"
           echo "$ANDROID_HOME/emulator" >> "$GITHUB_PATH"

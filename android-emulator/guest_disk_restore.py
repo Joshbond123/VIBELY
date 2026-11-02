@@ -4,7 +4,8 @@ Never registers with the public gateway or changes ownership. Not an official
 Play migration; reconstructed host configuration and missing original host key
 are explicit limitations of this emergency format.
 """
-import hashlib,json,os,re,shutil,struct,subprocess,time,zlib
+import hashlib,json,os,re,shutil,struct,subprocess,time,zlib,base64,concurrent.futures
+from github_state import encrypt
 from pathlib import Path
 from github_state import Store,decrypt
 
@@ -57,17 +58,14 @@ def extract_range(src,dest,start,size):
 for _ in range(480):
  release=store.api('GET','/releases/'+str(release_id))
  dependencies=store.api('GET','/releases/431560693')['assets']
- for a in release['assets']+dependencies:
-  if not a['name'].endswith('.gcm'):continue
+ def prefetch(a):
+  if not a['name'].endswith('.gcm'):return
   p=CACHE/str(a['id'])
-  if p.exists():continue
-  descriptor={'id':a['id'],'name':a['name'],'bytes':a['size']}
-  if a.get('digest'):descriptor['sha256']=a['digest'].split(':')[-1]
-  else:
-   # download_asset requires a digest, so compute it only for temporary prefetch;
-   # the signed manifest's independent digest is checked again before use.
-   r=store.http.get(a['url'],headers={'Accept':'application/octet-stream'},timeout=(20,180));r.raise_for_status();p.write_bytes(r.content);continue
+  if p.exists():return
+  if not a.get('digest'):raise ValueError('Missing encrypted asset digest')
+  descriptor={'id':a['id'],'name':a['name'],'bytes':a['size'],'sha256':a['digest'].split(':')[-1]}
   p.write_bytes(store.download_asset(descriptor));os.chmod(p,0o600)
+ with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:list(pool.map(prefetch,release['assets']+dependencies))
  if CANDIDATE and any(a['name']=='candidate-manifest.gcm' for a in release['assets']):break
  if not CANDIDATE and not release['draft']:break
  time.sleep(10)
@@ -80,7 +78,7 @@ if CANDIDATE:
  emit('UNTRUSTED_CANDIDATE_OFFLINE_ONLY',source_mismatches=manifest['original_source_hash_mismatches'])
 elif not manifest['source_and_download_hashes_match']:raise ValueError('Unverified source')
 if meta['format']!='guest-disks-v1-NOT-FULL-AVD' or meta['account_count']<1:raise ValueError('Not an approved signed-in rescue')
-emit('PUBLISHED_RESCUE_AUTHENTICATED',source_session=meta['source_session'])
+emit('CANDIDATE_CIPHERTEXT_AUTHENTICATED' if CANDIDATE else 'PUBLISHED_RESCUE_AUTHENTICATED',source_session=meta['source_session'])
 for v in manifest['volumes']:
  raw=ROOT/(v['device']+'.raw');whole=hashlib.sha256();total=0
  with raw.open('wb') as f:
@@ -127,14 +125,41 @@ cmd=['emulator','-avd','vibely_pixel6_api34','-no-window','-no-audio','-no-boot-
 run(*(prefix+['adb','start-server']))
 proc=subprocess.Popen(prefix+cmd,stdout=log,stderr=subprocess.STDOUT)
 def adb(*args):return run(*(prefix+['adb',*args]),timeout=60).decode(errors='replace').strip()
+def console(*args):return run(*(prefix+['adb','-s','emulator-5554','emu',*args]),timeout=20)
+def diagnostic(label):
+ info={'label':label,'emulator_log':(ROOT/'emulator.log').read_text(errors='replace'),'adb_devices':adb('devices','-l')}
+ shot=ROOT/'native-console.png'
+ try:
+  console('screenrecord','screenshot',str(shot))
+  if shot.exists():info['native_screenshot_png_base64']=base64.b64encode(shot.read_bytes()).decode()
+ except Exception as e:info['console_error']=type(e).__name__
+ store.upload_asset(release,'private-diagnostic-'+os.environ['GITHUB_RUN_ID']+'-'+label+'.gcm',encrypt(json.dumps(info).encode(),store.password))
+ emit('PRIVATE_NATIVE_DIAGNOSTIC_UPLOADED',label=label)
+ return shot
+consent_attempted=False
 try:
- for _ in range(100):
+ for attempt in range(100):
   if proc.poll() is not None:raise RuntimeError('Restored emulator exited; inspect private runner log')
   try:
    if adb('shell','getprop sys.boot_completed')=='1':break
   except subprocess.CalledProcessError:pass
+  if attempt in (8,35):
+   shot=diagnostic(str(attempt))
+   devices=adb('devices','-l')
+   emit('NATIVE_ADB_STATE',unauthorized='unauthorized' in devices,offline='offline' in devices)
+   if 'unauthorized' in devices and shot.exists() and not consent_attempted:
+    # Normal on-screen authorization of this clone's new host key. Never edit
+    # adb_keys, disable authorization, clear a credential, or bypass lockscreen.
+    ocr=run('tesseract',str(shot),'stdout',timeout=30).decode(errors='replace')
+    if 'allow usb debugging' in ocr.lower():
+     consent_attempted=True
+     console('event','send','EV_KEY:KEY_RIGHT:1','EV_KEY:KEY_RIGHT:0','EV_SYN:SYN_REPORT:0')
+     console('event','send','EV_KEY:KEY_ENTER:1','EV_KEY:KEY_ENTER:0','EV_SYN:SYN_REPORT:0')
+     emit('NORMAL_VISIBLE_USB_DEBUGGING_CONSENT_ATTEMPTED')
   time.sleep(4)
- else:raise RuntimeError('Restored boot/normal ADB authorization deadline exceeded; no bypass attempted')
+ else:
+  diagnostic('boot-deadline')
+  raise RuntimeError('Restored boot/normal ADB authorization deadline exceeded; no bypass attempted')
  if adb('shell','getprop ro.build.fingerprint')!=meta['fingerprint']:raise ValueError('Original platform fingerprint not preserved')
  dump=adb('shell','dumpsys account');accounts='\n'.join(sorted(re.findall(r'^\s*Account \{name=([^}]+)\}\s*$',dump,re.M)))
  counts=re.findall(r'^\s*Accounts:\s*(\d+)\s*$',dump,re.M)
