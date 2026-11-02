@@ -43,10 +43,16 @@ export async function startLiveDevice(onPacket,onStatus=()=>{}){
   server.kill();throw new Error('Native scrcpy socket unavailable: '+scid);
  }
  async function startControl(){
+  // Hard-reset any prior control server so recovery cannot wedge on a half-open abstract socket.
+  try{control?.destroy();}catch{}
+  try{controlServer?.kill();}catch{}
+  await exec('adb',['shell','pkill','-f','[s]cid=00000a11']).catch(()=>{});
+  await exec('adb',['forward','--remove','tcp:27183']).catch(()=>{});
+  await delay(250);
   const c=await launch('00000a11',27183,['video=false','control=true','clipboard_autosync=false']);control=c.socket;controlServer=c.server;
   // Drain clipboard acknowledgement messages even though browser input is one-way.
   control.on('data',()=>{});control.on('error',e=>console.error('[control]',e.message));
-  control.once('close',()=>{pointers.clear();if(!stopped)(async()=>{for(let attempt=0;!stopped;attempt++){await delay(Math.min(8000,500*2**attempt));try{await startControl();return;}catch(e){console.error('[control recovery]',e.message);}}})();});
+  control.once('close',()=>{pointers.clear();control=null;if(!stopped)(async()=>{for(let attempt=0;!stopped;attempt++){await delay(Math.min(5000,400*2**attempt));try{await startControl();console.log('[control recovery] restored after attempt',attempt);return;}catch(e){console.error('[control recovery]',e.message);}}})();});
  }
  async function startVideo(level){
   const generation=++videoGeneration,p=STREAM_PROFILES[level];
@@ -77,7 +83,23 @@ export async function startLiveDevice(onPacket,onStatus=()=>{}){
  }
  function extent(p){const landscape=p.landscape===undefined?width>height:Boolean(p.landscape);const naturalLandscape=size[0]>size[1];return landscape===naturalLandscape?size:[size[1],size[0]];}
  function input(p){
-  if(!control||control.destroyed)throw new Error('Native Android control is recovering');
+  // When scrcpy control is down, fall back to adb shell so Home/Back still unstick system dialogs.
+  if(!control||control.destroyed){
+   if(p.kind==='keyevent'){
+    const code=String(Number(p.keycode)||3);
+    exec('adb',['shell','input','keyevent',code]).catch(e=>console.error('[adb key fallback]',e.message));
+    return;
+   }
+   if(p.kind==='pointer' && (p.action==='up'||p.action==='down')){
+    // Approximate tap via adb when control is recovering (best-effort).
+    const [w,h]=extent(p);
+    const x=Math.round(Math.max(0,Math.min(1,Number(p.x)||0))*(w-1));
+    const y=Math.round(Math.max(0,Math.min(1,Number(p.y)||0))*(h-1));
+    if(p.action==='down') exec('adb',['shell','input','tap',String(x),String(y)]).catch(e=>console.error('[adb tap fallback]',e.message));
+    return;
+   }
+   throw new Error('Native Android control is recovering');
+  }
   const [w,h]=extent(p);
   if(p.kind==='pointer'){
    if(p.action==='up'||p.action==='cancel')pointers.delete(p.pointerId);else pointers.set(p.pointerId,p);
