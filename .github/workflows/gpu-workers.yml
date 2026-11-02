@@ -5,7 +5,7 @@ on:
       worker:
         description: Worker to replace (ensure old jobs finished first)
         type: choice
-        options: [all, video, music]
+        options: [all, video, music, probe]
         default: all
 permissions:
   contents: read
