@@ -24,15 +24,28 @@ for kind in ([sys.argv[1]] if len(sys.argv)>1 and sys.argv[1]!='all' else SPECS)
    except urllib.error.HTTPError as e:
     if e.code not in (403,404):raise
   (p/'kernel-metadata.json').write_text(json.dumps(metadata))
-  env={**os.environ,'KAGGLE_USERNAME':user,'KAGGLE_KEY':values['KAGGLE_API_TOKEN'],'KAGGLE_API_TOKEN':values['KAGGLE_API_TOKEN']}
+  # The Kaggle CLI prints API errors but may return exit code zero. Never use
+  # process success as evidence that a notebook version was actually saved/run.
+  os.environ.update({'KAGGLE_USERNAME':user,'KAGGLE_KEY':values['KAGGLE_API_TOKEN'],'KAGGLE_API_TOKEN':values['KAGGLE_API_TOKEN']})
+  from kaggle.api.kaggle_api_extended import KaggleApi
+  api=KaggleApi();api.authenticate()
   for attempt in range(5):
-   result=subprocess.run(['kaggle','kernels','push','-p',temp],env=env,capture_output=True,text=True)
-   if result.returncode==0 or '409' not in result.stderr+result.stdout:break
-   time.sleep(30)
-  # Do not echo CLI output: a vendor exception can contain credentials.
-  if result.returncode:
-   error=result.stderr+'\n'+result.stdout
-   for value in values.values():error=error.replace(value,'[REDACTED]')
-   print(error[-3000:],file=sys.stderr)
-   raise RuntimeError('Kaggle deployment failed for '+kind+' (exit '+str(result.returncode)+')')
-  print('Deployed private '+kind+' worker from GitHub source',flush=True)
+   try:
+    result=api.kernels_push(temp)
+    if result is None:raise RuntimeError('Kaggle SaveKernel returned no result')
+    error=getattr(result,'error',None)
+    if error:raise RuntimeError('Kaggle rejected worker startup: '+str(error))
+    version=getattr(result,'version_number',None) or getattr(result,'versionNumber',None)
+    if not version:raise RuntimeError('Kaggle SaveKernel did not return a saved version number')
+    if getattr(result,'invalid_dataset_sources',None) or getattr(result,'invalidDatasetSources',None):raise RuntimeError('Required private model dataset unavailable to this account')
+    break
+   except Exception as e:
+    message=str(e)
+    for value in values.values():message=message.replace(value,'[REDACTED]')
+    if attempt<4 and ('409' in message or 'Conflict' in message):time.sleep(30);continue
+    raise RuntimeError(message) from None
+  # Verify the saved source rather than reporting a successful render or ready GPU.
+  req=urllib.request.Request('https://www.kaggle.com/api/v1/kernels/pull/'+user+'/'+slug,headers={'Authorization':'Bearer '+values['KAGGLE_API_TOKEN']})
+  saved=json.load(urllib.request.urlopen(req,timeout=30))
+  if saved.get('blob',{}).get('source')!=source:raise RuntimeError('Kaggle source read-back did not match this GitHub worker revision')
+  print('Verified private '+kind+' worker source version '+str(version)+'; runtime readiness still requires authenticated worker heartbeat',flush=True)

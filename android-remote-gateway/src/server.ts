@@ -1,3 +1,4 @@
+import {phoneUi} from './phoneUi.js';
 import express, { Request, Response, NextFunction } from 'express';
 import http from 'http';
 import fs from 'fs';
@@ -20,6 +21,7 @@ const MANIFEST_FILE = path.join(PERSIST_DIR, 'manifest.json');
 const IDENTITY_FILE = path.join(PERSIST_DIR, 'device-identity.json');
 
 interface DeviceInfo {
+  stream_transport?:string;
   androidVersion?: string;
   sdkInt?: string;
   deviceModel?: string;
@@ -43,6 +45,7 @@ interface AgentSession {
   connectedAt: number;
   promotedAt: number | null;
   lastHeartbeatAt: number;
+  videoConfig?: Buffer | null;
   lastFrame: Buffer | null;
   lastFrameAt: number;
   pendingRpc: Map<string, { resolve: (val: any) => void; reject: (err: Error) => void; timer: NodeJS.Timeout }>;
@@ -453,6 +456,8 @@ app.post('/api/internal/handover', requireGatewayAuth, async (req: Request, res:
       stateSynced = fs.existsSync(SNAPSHOT_FILE);
     }
 
+    if(oldSession && oldSession.sessionId!==newSession.sessionId && !stateSynced){res.status(503).json({ok:false,error:'Live state synchronization failed; existing Android session preserved'});return;}
+
     // Step 2: Atomic pointer swap (<1ms downtime!)
     const cutoverStart = Date.now();
     const prevId = oldSession ? oldSession.sessionId : null;
@@ -703,363 +708,7 @@ app.get('/', (req: Request, res: Response) => {
   res.send(renderWebConsoleHtml(authed));
 });
 
-function renderWebConsoleHtml(authenticated: boolean): string {
-  if (!authenticated) {
-    return `<!DOCTYPE html>
-<html lang="en">
-<head>
-  <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>VIBELY Cloud Android — Remote Access Gateway</title>
-  <style>
-    * { box-sizing: border-box; margin: 0; padding: 0; font-family: Inter, -apple-system, BlinkMacSystemFont, sans-serif; }
-    body { min-height: 100vh; background: radial-gradient(circle at top, #172038 0%, #090d16 70%); color: #f8fafc; display: flex; align-items: center; justify-content: center; padding: 20px; }
-    .card { width: 100%; max-width: 430px; background: rgba(17, 24, 39, 0.92); border: 1px solid rgba(99, 102, 241, 0.35); border-radius: 20px; padding: 34px; box-shadow: 0 25px 60px rgba(0,0,0,0.55); }
-    .badge { display: inline-flex; align-items: center; gap: 8px; font-size: 12px; font-weight: 600; color: #34d399; background: rgba(16, 185, 129, 0.14); border: 1px solid rgba(16, 185, 129, 0.3); padding: 5px 12px; border-radius: 999px; margin-bottom: 16px; }
-    h1 { font-size: 23px; font-weight: 700; margin-bottom: 8px; }
-    p { font-size: 13.5px; color: #94a3b8; line-height: 1.5; margin-bottom: 22px; }
-    label { display: block; font-size: 12px; font-weight: 600; color: #cbd5e1; margin-bottom: 8px; text-transform: uppercase; letter-spacing: 0.05em; }
-    input { width: 100%; padding: 12px 14px; border-radius: 10px; border: 1px solid #334155; background: #0f172a; color: #fff; font-size: 14px; margin-bottom: 16px; outline: none; }
-    input:focus { border-color: #6366f1; }
-    button { width: 100%; padding: 12px 16px; border: none; border-radius: 10px; background: linear-gradient(135deg, #6366f1, #8b5cf6); color: #fff; font-weight: 600; font-size: 14px; cursor: pointer; }
-    button:hover { opacity: 0.94; }
-    .err { color: #f87171; font-size: 13px; margin-top: 12px; min-height: 18px; }
-  </style>
-</head>
-<body>
-  <div class="card">
-    <div class="badge">● ReactiveCircus Android 14 · android.aivideo.blitz.cloud</div>
-    <h1>Android Remote Phone Studio</h1>
-    <p>Enter your secure <code>EMULATOR_ACCESS_TOKEN</code> to view and control the persistent Android virtual device.</p>
-    <form id="loginForm">
-      <label>Access Token</label>
-      <input type="password" id="tok" placeholder="Enter EMULATOR_ACCESS_TOKEN..." required autofocus />
-      <button type="submit">Connect to Virtual Phone</button>
-      <div class="err" id="err"></div>
-    </form>
-  </div>
-  <script>
-    document.getElementById('loginForm').addEventListener('submit', async (e) => {
-      e.preventDefault();
-      const token = document.getElementById('tok').value.trim();
-      const r = await fetch('/api/auth/login', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ token })
-      });
-      if (r.ok) location.reload();
-      else document.getElementById('err').textContent = 'Invalid access token.';
-    });
-  </script>
-</body>
-</html>`;
-  }
-
-  return `<!DOCTYPE html>
-<html lang="en">
-<head>
-  <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>VIBELY Cloud Android 14 — Live Remote Phone</title>
-  <style>
-    * { box-sizing: border-box; margin: 0; padding: 0; font-family: Inter, -apple-system, BlinkMacSystemFont, sans-serif; }
-    body { background: #090d16; color: #f1f5f9; min-height: 100vh; display: flex; flex-direction: column; }
-    header { display: flex; align-items: center; justify-content: space-between; padding: 12px 22px; background: #111827; border-bottom: 1px solid #1e293b; flex-wrap: wrap; gap: 10px; }
-    .brand { display: flex; align-items: center; gap: 12px; }
-    .dot { width: 10px; height: 10px; border-radius: 50%; background: #ef4444; box-shadow: 0 0 10px #ef4444; }
-    .dot.live { background: #10b981; box-shadow: 0 0 12px #10b981; }
-    .pill { font-size: 12px; background: #1e293b; padding: 4px 10px; border-radius: 999px; color: #cbd5e1; border: 1px solid #334155; }
-    main { flex: 1; display: grid; grid-template-columns: minmax(340px, 460px) 1fr; gap: 20px; padding: 20px; max-width: 1480px; width: 100%; margin: 0 auto; }
-    @media (max-width: 960px) { main { grid-template-columns: 1fr; } }
-    .phone-wrap { display: flex; flex-direction: column; align-items: center; gap: 12px; }
-    .phone-frame { background: #05070c; border: 4px solid #334155; border-radius: 34px; padding: 12px; box-shadow: 0 25px 60px rgba(0,0,0,0.65); position: relative; width: 356px; max-width: 100%; }
-    canvas { width: 100%; aspect-ratio: 9 / 20; background: #020617; border-radius: 22px; display: block; cursor: pointer; touch-action: none; }
-    .nav-bar { display: grid; grid-template-columns: repeat(6, 1fr); gap: 6px; width: 356px; max-width: 100%; }
-    .btn { background: #1e293b; border: 1px solid #334155; color: #e2e8f0; padding: 9px 10px; border-radius: 10px; font-size: 12.5px; font-weight: 600; cursor: pointer; transition: 0.15s; }
-    .btn:hover { background: #334155; border-color: #6366f1; }
-    .btn.primary { background: #4f46e5; border-color: #6366f1; color: #fff; }
-    .panel { background: #111827; border: 1px solid #1e293b; border-radius: 16px; padding: 18px; display: flex; flex-direction: column; gap: 16px; }
-    .grid2 { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 10px; }
-    .stat { background: #0b1120; border: 1px solid #1e293b; border-radius: 12px; padding: 12px; }
-    .stat .k { font-size: 11px; color: #94a3b8; text-transform: uppercase; letter-spacing: 0.04em; }
-    .stat .v { font-size: 14px; font-weight: 700; margin-top: 4px; color: #f8fafc; word-break: break-all; }
-    .row { display: flex; gap: 8px; }
-    input[type="text"] { flex: 1; background: #0b1120; border: 1px solid #334155; color: #fff; padding: 9px 12px; border-radius: 9px; font-size: 13px; }
-    pre { background: #050811; border: 1px solid #1e293b; border-radius: 10px; padding: 12px; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; color: #a7f3d0; max-height: 240px; overflow: auto; white-space: pre-wrap; }
-    h2 { font-size: 15px; font-weight: 700; color: #e2e8f0; }
-    table { width: 100%; border-collapse: collapse; font-size: 12px; }
-    th, td { text-align: left; padding: 7px 8px; border-bottom: 1px solid #1e293b; color: #cbd5e1; }
-    th { color: #94a3b8; font-weight: 600; }
-    /* Live Android framebuffer is the primary surface; tools are opt-in. */
-    html, body { width:100%; height:100%; overflow:hidden; background:#000; }
-    body { min-height:100dvh; }
-    body > header { position:fixed; z-index:20; top:8px; right:8px; padding:6px; border:0; background:rgba(15,23,42,.72); border-radius:12px; }
-    header .brand { display:none; }
-    main { display:block; position:fixed; inset:0; padding:0; max-width:none; margin:0; }
-    .phone-wrap { height:100%; gap:0; justify-content:center; }
-    .phone-frame { display:flex; justify-content:center; align-items:center; width:100%; height:calc(100dvh - 44px - env(safe-area-inset-bottom)); border:0; padding:0; border-radius:0; box-shadow:none; background:#000; }
-    canvas { width:auto; height:100%; max-width:100vw; max-height:100%; aspect-ratio:9 / 20; border-radius:0; object-fit:contain; }
-    .nav-bar { width:min(100%,540px); height:44px; padding:4px; flex-shrink:0; }
-    .phone-wrap > .row { display:none; }
-    main > div:not(.phone-wrap) { display:none !important; }
-    body.tools-open main > div:not(.phone-wrap) { display:flex !important; position:fixed; right:0; top:55px; bottom:50px; width:min(520px,100vw); overflow:auto; z-index:30; padding:12px; background:#090d16; }
-    body.tools-open .phone-wrap > .row { display:flex; position:fixed; bottom:48px; z-index:35; background:#111827; padding:8px; }
-    @media (orientation:landscape) { canvas { max-width:calc((100dvh - 44px) * .45); } }
-  </style>
-</head>
-<body>
-  <header>
-    <div class="brand">
-      <div class="dot" id="connDot"></div>
-      <strong>VIBELY Cloud Android 14 (Pixel 6 · KVM)</strong>
-      <span class="pill" id="sessBadge">Connecting...</span>
-      <span class="pill" id="fpsBadge">0 FPS</span>
-    </div>
-    <div style="display:flex;gap:8px;align-items:center;">
-      <button class="btn primary" onclick="triggerCheckpoint()">Save State Now</button>
-      <button class="btn" id="toolsToggle" onclick="document.body.classList.toggle('tools-open')">Tools</button>
-      <button class="btn" id="fullscreenToggle" onclick="toggleFullscreen()">Full screen</button>
-    </div>
-  </header>
-
-  <main>
-    <div class="phone-wrap">
-      <div class="phone-frame">
-        <canvas id="screen" width="540" height="1200"></canvas>
-      </div>
-      <div class="nav-bar">
-        <button class="btn" onclick="sendKey(4)" title="Back">◁ Back</button>
-        <button class="btn" onclick="sendKey(3)" title="Home">○ Home</button>
-        <button class="btn" onclick="sendKey(187)" title="Recents">□ Apps</button>
-        <button class="btn" onclick="sendKey(224)" title="Wake">☀ Wake</button>
-        <button class="btn" onclick="sendKey(24)" title="Volume Up">Vol+</button>
-        <button class="btn" onclick="downloadScreen()" title="Screenshot">📷</button>
-      </div>
-      <div class="row" style="width:356px;max-width:100%;">
-        <input type="text" id="textInput" placeholder="Type text to send to phone..." onkeydown="if(event.key==='Enter')sendText()" />
-        <button class="btn primary" onclick="sendText()">Send</button>
-        <button class="btn" onclick="sendKey(66)" title="Enter">⏎</button>
-      </div>
-    </div>
-
-    <div style="display:flex;flex-direction:column;gap:16px;">
-      <div class="panel">
-        <h2>Live Session, Persistence & 4-Hour Zero-Downtime Rotation</h2>
-        <div class="grid2">
-          <div class="stat"><div class="k">Active Session ID</div><div class="v" id="stSession">—</div></div>
-          <div class="stat"><div class="k">Android / Profile</div><div class="v" id="stModel">—</div></div>
-          <div class="stat"><div class="k">Persistent Android ID</div><div class="v" id="stAid">—</div></div>
-          <div class="stat"><div class="k">Session Uptime / 4h Cycle</div><div class="v" id="stUptime">—</div></div>
-          <div class="stat"><div class="k">Completed Handovers</div><div class="v" id="stRotations">0</div></div>
-          <div class="stat"><div class="k">Last Persisted Backup</div><div class="v" id="stBackup">—</div></div>
-        </div>
-      </div>
-
-      <div class="panel">
-        <h2>Quick Actions & APK Installer</h2>
-        <div class="row">
-          <input type="text" id="urlInput" placeholder="https://example.com" value="https://example.com" />
-          <button class="btn primary" onclick="openUrl()">Open URL on Phone</button>
-        </div>
-        <div class="row" style="align-items:center;">
-          <input type="file" id="apkFile" accept=".apk" style="font-size:12px;color:#cbd5e1;" />
-          <button class="btn" onclick="installApk()">Upload & Install APK</button>
-          <span id="apkStatus" style="font-size:12px;color:#94a3b8;"></span>
-        </div>
-      </div>
-
-      <div class="panel">
-        <h2>Interactive Root ADB Shell</h2>
-        <div class="row">
-          <input type="text" id="adbCmd" value="getprop ro.build.version.release && pm list packages -3 && ls -la /sdcard/Download" onkeydown="if(event.key==='Enter')runAdb()" />
-          <button class="btn primary" onclick="runAdb()">Run ADB</button>
-        </div>
-        <pre id="adbOut">Ready.</pre>
-      </div>
-
-      <div class="panel">
-        <h2>Zero-Downtime Rotation History</h2>
-        <table>
-          <thead><tr><th>UTC Time</th><th>Previous</th><th>Promoted</th><th>State Synced</th><th>Cutover</th></tr></thead>
-          <tbody id="rotBody"><tr><td colspan="5">No rotations recorded yet.</td></tr></tbody>
-        </table>
-      </div>
-    </div>
-  </main>
-
-  <script>
-    async function toggleFullscreen() {
-      try {
-        if (document.fullscreenElement) await document.exitFullscreen();
-        else if (document.documentElement.requestFullscreen) await document.documentElement.requestFullscreen();
-      } catch (e) { console.warn('Browser fullscreen unavailable; viewport layout remains active.'); }
-    }
-    const canvas = document.getElementById('screen');
-    const ctx = canvas.getContext('2d');
-    let devWidth = 1080, devHeight = 2400;
-    let frames = 0, lastFpsTick = Date.now();
-    let pointerDown = null;
-
-    function connectWs() {
-      const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
-      const ws = new WebSocket(proto + '//' + location.host + '/ws/viewer');
-      ws.binaryType = 'arraybuffer';
-      ws.onopen = () => {
-        document.getElementById('connDot').classList.add('live');
-      };
-      ws.onmessage = (ev) => {
-        if (typeof ev.data === 'string') {
-          try {
-            const msg = JSON.parse(ev.data);
-            if (msg.type === 'session_switched' || msg.type === 'welcome') {
-              document.getElementById('sessBadge').textContent = msg.active_session_id || 'Waiting for runner...';
-              refreshStatus();
-            }
-          } catch {}
-          return;
-        }
-        const blob = new Blob([ev.data], { type: 'image/jpeg' });
-        const url = URL.createObjectURL(blob);
-        const img = new Image();
-        img.onload = () => {
-          if (canvas.width !== img.width || canvas.height !== img.height) {
-            canvas.width = img.width;
-            canvas.height = img.height;
-          }
-          ctx.drawImage(img, 0, 0);
-          URL.revokeObjectURL(url);
-          frames++;
-          if (Date.now() - lastFpsTick >= 1000) {
-            document.getElementById('fpsBadge').textContent = frames + ' FPS';
-            frames = 0;
-            lastFpsTick = Date.now();
-          }
-        };
-        img.src = url;
-      };
-      ws.onclose = () => {
-        document.getElementById('connDot').classList.remove('live');
-        setTimeout(connectWs, 2000);
-      };
-    }
-
-    function mapCoords(e) {
-      const rect = canvas.getBoundingClientRect();
-      const x = Math.max(0, Math.min(devWidth, Math.round(((e.clientX - rect.left) / rect.width) * devWidth)));
-      const y = Math.max(0, Math.min(devHeight, Math.round(((e.clientY - rect.top) / rect.height) * devHeight)));
-      return { x, y };
-    }
-
-    canvas.addEventListener('pointerdown', (e) => {
-      canvas.setPointerCapture(e.pointerId);
-      pointerDown = { ...mapCoords(e), t: Date.now() };
-    });
-
-    canvas.addEventListener('pointercancel', () => { pointerDown = null; });
-    canvas.addEventListener('pointerup', async (e) => {
-      if (!pointerDown) return;
-      const up = mapCoords(e);
-      const dt = Date.now() - pointerDown.t;
-      const dist = Math.hypot(up.x - pointerDown.x, up.y - pointerDown.y);
-      const start = pointerDown;
-      pointerDown = null;
-      if (dist < 18 && dt < 450) {
-        await fetch('/api/input', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ kind: 'tap', x: up.x, y: up.y }) });
-      } else {
-        await fetch('/api/input', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ kind: 'swipe', x1: start.x, y1: start.y, x2: up.x, y2: up.y, duration_ms: Math.min(1200, Math.max(120, dt)) }) });
-      }
-    });
-
-    async function sendKey(code) {
-      await fetch('/api/input', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ kind: 'keyevent', keycode: code }) });
-    }
-
-    async function sendText() {
-      const inp = document.getElementById('textInput');
-      if (!inp.value) return;
-      await fetch('/api/input', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ kind: 'text', text: inp.value }) });
-      inp.value = '';
-    }
-
-    async function openUrl() {
-      const u = document.getElementById('urlInput').value.trim();
-      if (!u) return;
-      await fetch('/api/adb/shell', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ command: 'am start -a android.intent.action.VIEW -d ' + JSON.stringify(u) }) });
-    }
-
-    async function runAdb() {
-      const cmd = document.getElementById('adbCmd').value.trim();
-      if (!cmd) return;
-      document.getElementById('adbOut').textContent = 'Running...';
-      const r = await fetch('/api/adb/shell', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ command: cmd }) });
-      const d = await r.json();
-      document.getElementById('adbOut').textContent = d.ok ? (d.stdout || '') + (d.stderr ? '\\n[stderr]\\n' + d.stderr : '') : ('Error: ' + d.error);
-    }
-
-    async function installApk() {
-      const f = document.getElementById('apkFile').files[0];
-      if (!f) return;
-      const st = document.getElementById('apkStatus');
-      st.textContent = 'Uploading & installing ' + f.name + '...';
-      const buf = await f.arrayBuffer();
-      let binary = '';
-      const bytes = new Uint8Array(buf);
-      for (let i = 0; i < bytes.byteLength; i++) binary += String.fromCharCode(bytes[i]);
-      const r = await fetch('/api/adb/install', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ file_name: f.name, apk_base64: btoa(binary) })
-      });
-      const d = await r.json();
-      st.textContent = d.ok ? 'Installed successfully!' : ('Failed: ' + d.error);
-      refreshStatus();
-    }
-
-    async function triggerCheckpoint() {
-      const r = await fetch('/api/checkpoint', { method: 'POST' });
-      const d = await r.json();
-      alert(d.ok ? 'Emulator state backed up cleanly!' : ('Backup error: ' + d.error));
-      refreshStatus();
-    }
-
-    function downloadScreen() { window.open('/api/screen.jpg?t=' + Date.now(), '_blank'); }
-    async function logout() { await fetch('/api/auth/logout', { method: 'POST' }); location.reload(); }
-
-    async function refreshStatus() {
-      try {
-        const r = await fetch('/api/status');
-        if (!r.ok) return;
-        const d = await r.json();
-        const emu = d.active_emulator;
-        document.getElementById('sessBadge').textContent = emu ? emu.session_id : 'No Active Emulator';
-        document.getElementById('stSession').textContent = emu ? (emu.session_id + ' (Run #' + emu.github_run_id + ')') : 'Waiting...';
-        const di = emu?.device_info || {};
-        if (di.resolution) {
-          const m = String(di.resolution).match(/(\\d+)x(\\d+)/);
-          if (m) { devWidth = Number(m[1]); devHeight = Number(m[2]); }
-        }
-        document.getElementById('stModel').textContent = emu ? ('Android ' + (di.androidVersion || '14') + ' · ' + (di.deviceModel || 'Pixel 6') + ' (' + (di.resolution || '1080x2400') + ')') : '—';
-        document.getElementById('stAid').textContent = di.androidId || '—';
-        document.getElementById('stUptime').textContent = emu ? (Math.floor(emu.uptime_sec / 60) + 'm ' + (emu.uptime_sec % 60) + 's / 240m target') : '—';
-        document.getElementById('stRotations').textContent = d.rotation_count + (d.standby_candidates?.length ? (' (+' + d.standby_candidates.length + ' standby booting)') : '');
-        document.getElementById('stBackup').textContent = d.persistence?.manifest?.saved_at ? new Date(d.persistence.manifest.saved_at).toLocaleTimeString() : 'Pending initial';
-
-        const rows = (d.rotation_history || []).slice(0, 8);
-        if (rows.length) {
-          document.getElementById('rotBody').innerHTML = rows.map((x) =>
-            '<tr><td>' + x.timestamp.slice(11, 19) + '</td><td>' + (x.previous_session_id || 'initial') + '</td><td>' + x.new_session_id + '</td><td>' + (x.state_synced ? 'Yes' : 'Cold') + '</td><td>' + x.downtime_ms + 'ms</td></tr>'
-          ).join('');
-        }
-      } catch {}
-    }
-
-    connectWs();
-    refreshStatus();
-    setInterval(refreshStatus, 5000);
-  </script>
-</body>
-</html>`;
-}
+function renderWebConsoleHtml(_authenticated: boolean): string { return phoneUi; }
 
 // ============================================================================
 // HTTP + DUAL WEBSOCKET SERVER (/ws/agent & /ws/viewer)
@@ -1129,6 +778,13 @@ wssAgent.on('connection', (ws: WebSocket, req: http.IncomingMessage) => {
     session.lastHeartbeatAt = Date.now();
     if (isBinary) {
       // Binary frame packet: 1-byte header 0x01 + JPEG bytes
+      if(data[0]===2) {
+        if(data.length<13)return;
+        if(data.readBigUInt64BE(1)&(1n<<63n))session.videoConfig=Buffer.from(data);
+        session.lastFrameAt=Date.now();
+        if(session.sessionId===activeSessionId)broadcastViewerFrame(data);
+        return;
+      }
       const jpeg = data[0] === 0x01 ? data.subarray(1) : data;
       session.lastFrame = Buffer.from(jpeg);
       session.lastFrameAt = Date.now();
@@ -1202,11 +858,31 @@ wssViewer.on('connection', (ws: WebSocket) => {
       device_info: active ? active.deviceInfo : null,
     })
   );
+  if(active?.videoConfig)ws.send(active.videoConfig,{binary:true});
   if (active?.lastFrame) {
     ws.send(active.lastFrame, { binary: true });
   }
 
+  let inputWindow=Date.now(),inputCount=0;
+  ws.on('message',async(raw,isBinary)=>{
+    if(isBinary || raw.toString().length>16384)return;
+    let requestId:any;
+    try {
+      const m=JSON.parse(raw.toString());requestId=m.id;if(m.type!=='input')return;
+      if(Date.now()-inputWindow>1000){inputWindow=Date.now();inputCount=0;}
+      if(++inputCount>300)return;
+      const active=getActiveSession();if(!active)throw new Error('Android temporarily disconnected');
+      let result:any;
+      if(active.deviceInfo.stream_transport==='scrcpy-h264')result=await callAgentRpc(active,'live_input',m.event,5000);
+      else if(m.event.kind!=='pointer')result=await callAgentRpc(active,'input_event',m.event,5000);
+      else {if(m.event.action==='down')(ws as any).legacyDown=m.event;
+        if(m.event.action==='up' && (ws as any).legacyDown){const p=(ws as any).legacyDown;(ws as any).legacyDown=null;const w=Number(active.deviceInfo.resolution?.split('x')[0]||1080),h=Number(active.deviceInfo.resolution?.split('x')[1]||2400);const dist=Math.hypot(p.x-m.event.x,p.y-m.event.y);result=await callAgentRpc(active,'input_event',dist<.02?{kind:'tap',x:Math.round(m.event.x*w),y:Math.round(m.event.y*h)}:{kind:'swipe',x1:Math.round(p.x*w),y1:Math.round(p.y*h),x2:Math.round(m.event.x*w),y2:Math.round(m.event.y*h),duration_ms:220},5000);}}
+
+      if(ws.readyState===WebSocket.OPEN)ws.send(JSON.stringify({type:'input_ack',id:m.id,...result}));
+    } catch(e:any){if(ws.readyState===WebSocket.OPEN)ws.send(JSON.stringify({type:'input_ack',id:requestId,error:e.message}));}
+  });
   ws.on('close', () => {
+    const active=getActiveSession();if(active)callAgentRpc(active,'release_input',{},3000).catch(()=>{});
     viewerSockets.delete(ws);
     notifyStreamStateToAgents();
   });

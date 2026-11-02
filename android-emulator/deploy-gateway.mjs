@@ -117,6 +117,7 @@ async function main() {
       appendGithubOutput('blitz_app_id', existingApp.id);
       return;
     }
+    throw new Error('Existing gateway is temporarily unreachable; refusing an implicit redeploy that would disconnect the live phone. Retry or explicitly request force_gateway_redeploy.');
   }
 
   // 2. Check if GHCR image is anonymously pullable; otherwise use public Node 20 Alpine carrier + volume bootstrap
@@ -174,7 +175,7 @@ async function main() {
     // Deploy the artifact built by this GitHub Actions checkout. No Git operation
     // occurs on the hosting service. Avoid the account-wide pending-upload quota.
     const { gzipSync } = await import('node:zlib');
-    const artifact = gzipSync(fs.readFileSync(path.join(gwDir, 'dist', 'server.js'))).toString('base64');
+    const artifact = gzipSync(Buffer.from(JSON.stringify(Object.fromEntries(['server.js','phoneUi.js'].map(name=>[name,fs.readFileSync(path.join(gwDir,'dist',name),'utf8')]))))).toString('base64');
     const shellQuote = (v) => "'" + v.replace(/'/g, "'\\''") + "'";
     async function runArtifactCommand(js) {
       const r=await mcp('apps_run',{app:appId,command:'NODE_OPTIONS= node -e '+shellQuote(js),confirm:true});
@@ -187,7 +188,7 @@ async function main() {
       await sleep(3500); // respect host's 20 command/minute limit
     }
     const bootSource=JSON.stringify("await import('/app/data/gateway/dist/server.js');\nawait new Promise(() => {});\n");
-    await runArtifactCommand(`const fs=require('fs'),z=require('zlib'),p='/app/data/gateway';fs.mkdirSync(p+'/dist',{recursive:true});fs.writeFileSync(p+'/dist/server.js.next',z.gunzipSync(Buffer.from(fs.readFileSync('/app/data/gateway-artifact.b64','utf8'),'base64')));fs.renameSync(p+'/dist/server.js.next',p+'/dist/server.js');fs.writeFileSync(p+'/package.json',JSON.stringify({type:'module'}));if(!fs.existsSync(p+'/node_modules'))fs.symlinkSync('/app/node_modules',p+'/node_modules','dir');fs.writeFileSync(p+'/boot-hijack.mjs',${bootSource});`);
+    await runArtifactCommand(`const fs=require('fs'),z=require('zlib'),p='/app/data/gateway';fs.mkdirSync(p+'/dist',{recursive:true});const files=JSON.parse(z.gunzipSync(Buffer.from(fs.readFileSync('/app/data/gateway-artifact.b64','utf8'),'base64')));for(const [name,content] of Object.entries(files))fs.writeFileSync(p+'/dist/'+name+'.next',content);for(const name of ['phoneUi.js','server.js'])fs.renameSync(p+'/dist/'+name+'.next',p+'/dist/'+name);fs.writeFileSync(p+'/package.json',JSON.stringify({type:'module'}));if(!fs.existsSync(p+'/node_modules'))fs.symlinkSync('/app/node_modules',p+'/node_modules','dir');fs.writeFileSync(p+'/boot-hijack.mjs',${bootSource});`);
     console.log('GitHub Actions artifact installed.');
 
     await mcp('env_set', {

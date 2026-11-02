@@ -1,3 +1,4 @@
+import {startLiveDevice} from './live-device.mjs';
 import { spawn, execFile } from 'child_process';
 import { promisify } from 'util';
 import fs from 'fs';
@@ -7,6 +8,7 @@ import sharp from 'sharp';
 import WebSocket from 'ws';
 
 const execFileAsync = promisify(execFile);
+let liveDevice;
 
 const GATEWAY_URL = (process.env.EMULATOR_GATEWAY_URL || '').replace(/\/$/, '');
 const GATEWAY_SECRET = (process.env.EMULATOR_GATEWAY_SECRET || '').trim();
@@ -260,6 +262,8 @@ function escapeAndroidInputText(str) {
 
 async function handleGatewayRpc(action, payload) {
   switch (action) {
+    case 'live_input': if(!liveDevice)throw new Error('Live Android control is not ready');liveDevice.input(payload);return {injected_at:Date.now()};
+    case 'release_input': liveDevice?.release();return {ok:true};
     case 'adb_shell': {
       const { stdout, stderr } = await adbShell(String(payload?.command || 'echo ok'), 40000);
       const deviceInfo = await collectDeviceInfo().catch(() => null);
@@ -324,26 +328,6 @@ async function handleGatewayRpc(action, payload) {
   }
 }
 
-async function startFrameStreamLoop() {
-  if (streamLoopRunning) return;
-  streamLoopRunning = true;
-  while (shouldStreamFrames && !retiring) {
-    const t0 = Date.now();
-    try {
-      if (wsClient && wsClient.readyState === WebSocket.OPEN && wsClient.bufferedAmount < 1024 * 1024) {
-        const jpg = await captureJpegFrame();
-        const packet = Buffer.allocUnsafe(jpg.length + 1);
-        packet[0] = 0x01;
-        jpg.copy(packet, 1);
-        wsClient.send(packet, { binary: true });
-      }
-    } catch {}
-    const elapsed = Date.now() - t0;
-    await sleep(Math.max(25, 95 - elapsed));
-  }
-  streamLoopRunning = false;
-}
-
 function connectTunnelWebSocket(deviceInfo) {
   return new Promise((resolve, reject) => {
     const wsProto = GATEWAY_URL.startsWith('https://') ? 'wss://' : 'ws://';
@@ -369,7 +353,7 @@ function connectTunnelWebSocket(deviceInfo) {
         const msg = JSON.parse(raw.toString('utf-8'));
         if (msg.type === 'stream_control') {
           shouldStreamFrames = Boolean(msg.streaming);
-          if (shouldStreamFrames) startFrameStreamLoop();
+          if(shouldStreamFrames && liveDevice?.config)ws.send(liveDevice.config,{binary:true});
         } else if (msg.type === 'rpc_request' && msg.reqId) {
           try {
             const result = await handleGatewayRpc(msg.action, msg.payload);
@@ -394,6 +378,7 @@ function connectTunnelWebSocket(deviceInfo) {
     });
 
     ws.on('close', () => {
+      liveDevice?.release();
       if (wsClient === ws) wsClient = null;
       if (!retiring && opened && !reconnecting) {
         reconnecting = true;
@@ -544,6 +529,10 @@ async function main() {
   // Pre-load persisted state onto this new emulator while isolated in standby
   await runStateManager('restore');
   const deviceInfo = await collectDeviceInfo();
+  liveDevice=await startLiveDevice(packet=>{
+    if(shouldStreamFrames && wsClient?.readyState===WebSocket.OPEN && wsClient.bufferedAmount<1024*1024)wsClient.send(packet,{binary:true});
+  });
+  deviceInfo.stream_transport='scrcpy-h264';
 
   // Connect tunnel to android.aivideo.blitz.cloud as non-conflicting standby candidate
   for (let attempt = 1; attempt <= 6; attempt++) {
