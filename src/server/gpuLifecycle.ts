@@ -46,7 +46,8 @@ export async function acceptGpuHeartbeat(service:string,version:string,started:n
   await query(`INSERT INTO gpu_sessions(service_id,state,started_at,worker_started_at)
     VALUES($1,$2,to_timestamp($3),$3) ON CONFLICT(service_id) DO UPDATE
     SET state=CASE WHEN gpu_sessions.state='STOPPING' THEN 'STOPPING' ELSE EXCLUDED.state END,
-        started_at=EXCLUDED.started_at,worker_started_at=EXCLUDED.worker_started_at
+        started_at=EXCLUDED.started_at,worker_started_at=EXCLUDED.worker_started_at,
+        requested_at=GREATEST(gpu_sessions.requested_at,EXCLUDED.started_at),error=NULL,session_status=NULL
     WHERE EXCLUDED.worker_started_at>=gpu_sessions.worker_started_at`,[service,ready?'ON':'INITIALIZING',started]);
   if(before?.state!==(ready?'ON':'INITIALIZING') && before?.state!=='STOPPING') await gpuEvent(service,ready?'GPU_READY':'INITIALIZING',{worker_started_at:started});
 }
