@@ -32,6 +32,7 @@ const SCRIPTS_DIR = path.dirname(new URL(import.meta.url).pathname);
 const STATE_SCRIPT = path.join(SCRIPTS_DIR, 'state-manager.sh');
 
 let wsClient = null;
+let mediaWs=null,mediaTimer,mediaRetry=0,mediaNeedsKey=true;
 let shouldStreamFrames = false;
 let streamLoopRunning = false;
 let retiring = false;
@@ -329,6 +330,16 @@ async function handleGatewayRpc(action, payload) {
   }
 }
 
+function connectMediaTunnel(){
+ clearTimeout(mediaTimer);
+ if(retiring || !wsClient || wsClient.readyState!==WebSocket.OPEN || mediaWs?.readyState===WebSocket.OPEN || mediaWs?.readyState===WebSocket.CONNECTING)return;
+ const url=GATEWAY_URL.replace(/^http/,'ws')+'/ws/agent-video?sessionId='+encodeURIComponent(SESSION_ID);
+ const socket=new WebSocket(url,{headers:{Authorization:'Bearer '+GATEWAY_SECRET},handshakeTimeout:15000});mediaWs=socket;
+ socket.on('open',()=>{mediaRetry=0;mediaNeedsKey=true;if(liveDevice?.config)socket.send(liveDevice.config,{binary:true});});
+ socket.on('error',()=>{});
+ socket.on('close',()=>{if(mediaWs===socket)mediaWs=null;if(!retiring)mediaTimer=setTimeout(connectMediaTunnel,Math.min(8000,400*2**mediaRetry++)+Math.random()*200);});
+}
+
 function connectTunnelWebSocket(deviceInfo) {
   return new Promise((resolve, reject) => {
     const wsProto = GATEWAY_URL.startsWith('https://') ? 'wss://' : 'ws://';
@@ -345,6 +356,7 @@ function connectTunnelWebSocket(deviceInfo) {
       opened = true;
       wsClient = ws;
       ws.send(JSON.stringify({ type: 'hello', sessionId: SESSION_ID, deviceInfo }));
+      connectMediaTunnel();
       log(`Connected reverse WebSocket tunnel to ${GATEWAY_URL}`);
       resolve(ws);
     });
@@ -352,9 +364,10 @@ function connectTunnelWebSocket(deviceInfo) {
     ws.on('message', async (raw) => {
       try {
         const msg = JSON.parse(raw.toString('utf-8'));
-        if (msg.type === 'stream_control') {
-          shouldStreamFrames = Boolean(msg.streaming);
-          if(shouldStreamFrames && liveDevice?.config)ws.send(liveDevice.config,{binary:true});
+        if(msg.type==='stream_profile_request'){
+          liveDevice?.setProfile(msg.level).catch(e=>log('Adaptive encoder: '+e.message));
+        } else if (msg.type === 'stream_control') {
+          shouldStreamFrames = Boolean(msg.streaming); // H264 stays warm for instant refresh; no per-viewer encoder reset.
         } else if (msg.type === 'rpc_request' && msg.reqId) {
           try {
             const result = await handleGatewayRpc(msg.action, msg.payload);
@@ -379,6 +392,7 @@ function connectTunnelWebSocket(deviceInfo) {
     });
 
     ws.on('close', () => {
+      mediaWs?.close();
       liveDevice?.release();
       if (wsClient === ws) wsClient = null;
       if (!retiring && opened && !reconnecting) {
@@ -531,8 +545,19 @@ async function main() {
   await runStateManager('restore');
   const deviceInfo = await collectDeviceInfo();
   liveDevice=await startLiveDevice(packet=>{
-    if(shouldStreamFrames && wsClient?.readyState===WebSocket.OPEN && wsClient.bufferedAmount<1024*1024)wsClient.send(packet,{binary:true});
+    if(mediaWs?.readyState!==WebSocket.OPEN)return;
+    const flags=packet.readBigUInt64BE(1),isConfig=Boolean(flags&(1n<<63n)),isKey=Boolean(flags&(1n<<62n));
+    if(isConfig){mediaWs.send(packet,{binary:true});return;}
+    if(!shouldStreamFrames){mediaNeedsKey=true;return;}
+    if(mediaWs.bufferedAmount>128*1024){mediaNeedsKey=true;return;}
+    if(mediaNeedsKey&&!isKey)return;
+    if(isKey)mediaNeedsKey=false;
+    mediaWs.send(packet,{binary:true});
+  },profile=>{
+    if(wsClient?.readyState===WebSocket.OPEN)wsClient.send(JSON.stringify({type:'stream_profile',profile}));
   });
+  deviceInfo.stream_profile=liveDevice.profile;
+  deviceInfo.separate_video_channel=true;
   deviceInfo.stream_transport='scrcpy-h264';
 
   // Connect tunnel to android.aivideo.blitz.cloud as non-conflicting standby candidate

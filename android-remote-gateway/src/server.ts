@@ -64,6 +64,9 @@ interface RotationEvent {
 
 const sessions = new Map<string, AgentSession>();
 const viewerSockets = new Set<WebSocket>();
+const controlSockets=new Set<WebSocket>();
+const nativePointerOwners=new Map<number,WebSocket>();
+let lastQualityChange=0,qualityTimer:NodeJS.Timeout|undefined;
 
 let activeSessionId: string | null = null;
 let rotationCount = 0;
@@ -186,19 +189,44 @@ function notifyStreamStateToAgents() {
 
 function broadcastViewerJson(msg: any) {
   const raw = JSON.stringify(msg);
-  for (const v of viewerSockets) {
+  for (const v of new Set([...viewerSockets,...controlSockets])) {
     if (v.readyState === WebSocket.OPEN) {
       v.send(raw);
     }
   }
 }
 
-function broadcastViewerFrame(jpegBuf: Buffer) {
-  for (const v of viewerSockets) {
-    if (v.readyState === WebSocket.OPEN && v.bufferedAmount < 2 * 1024 * 1024) {
-      v.send(jpegBuf, { binary: true });
-    }
+function broadcastViewerFrame(packet:Buffer) {
+  const h264=packet[0]===2 && packet.length>=13;
+  const flags=h264?packet.readBigUInt64BE(1):0n,isKey=Boolean(flags&(1n<<62n)),isConfig=Boolean(flags&(1n<<63n));
+  for(const v of viewerSockets){
+    if(v.readyState!==WebSocket.OPEN)continue;
+    if(v.bufferedAmount>128*1024){(v as any).needKey=true;continue;}
+    if((v as any).needKey && h264 && !isKey && !isConfig)continue;
+    if(isKey && (v as any).needKey){const c=getActiveSession()?.videoConfig;if(c)v.send(c,{binary:true});(v as any).needKey=false;}
+    v.send(packet,{binary:true});
   }
+}
+function requestAdaptiveProfile(){
+  clearTimeout(qualityTimer);
+  const active=getActiveSession();if(!active || !(active.deviceInfo as any).separate_video_channel)return;
+  const reports=[...controlSockets].map(v=>(v as any).qos).filter(q=>q && q.visible && Date.now()-q.at<12000);
+  const level=reports.reduce((n,q)=>Math.max(n,q.level),0),current=Number((active.deviceInfo as any).stream_profile?.id || 0);
+  if(level===current)return;
+  const wait=(level>current?4000:15000)-(Date.now()-lastQualityChange);
+  if(wait>0){qualityTimer=setTimeout(requestAdaptiveProfile,wait);return;}
+  lastQualityChange=Date.now();active.ws.send(JSON.stringify({type:'stream_profile_request',level}));
+}
+function handleAgentFrame(session:AgentSession,data:Buffer){
+ session.lastHeartbeatAt=Date.now();
+ if(data[0]===2){
+  if(data.length<13)return;session.deviceInfo.stream_transport='scrcpy-h264';const flags=data.readBigUInt64BE(1);
+  if(flags&(1n<<63n)){if(session.videoConfig?.equals(data))return;session.videoConfig=Buffer.from(data);session.videoGop=[];}
+  else if(flags&(1n<<62n))session.videoGop=[Buffer.from(data)];
+  else if(session.videoGop?.length && session.videoGop.length<90)session.videoGop.push(Buffer.from(data));
+  session.lastFrameAt=Date.now();if(session.sessionId===activeSessionId)broadcastViewerFrame(data);return;
+ }
+ const jpeg=data[0]===1?data.subarray(1):data;session.lastFrame=Buffer.from(jpeg);session.lastFrameAt=Date.now();if(session.sessionId===activeSessionId)broadcastViewerFrame(session.lastFrame);
 }
 
 const app = express();
@@ -717,11 +745,15 @@ function renderWebConsoleHtml(_authenticated: boolean): string { return phoneUi;
 
 const server = http.createServer(app);
 const wssAgent = new WebSocketServer({ noServer: true, maxPayload: 64 * 1024 * 1024 });
+const wssAgentVideo=new WebSocketServer({noServer:true,maxPayload:16*1024*1024});
 const wssViewer = new WebSocketServer({ noServer: true, maxPayload: 4 * 1024 * 1024 });
 
 server.on('upgrade', (req, socket, head) => {
   const urlObj = new URL(req.url || '/', 'http://localhost');
-  if (urlObj.pathname === '/ws/agent') {
+  if(urlObj.pathname==='/ws/agent-video'){
+    if(!isGatewayAgentAuthenticated(req)){socket.destroy();return;}
+    wssAgentVideo.handleUpgrade(req,socket,head,ws=>wssAgentVideo.emit('connection',ws,req));
+  } else if (urlObj.pathname === '/ws/agent') {
     if (!isGatewayAgentAuthenticated(req)) {
       socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n');
       socket.destroy();
@@ -730,7 +762,7 @@ server.on('upgrade', (req, socket, head) => {
     wssAgent.handleUpgrade(req, socket, head, (ws) => {
       wssAgent.emit('connection', ws, req);
     });
-  } else if (urlObj.pathname === '/ws/viewer') {
+  } else if ((urlObj.pathname === '/ws/viewer' || urlObj.pathname === '/ws/control')) {
     if (!isUserAuthenticated(req)) {
       socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n');
       socket.destroy();
@@ -742,6 +774,13 @@ server.on('upgrade', (req, socket, head) => {
   } else {
     socket.destroy();
   }
+});
+
+wssAgentVideo.on('connection',(ws:WebSocket,req:http.IncomingMessage)=>{
+ const id=new URL(req.url || '/','http://localhost').searchParams.get('sessionId') || '';
+ const session=sessions.get(id);if(!session){ws.close(4004,'Control session not registered');return;}
+ ws.on('message',(raw:Buffer,binary:boolean)=>{if(binary && sessions.get(id)===session)handleAgentFrame(session,raw);});
+ ws.on('error',()=>{});
 });
 
 wssAgent.on('connection', (ws: WebSocket, req: http.IncomingMessage) => {
@@ -766,6 +805,8 @@ wssAgent.on('connection', (ws: WebSocket, req: http.IncomingMessage) => {
     connectedAt: existing ? existing.connectedAt : Date.now(),
     promotedAt: existing ? existing.promotedAt : null,
     lastHeartbeatAt: Date.now(),
+    videoConfig:existing?.videoConfig,
+    videoGop:existing?.videoGop,
     lastFrame: existing ? existing.lastFrame : null,
     lastFrameAt: existing ? existing.lastFrameAt : 0,
     pendingRpc: new Map(),
@@ -777,31 +818,14 @@ wssAgent.on('connection', (ws: WebSocket, req: http.IncomingMessage) => {
 
   ws.on('message', (data: Buffer, isBinary: boolean) => {
     session.lastHeartbeatAt = Date.now();
-    if (isBinary) {
-      // Binary frame packet: 1-byte header 0x01 + JPEG bytes
-      if(data[0]===2) {
-        if(data.length<13)return;
-        session.deviceInfo.stream_transport='scrcpy-h264';
-        const flags=data.readBigUInt64BE(1);
-        if(flags&(1n<<63n)){session.videoConfig=Buffer.from(data);session.videoGop=[];}
-        else if(flags&(1n<<62n))session.videoGop=[Buffer.from(data)];
-        else if(session.videoGop?.length && session.videoGop.length<90)session.videoGop.push(Buffer.from(data));
-        session.lastFrameAt=Date.now();
-        if(session.sessionId===activeSessionId)broadcastViewerFrame(data);
-        return;
-      }
-      const jpeg = data[0] === 0x01 ? data.subarray(1) : data;
-      session.lastFrame = Buffer.from(jpeg);
-      session.lastFrameAt = Date.now();
-      if (session.sessionId === activeSessionId) {
-        broadcastViewerFrame(session.lastFrame);
-      }
-      return;
-    }
+    if(isBinary){handleAgentFrame(session,data);return;}
 
     try {
       const msg = JSON.parse(data.toString('utf-8'));
-      if (msg.type === 'hello' || msg.type === 'heartbeat') {
+      if(msg.type==='stream_profile'){
+        (session.deviceInfo as any).stream_profile=msg.profile;session.videoGop=[];
+        if(session.sessionId===activeSessionId)broadcastViewerJson({type:'stream_profile',profile:msg.profile});
+      } else if (msg.type === 'hello' || msg.type === 'heartbeat') {
         if (msg.deviceInfo) {
           session.deviceInfo = { ...session.deviceInfo, ...msg.deviceInfo };
         }
@@ -850,8 +874,10 @@ wssAgent.on('connection', (ws: WebSocket, req: http.IncomingMessage) => {
   });
 });
 
-wssViewer.on('connection', (ws: WebSocket) => {
-  viewerSockets.add(ws);
+wssViewer.on('connection', (ws: WebSocket,req:http.IncomingMessage) => {
+  const controlOnly=(req.url || '').split('?')[0]==='/ws/control';
+  (controlOnly?controlSockets:viewerSockets).add(ws);
+  const ownedPointers=new Map<number,any>();
   notifyStreamStateToAgents();
 
   const active = getActiveSession();
@@ -863,8 +889,8 @@ wssViewer.on('connection', (ws: WebSocket) => {
       device_info: active ? active.deviceInfo : null,
     })
   );
-  if(active?.videoConfig){ws.send(active.videoConfig,{binary:true});for(const packet of active.videoGop || [])ws.send(packet,{binary:true});}
-  if (!active?.videoConfig && active?.lastFrame) {
+  if(!controlOnly && active?.videoConfig){ws.send(active.videoConfig,{binary:true});if(Date.now()-active.lastFrameAt<3000)for(const packet of active.videoGop || [])ws.send(packet,{binary:true});}
+  if (!controlOnly && !active?.videoConfig && active?.lastFrame) {
     ws.send(active.lastFrame, { binary: true });
   }
 
@@ -873,10 +899,24 @@ wssViewer.on('connection', (ws: WebSocket) => {
     if(isBinary || raw.toString().length>16384)return;
     let requestId:any;
     try {
-      const m=JSON.parse(raw.toString());requestId=m.id;if(m.type!=='input')return;
+      const m=JSON.parse(raw.toString());requestId=m.id;
+      if(m.type==='ping'){ws.send(JSON.stringify({type:'pong',at:m.at}));return;}
+      if(m.type==='qos' && controlOnly){if(Date.now()-((ws as any).qos?.at || 0)<1000)return;(ws as any).qos={level:Math.max(0,Math.min(3,Math.round(Number(m.level)||0))),visible:m.visible!==false,at:Date.now()};requestAdaptiveProfile();return;}
+      if(m.type!=='input')return;
       if(Date.now()-inputWindow>1000){inputWindow=Date.now();inputCount=0;}
       if(++inputCount>300)return;
       const active=getActiveSession();if(!active)throw new Error('Android temporarily disconnected');
+      if(m.event?.kind==='pointer'){
+        const original=m.event.pointerId,p=m.event,owned=ownedPointers.get(original);
+        if(p.action==='down'){
+          let native=owned?.pointerId;if(native===undefined)native=[0,1,2,3,4,5,6,7,8,9].find(n=>!nativePointerOwners.has(n));
+          if(native===undefined)throw new Error('Android touch capacity reached');
+          m.event={...p,pointerId:native};nativePointerOwners.set(native,ws);ownedPointers.set(original,m.event);
+        }else{
+          if(!owned)return;m.event={...p,pointerId:owned.pointerId};
+          if(p.action==='up'||p.action==='cancel'){ownedPointers.delete(original);nativePointerOwners.delete(owned.pointerId);}else ownedPointers.set(original,m.event);
+        }
+      }
       let result:any;
       if(active.deviceInfo.stream_transport==='scrcpy-h264')result=await callAgentRpc(active,'live_input',m.event,5000);
       else if(m.event.kind!=='pointer')result=await callAgentRpc(active,'input_event',m.event,5000);
@@ -887,11 +927,16 @@ wssViewer.on('connection', (ws: WebSocket) => {
     } catch(e:any){if(ws.readyState===WebSocket.OPEN)ws.send(JSON.stringify({type:'input_ack',id:requestId,error:e.message}));}
   });
   ws.on('close', () => {
-    const active=getActiveSession();if(active)callAgentRpc(active,'release_input',{},3000).catch(()=>{});
+    const active=getActiveSession();if(active)for(const p of ownedPointers.values())callAgentRpc(active,'live_input',{...p,action:'up'},3000).catch(()=>{});
+    for(const p of ownedPointers.values())nativePointerOwners.delete(p.pointerId);
+    ownedPointers.clear();controlSockets.delete(ws);requestAdaptiveProfile();
     viewerSockets.delete(ws);
     notifyStreamStateToAgents();
   });
 });
+
+// Ping the separate idle media transport without generating screen traffic.
+setInterval(()=>{for(const ws of wssAgentVideo.clients)if(ws.readyState===WebSocket.OPEN)ws.ping();},20000);
 
 // Ping WebSockets every 20s to keep Cloudflare/Blitz reverse proxies warm
 setInterval(() => {
