@@ -666,7 +666,7 @@ async function main() {
 
   // Clear stuck permission dialogs and grant notification perms before user interaction
   await prepareDevicePermissions();
-  // Device realism: Pixel-6-aligned props, sensors, telephony, hide common emulator markers
+  // Device realism: Pixel-6-aligned props, sensors, telephony
   try {
     const realism = path.join(SCRIPTS_DIR, 'device-realism.sh');
     const { stdout, stderr } = await execFileAsync('bash', [realism], { timeout: 120000, maxBuffer: 4 * 1024 * 1024 });
@@ -674,6 +674,15 @@ async function main() {
     if (stderr) log('device-realism note: ' + String(stderr).trim().slice(-500));
   } catch (e) {
     log('device-realism warning: ' + e.message);
+  }
+  // Hide root signals + drop adb root (no Magisk — phone must not look rooted)
+  try {
+    const hide = path.join(SCRIPTS_DIR, 'hide-root-emulator.sh');
+    const { stdout, stderr } = await execFileAsync('bash', [hide], { timeout: 90000, maxBuffer: 2 * 1024 * 1024 });
+    if (stdout) log(String(stdout).trim().slice(-1500));
+    if (stderr) log('hide-root note: ' + String(stderr).trim().slice(-400));
+  } catch (e) {
+    log('hide-root warning: ' + e.message);
   }
   // Save a clean initial checkpoint right after promotion
   await runStateManager('backup').catch((e) => log(`Initial backup note: ${e.message}`));
