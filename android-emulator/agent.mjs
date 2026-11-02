@@ -689,6 +689,8 @@ async function main() {
     await sleep(20000);
     if (retiring) break;
 
+    const activeMinutes = (Date.now() - promotedAtMs) / 60000;
+
     // 0. Unstick Gmail/notification permission traps that block Play installs
     if (Math.floor(activeMinutes * 60) % 120 < 25) {
       try { await prepareDevicePermissions(); } catch (e) { log('unstick note: ' + e.message); }
@@ -738,7 +740,6 @@ async function main() {
     }
 
     // 4. Trigger 4-hour replacement workflow when rotation target is reached
-    const activeMinutes = (Date.now() - promotedAtMs) / 60000;
     if (activeMinutes >= ROTATION_MINUTES && replacementDispatchedAt === 0) {
       await runStateManager('backup').catch(() => {});
       await saveWholeAvd(true);
