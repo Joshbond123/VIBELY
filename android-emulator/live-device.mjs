@@ -18,9 +18,11 @@ export async function startLiveDevice(onPacket,onStatus=()=>{}){
  const size=(await exec('adb',['shell','wm','size'])).stdout.match(/\d+x\d+/g)?.at(-1)?.split('x').map(Number)||[1080,2400];
  let stopped=false,control,controlServer,video,videoServer,config=null,width=0,height=0,requested=0,current=-1,switching=null,videoGeneration=0,recoverTimer;
  const pointers=new Map();let textSequence=0n;
+ // scrcpy cleanup unlinks its own JAR. Both channels and recovery share this
+ // pinned artifact, so ownership/cleanup belongs to the agent, not either server.
  async function launch(scid,port,options){
   await exec('adb',['forward','tcp:'+port,'localabstract:scrcpy_'+scid]);
-  const server=spawn('adb',['shell','CLASSPATH=/data/local/tmp/vibely-scrcpy.jar','app_process','/','com.genymobile.scrcpy.Server','3.3.4','scid='+scid,'tunnel_forward=true','audio=false','send_dummy_byte=false','send_device_meta=false','cleanup=true',...options],{stdio:['ignore','pipe','pipe']});
+  const server=spawn('adb',['shell','CLASSPATH=/data/local/tmp/vibely-scrcpy.jar','app_process','/','com.genymobile.scrcpy.Server','3.3.4','scid='+scid,'tunnel_forward=true','audio=false','send_dummy_byte=false','send_device_meta=false','cleanup=false',...options],{stdio:['ignore','pipe','pipe']});
   server.stdout.on('data',d=>console.log('[scrcpy '+scid+']',String(d).trim()));server.stderr.on('data',d=>console.error('[scrcpy '+scid+']',String(d).trim()));
   // An adb forward accepts TCP even BEFORE its Android socket exists. A TCP
   // connect alone is not readiness and can prematurely close the encoder.
