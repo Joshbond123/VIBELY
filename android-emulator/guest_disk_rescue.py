@@ -63,12 +63,15 @@ try:
   compressed=base64.b64decode(text,validate=True);raw=gzip.decompress(compressed)
   if len(raw)!=expected:raise RuntimeError('Short or invalid raw block read')
   return compressed,raw
+ def bounded_fetch(executor,args):
+  for start in range(0,len(args),16):
+   yield from executor.map(fetch_chunk,args[start:start+16])
  for volume in volumes:
   device=volume['device'];remaining=volume['bytes'];count=(remaining+CHUNK-1)//CHUNK
   vh=hashlib.sha256();volume['parts']=[];part=bytearray();part_raw=0;part_hash=hashlib.sha256()
   args=[(device,i,min(CHUNK,remaining-i*CHUNK)) for i in range(count)]
   with concurrent.futures.ThreadPoolExecutor(max_workers=3) as executor:
-   for index,(compressed,raw) in enumerate(executor.map(fetch_chunk,args)):
+   for index,(compressed,raw) in enumerate(bounded_fetch(executor,args)):
     vh.update(raw);part_hash.update(raw);part_raw+=len(raw)
     part.extend(struct.pack('<I',len(compressed)));part.extend(compressed)
     if (index+1)%16==0 or index==count-1:
