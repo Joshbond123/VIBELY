@@ -10,7 +10,7 @@ BASE=os.environ['EMULATOR_GATEWAY_URL'].rstrip('/')
 SOURCE=os.environ['RESCUE_SOURCE_SESSION']
 HEADERS={'Authorization':'Bearer '+os.environ['EMULATOR_GATEWAY_SECRET']}
 HELPER='/data/local/tmp/vibely-freeze'
-CHUNK=8*1024*1024
+CHUNK=2*1024*1024
 store=Store()
 release=None;frozen=False
 
@@ -18,7 +18,7 @@ def emit(event,**kw):print(json.dumps({'event':event,**kw}),flush=True)
 def rpc(command,retry=False):
  for attempt in range(3 if retry else 1):
   try:
-   r=requests.post(BASE+'/api/adb/shell',headers=HEADERS,json={'command':command},timeout=(15,60))
+   r=requests.post(BASE+'/api/internal/recovery/rpc',headers=HEADERS,json={'session_id':SOURCE,'command':command},timeout=(15,60))
    r.raise_for_status();d=r.json()
    if not d.get('ok') or d.get('session_id')!=SOURCE:raise RuntimeError('RPC target changed or source failed')
    return d.get('stdout','')
@@ -30,7 +30,7 @@ signal.signal(signal.SIGTERM,interrupted)
 
 try:
  h=requests.get(BASE+'/api/public/health',timeout=20).json()
- if h.get('active_session_id')!=SOURCE:raise RuntimeError('Original source is not active; refusing to touch a replacement')
+ if h.get('active_session_id')!=SOURCE and not any(q.get('session_id')==SOURCE for q in h.get('standby_sessions',[])):raise RuntimeError('Original source is disconnected; refusing to touch a replacement')
  serials=rpc('for x in vda vdb vdc vdd vde vdf; do echo "$x $(cat /sys/block/$x/size) $(cat /sys/block/$x/serial 2>/dev/null)"; done')
  volumes=[]
  for line in serials.splitlines():
@@ -70,7 +70,7 @@ try:
   device=volume['device'];remaining=volume['bytes'];count=(remaining+CHUNK-1)//CHUNK
   vh=hashlib.sha256();volume['parts']=[];part=bytearray();part_raw=0;part_hash=hashlib.sha256()
   args=[(device,i,min(CHUNK,remaining-i*CHUNK)) for i in range(count)]
-  with concurrent.futures.ThreadPoolExecutor(max_workers=3) as executor:
+  with concurrent.futures.ThreadPoolExecutor(max_workers=6) as executor:
    for index,(compressed,raw) in enumerate(bounded_fetch(executor,args)):
     vh.update(raw);part_hash.update(raw);part_raw+=len(raw)
     part.extend(struct.pack('<I',len(compressed)));part.extend(compressed)

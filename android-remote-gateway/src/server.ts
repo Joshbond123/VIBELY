@@ -653,6 +653,19 @@ app.get('/api/screen.jpg', requireUserAuth, async (_req: Request, res: Response)
   }
 });
 
+// Recovery transport only: an authenticated operator may thaw/read the EXACT
+// original session even after its public active connection drops during capture.
+// This never verifies/promotes a standby or changes phone ownership.
+app.post('/api/internal/recovery/rpc', requireGatewayAuth, async (req: Request, res: Response) => {
+  const id=String(req.body?.session_id || '');
+  const session=sessions.get(id);
+  if(!session || session.ws.readyState!==WebSocket.OPEN){res.status(503).json({ok:false,error:'Specified recovery session is disconnected'});return;}
+  const command=String(req.body?.command || '');
+  if(!command || command.length>4096){res.status(400).json({ok:false,error:'Invalid recovery command'});return;}
+  try{const out=await callAgentRpc(session,'adb_shell',{command},45000);res.json({ok:true,session_id:id,...out});}
+  catch(err:any){res.status(502).json({ok:false,error:err?.message || 'Recovery RPC failed'});}
+});
+
 app.post('/api/adb/shell', requireUserAuth, async (req: Request, res: Response) => {
   const active = getActiveSession();
   if (!active) {
