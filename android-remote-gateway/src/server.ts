@@ -766,7 +766,11 @@ app.get('/', (req: Request, res: Response) => {
   res.send(renderWebConsoleHtml(authed));
 });
 
-function renderWebConsoleHtml(_authenticated: boolean): string { return phoneUi; }
+function renderWebConsoleHtml(_authenticated: boolean): string {
+  const active=getActiveSession();
+  const preview=active?.lastFrame ? '<img id="phone-preview" alt="Last received Android display" src="data:image/jpeg;base64,'+active.lastFrame.toString('base64')+'">' : '';
+  return phoneUi.replace('<!--PHONE_PREVIEW-->',preview);
+}
 
 // ============================================================================
 // HTTP + DUAL WEBSOCKET SERVER (/ws/agent & /ws/viewer)

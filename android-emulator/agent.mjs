@@ -224,9 +224,9 @@ async function verifyLocalEmulatorReadiness() {
   await sleep(1500);
   await execFileAsync('adb', ['wait-for-device'], { timeout: 15000 });
 
-  // Preserve the user's keyguard and network decisions. Waking a display is
-  // not permission to unlock it, enable radios, or disable inactivity locking.
-  await adbShell('svc power stayon false; input keyevent 224');
+  // User explicitly selected always-awake operation. Preserve credentials/radios;
+  // do not dismiss keyguard or change the user's PIN/password.
+  await adbShell('svc power stayon true; settings put system screen_off_timeout 2147483647; input keyevent 224');
 
   // Verify real DNS + outbound TCP/HTTP internet connectivity inside Android guest OS
   // (Note: Azure SDN drops raw ICMP ping & AOSP/google_apis ships toybox nc rather than curl)
