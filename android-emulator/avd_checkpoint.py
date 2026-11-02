@@ -43,7 +43,7 @@ def guest_evidence():
     component = re.search(r' u\d+ ([^ /]+/[^ ]+)', foreground)
     return {'account_hash': hashed(accounts), 'account_count': accounts.count('Account {name='),
             'packages_hash': hashed(packages), 'permissions_hash': hashed(permissions),
-            'tiktok_installed': bool(adb('pm path com.zhiliaoapp.musically')),
+            'tiktok_installed': bool(adb('pm path com.zhiliaoapp.musically 2>/dev/null || true')),
             'foreground': component.group(1) if component else None,
             'android_id_hash': hashed(adb('settings get secure android_id')),
             'settings_hash': hashed('\n'.join(adb('settings list ' + x) for x in ('system', 'secure'))),

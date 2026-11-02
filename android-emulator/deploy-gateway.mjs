@@ -179,7 +179,7 @@ async function main() {
     const shellQuote = (v) => "'" + v.replace(/'/g, "'\\''") + "'";
     async function runArtifactCommand(js) {
       for(let attempt=0;attempt<50;attempt++) {
-        const r=await mcp('apps_run',{app:appId,command:'NODE_OPTIONS= node -e '+shellQuote(js),confirm:true});
+        const r=await mcp('apps_run',{app:appId,command:'sh -c '+shellQuote('NODE_OPTIONS= node -e '+shellQuote(js)),confirm:true});
         const message=r.texts.join(' ');
         if(r.isError) {
           if(/not running|starting|wake it|rate limit|too many|429/i.test(message)){console.log('Waiting for hosting process/rate limit before installing artifact...');await sleep(10000);continue;}
