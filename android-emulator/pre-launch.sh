@@ -55,13 +55,38 @@ fi
 
 # 2. Tune AVD config.ini for consistent Pixel 6 (1080x2400) display, hardware keyboard & storage
 if [[ -d "$AVD_DIR" && -f "$AVD_DIR/config.ini" ]]; then
-  sed -i '/^hw.keyboard=/d;/^hw.lcd.width=/d;/^hw.lcd.height=/d;/^hw.lcd.density=/d;/^disk.dataPartition.size=/d' "$AVD_DIR/config.ini"
+  # Strip prior overrides then apply a coherent Pixel-6-like hardware profile
+  sed -i     '/^hw.keyboard=/d;/^hw.lcd.width=/d;/^hw.lcd.height=/d;/^hw.lcd.density=/d;/^disk.dataPartition.size=/d;'     -e '/^hw.gps=/d;/^hw.accelerometer=/d;/^hw.gyroscope=/d;/^hw.sensors.proximity=/d;'     -e '/^hw.sensors.magnetic_field=/d;/^hw.sensors.orientation=/d;/^hw.sensors.pressure=/d;'     -e '/^hw.battery=/d;/^hw.camera.back=/d;/^hw.camera.front=/d;/^hw.audioInput=/d;/^hw.audioOutput=/d;'     -e '/^hw.gpu.enabled=/d;/^hw.gpu.mode=/d;/^hw.ramSize=/d;/^hw.cpu.ncore=/d;/^hw.sdCard=/d;'     -e '/^hw.mainKeys=/d;/^hw.trackBall=/d;/^hw.dPad=/d;/^hw.gsmModem=/d;/^hw.arc=/d;'     -e '/^AvdId=/d;/^avd.ini.displayname=/d'     "$AVD_DIR/config.ini" 2>/dev/null || true
   cat >> "$AVD_DIR/config.ini" << 'EOF'
+AvdId=Pixel_6
+avd.ini.displayname=Pixel 6
 hw.keyboard=yes
+hw.mainKeys=no
+hw.trackBall=no
+hw.dPad=no
 hw.lcd.width=1080
 hw.lcd.height=2400
 hw.lcd.density=420
-disk.dataPartition.size=6144M
+disk.dataPartition.size=8192M
+hw.ramSize=4096
+hw.cpu.ncore=4
+hw.gps=yes
+hw.accelerometer=yes
+hw.gyroscope=yes
+hw.sensors.proximity=yes
+hw.sensors.magnetic_field=yes
+hw.sensors.orientation=yes
+hw.sensors.pressure=yes
+hw.battery=yes
+hw.audioInput=yes
+hw.audioOutput=yes
+hw.camera.back=emulated
+hw.camera.front=emulated
+hw.gpu.enabled=yes
+hw.gpu.mode=swiftshader_indirect
+hw.sdCard=yes
+hw.gsmModem=yes
+hw.arc=false
 EOF
-  echo "[pre-launch] Applied Pixel 6 (1080x2400 @ 420dpi, 6GB /data) overrides to $AVD_DIR/config.ini"
+  echo "[pre-launch] Applied Pixel 6 realistic hardware profile to $AVD_DIR/config.ini"
 fi
