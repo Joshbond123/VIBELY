@@ -169,7 +169,7 @@ jobs:
       - name: Prepare emulator agent & lifecycle scripts
         run: |
           chmod +x ./android-emulator/pre-launch.sh ./android-emulator/state-manager.sh ./android-emulator/run-session.sh
-          chmod +x ./android-emulator/restore-whole-avd.sh ./android-emulator/save-whole-avd.sh ./android-emulator/device-realism.sh
+          chmod +x ./android-emulator/restore-whole-avd.sh ./android-emulator/save-whole-avd.sh ./android-emulator/device-realism.sh ./android-emulator/hide-root-emulator.sh
           cd ./android-emulator && npm install --no-audit --no-fund
 
       - name: Restore encrypted whole-AVD from GitHub (if any)
