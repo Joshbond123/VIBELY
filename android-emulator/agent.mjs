@@ -126,6 +126,23 @@ async function adbShell(cmd, timeout = 30000) {
 }
 
 let adoptedRecoveryCheckpoint=false;
+
+async function saveWholeAvd(hold = false) {
+  try {
+    const env = { ...process.env, CHECKPOINT_HOLD: hold ? 'true' : 'false', EMULATOR_SESSION_ID: SESSION_ID };
+    const { stdout, stderr } = await execFileAsync('bash', [path.join(SCRIPTS_DIR, 'save-whole-avd.sh')], {
+      timeout: 25 * 60 * 1000,
+      maxBuffer: 8 * 1024 * 1024,
+      env,
+    });
+    if (stdout) log(String(stdout).trim().slice(-1500));
+    if (stderr) log('save-whole-avd note: ' + String(stderr).trim().slice(-800));
+    log('Whole-AVD checkpoint attempt finished (hold=' + hold + ').');
+  } catch (e) {
+    log('Whole-AVD checkpoint warning: ' + e.message);
+  }
+}
+
 async function runStateManager(mode) {
   const run = async () => {
     if(process.env.GITHUB_AVD_ONLY==='true'){
@@ -672,6 +689,7 @@ async function main() {
     const activeMinutes = (Date.now() - promotedAtMs) / 60000;
     if (activeMinutes >= ROTATION_MINUTES && replacementDispatchedAt === 0) {
       await runStateManager('backup').catch(() => {});
+      await saveWholeAvd(true);
       await dispatchReplacementWorkflow();
     }
 
@@ -684,6 +702,7 @@ async function main() {
     if (activeMinutes >= 345) {
       log('Approaching GitHub Actions 6h runner ceiling (345m); performing final state backup before exit.');
       await runStateManager('backup').catch(() => {});
+      await saveWholeAvd(true);
       break;
     }
   }
