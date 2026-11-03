@@ -63,9 +63,9 @@ def record(name: str, ok: bool, detail: str = "") -> None:
     print(f"[{'PASS' if ok else 'FAIL'}] {name}{(' :: ' + detail) if detail else ''}", flush=True)
 
 
-def run(cmd, timeout=900, check=False, env=None):
+def run(cmd, timeout=900, check=False, env=None, cwd=None):
     p = subprocess.run(cmd, shell=isinstance(cmd, str), capture_output=True, text=True,
-                       timeout=timeout, env=env)
+                       timeout=timeout, env=env, cwd=cwd)
     if check and p.returncode != 0:
         raise RuntimeError(f"{cmd} -> {p.returncode}\n{p.stdout[-2000:]}\n{p.stderr[-2000:]}")
     return p
@@ -266,11 +266,16 @@ def phase_root() -> bool:
     rd_work = os.path.join(WORK, "rd")
     os.makedirs(rd_work, exist_ok=True)
     raw = os.path.join(rd_work, "ramdisk.cpio")
-    # ramdisk.img is gzip'd cpio; fall back to treating it as a raw cpio.
-    gz = run(f"gzip -dc {os.path.join(IMG_DIR, 'ramdisk.img')} > {raw} 2>/dev/null; "
-             f"[ -s {raw} ] || cp {os.path.join(IMG_DIR, 'ramdisk.img')} {raw}; "
-             f"file {raw}; ls -l {raw}")
-    print("[rd]", gz.stdout.strip(), flush=True)
+    src_img = os.path.join(IMG_DIR, "ramdisk.img")
+    fmt = run(f"file -b {src_img}").stdout.strip()
+    print(f"[rd] source format: {fmt}", flush=True)
+    # The AVD ramdisk is lz4-legacy compressed cpio; magiskboot knows every
+    # format the platform uses, so let it decompress instead of guessing.
+    dec = run([magiskboot, "decompress", src_img, raw], cwd=rd_work)
+    if not os.path.exists(raw) or os.path.getsize(raw) < 10_000:
+        run(f"gzip -dc {src_img} > {raw} 2>/dev/null || cp {src_img} {raw}", cwd=rd_work)
+    print(f"[rd] decompressed: rc={dec.returncode} size={os.path.getsize(raw) if os.path.exists(raw) else 0}",
+          flush=True)
     test = run([magiskboot, "cpio", raw, "test"], cwd=rd_work)
     record("ramdisk is a supported cpio", test.returncode == 0,
            f"rc={test.returncode} {test.stdout[-200:]}")
@@ -302,7 +307,13 @@ def phase_root() -> bool:
         return False
 
     patched = os.path.join(WORK, "ramdisk-patched.img")
-    run(f"gzip -9 -n -c {raw} > {patched}", timeout=300)
+    for kind in ("lz4_legacy", "gzip"):
+        r = run([magiskboot, f"compress={kind}", raw, patched], cwd=rd_work, timeout=600)
+        if os.path.exists(patched) and os.path.getsize(patched) > 100_000:
+            print(f"[rd] recompressed as {kind}: {os.path.getsize(patched)} bytes", flush=True)
+            break
+    if not (os.path.exists(patched) and os.path.getsize(patched) > 100_000):
+        run(f"gzip -9 -n -c {raw} > {patched}", timeout=300)
     size = os.path.getsize(patched) if os.path.exists(patched) else 0
     record("patched ramdisk built", size > 100_000, f"{size} bytes")
     if size == 0:
