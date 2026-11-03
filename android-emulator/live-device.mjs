@@ -11,9 +11,47 @@ export const STREAM_PROFILES=[
 ];
 // Separate native control and encoder processes. Encoder adaptation/recovery must
 // never restart Android, its apps, or the control channel.
+/**
+ * Kill scrcpy servers inside the guest without relying on `pkill`.
+ *
+ * Android's toybox does not reliably provide `pkill`; the old cleanup
+ * (`adb shell pkill -f '[s]cid=00000a11'`) silently did nothing. The orphaned
+ * app_process kept the abstract socket name @scrcpy_00000a11, so every later
+ * attempt to bind the SAME hard-coded scid failed with
+ * "Android abstract socket did not become ready" - the phone stayed booted but
+ * with a frozen picture and no touch control after a self-heal.
+ */
+async function killGuestScrcpyServers(onlyScid = '') {
+ const ps = await exec('adb', ['shell', 'ps -A -o PID,ARGS']).catch(() => ({ stdout: '' }));
+ const lines = String(ps.stdout || '').split('\n');
+ const pids = [];
+ for (const line of lines) {
+  if (!line.includes('genymobile.scrcpy')) continue;
+  if (onlyScid && !line.includes('scid=' + onlyScid)) continue;
+  const pid = line.trim().split(/\s+/)[0];
+  if (/^\d+$/.test(pid) && pid !== '1') pids.push(pid);
+ }
+ for (const pid of pids) await exec('adb', ['shell', 'kill', '-9', pid]).catch(() => {});
+ if (onlyScid) await exec('adb', ['shell', 'pkill', '-f', '[s]cid=' + onlyScid]).catch(() => {});
+ return pids.length;
+}
+
+let attachGeneration = 0;
+/** A fresh 8-hex-digit scid base per attach, so a stale orphan can never block us. */
+function nextScidBase() {
+ attachGeneration += 1;
+ const stamp = Math.floor(Date.now() / 1000) & 0xfffff;
+ return ((stamp << 4) | (attachGeneration & 0xf)).toString(16).padStart(8, '0');
+}
+
 export async function startLiveDevice(onPacket,onStatus=()=>{}){
  const jar=new URL('./scrcpy-server.jar',import.meta.url).pathname;
  if(!fs.existsSync(jar))throw new Error('Pinned scrcpy server artifact missing');
+ const killed=await killGuestScrcpyServers();
+ if(killed)console.log('[scrcpy] cleared '+killed+' stale server process(es) before attach');
+ const scidBase=nextScidBase();
+ const scidControl=scidBase.slice(0,6)+'11';
+ const scidVideo=scidBase.slice(0,6)+'12';
  await exec('adb',['push',jar,'/data/local/tmp/vibely-scrcpy.jar']);
  const size=(await exec('adb',['shell','wm','size'])).stdout.match(/\d+x\d+/g)?.at(-1)?.split('x').map(Number)||[1080,2400];
  let stopped=false,control,controlServer,video,videoServer,config=null,width=0,height=0,requested=0,current=-1,switching=null,videoGeneration=0,recoverTimer;
@@ -27,7 +65,7 @@ export async function startLiveDevice(onPacket,onStatus=()=>{}){
   // An adb forward accepts TCP even BEFORE its Android socket exists. A TCP
   // connect alone is not readiness and can prematurely close the encoder.
   let bound=false;
-  for(let i=0;i<60;i++){
+  for(let i=0;i<150;i++){
    const unix=await exec('adb',['shell','cat','/proc/net/unix']).catch(()=>({stdout:''}));
    if(unix.stdout.includes('scrcpy_'+scid)){bound=true;break;}
    if(server.exitCode!==null)break;
@@ -35,7 +73,12 @@ export async function startLiveDevice(onPacket,onStatus=()=>{}){
   }
   if(!bound){
    const diagnostic=await exec('adb',['shell','logcat','-d','-t','160','-s','AndroidRuntime:E','libc:F','DEBUG:F']).catch(()=>({stdout:''}));
-   console.error('[native startup diagnostic]',diagnostic.stdout);server.kill();throw new Error('Android abstract socket did not become ready: '+scid+'; exit='+server.exitCode);
+   console.error('[native startup diagnostic]',diagnostic.stdout);
+   // Kill the guest-side server too: leaving it alive would keep the abstract
+   // socket name occupied and poison every later attempt.
+   try{await exec('adb',['shell','kill','-9',String(server.pid||'')]).catch(()=>{});}catch(_){}
+   await killGuestScrcpyServers(scid);
+   server.kill();throw new Error('Android abstract socket did not become ready: '+scid+'; exit='+server.exitCode);
   }
   for(let i=0;i<40;i++){
    try{const socket=await new Promise((resolve,reject)=>{const s=net.connect(port,'127.0.0.1');s.once('connect',()=>resolve(s));s.once('error',reject);});return {server,socket};}catch{await delay(200);}
@@ -46,10 +89,11 @@ export async function startLiveDevice(onPacket,onStatus=()=>{}){
   // Hard-reset any prior control server so recovery cannot wedge on a half-open abstract socket.
   try{control?.destroy();}catch{}
   try{controlServer?.kill();}catch{}
-  await exec('adb',['shell','pkill','-f','[s]cid=00000a11']).catch(()=>{});
+  // Stale servers were already cleared when this device object was created; a
+ // per-channel kill here would also take down the other channel.
   await exec('adb',['forward','--remove','tcp:27183']).catch(()=>{});
   await delay(250);
-  const c=await launch('00000a11',27183,['video=false','control=true','clipboard_autosync=false']);control=c.socket;controlServer=c.server;
+  const c=await launch(scidControl,27183,['video=false','control=true','clipboard_autosync=false']);control=c.socket;controlServer=c.server;
   // Drain clipboard acknowledgement messages even though browser input is one-way.
   control.on('data',()=>{});control.on('error',e=>console.error('[control]',e.message));
   control.once('close',()=>{pointers.clear();control=null;if(stopped||controlRecovering)return;controlRecovering=true;(async()=>{try{for(let attempt=0;!stopped&&attempt<40;attempt++){await delay(Math.min(4000,300*2**Math.min(attempt,5)));try{await startControl();console.log('[control recovery] restored after attempt',attempt);return;}catch(e){console.error('[control recovery]',e.message);}}}finally{controlRecovering=false;}})();});
@@ -57,8 +101,8 @@ export async function startLiveDevice(onPacket,onStatus=()=>{}){
  async function startVideo(level){
   const generation=++videoGeneration,p=STREAM_PROFILES[level];
   video?.destroy();videoServer?.kill();config=null;
-  await exec('adb',['shell','pkill','-f','[s]cid=00000a12']).catch(()=>{});
-  const c=await launch('00000a12',27184,['video=true','control=false','video_codec=h264','max_size='+p.maxSize,'max_fps='+p.fps,'video_bit_rate='+p.bitrate,'video_codec_options=i-frame-interval=1,repeat-previous-frame-after:long=1000000','send_codec_meta=true','send_frame_meta=true']);
+ 
+  const c=await launch(scidVideo,27184,['video=true','control=false','video_codec=h264','max_size='+p.maxSize,'max_fps='+p.fps,'video_bit_rate='+p.bitrate,'video_codec_options=i-frame-interval=1,repeat-previous-frame-after:long=1000000','send_codec_meta=true','send_frame_meta=true']);
   if(stopped||generation!==videoGeneration){c.socket.destroy();c.server.kill();return;}
   video=c.socket;videoServer=c.server;let pending=Buffer.alloc(0),header=false;
   const ready=new Promise((resolve,reject)=>{
