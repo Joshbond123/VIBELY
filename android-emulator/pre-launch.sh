@@ -90,3 +90,17 @@ hw.arc=false
 EOF
   echo "[pre-launch] Applied Pixel 6 realistic hardware profile to $AVD_DIR/config.ini"
 fi
+
+
+# Load whole-AVD RAM snapshot so restored userdata/settings/accounts match the checkpoint.
+if [[ -d "$AVD_DIR/snapshots/vibely-checkpoint" ]]; then
+  echo "[pre-launch] Enabling quick-boot from snapshot vibely-checkpoint"
+  if [[ -f "$AVD_DIR/config.ini" ]]; then
+    sed -i '/^quickboot.chosen=/d;/snapshot.present=/d' "$AVD_DIR/config.ini" || true
+    {
+      echo "quickboot.chosen=vibely-checkpoint"
+      echo "snapshot.present=true"
+    } >> "$AVD_DIR/config.ini"
+  fi
+  echo "vibely-checkpoint" > /tmp/vibely_snapshot_name
+fi
