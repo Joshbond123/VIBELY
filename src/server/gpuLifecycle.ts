@@ -146,7 +146,7 @@ export async function gpuLifecycleTick() {
 }
 
 export async function gpuDashboard() {
-  const rows=await query<any>(`SELECT s.*,m.username,m.endpoint_url,m.api_key,m.gpu_name,m.extra_meta,(SELECT count(*)::int FROM gpu_leases l WHERE l.service_id=s.service_id) AS leased_jobs FROM gpu_sessions s LEFT JOIN model_endpoints m USING(service_id) ORDER BY s.service_id`);
+  const rows=await query<any>(`SELECT s.*,m.username,m.model_name,m.endpoint_url,m.api_key,m.gpu_name,m.extra_meta,(SELECT count(*)::int FROM gpu_leases l WHERE l.service_id=s.service_id) AS leased_jobs FROM gpu_sessions s LEFT JOIN model_endpoints m USING(service_id) ORDER BY s.service_id`);
   return await Promise.all(rows.map(async(row)=>{
     let live:any=null;let availability='Unknown';
     let legacyActive=false;
@@ -171,6 +171,6 @@ export async function gpuDashboard() {
         }}
       }catch{}
     }
-    return {service_id:row.service_id,account:row.username?.toLowerCase() || null,status:legacyActive?'ON':row.state==='ON'?(live?'ON':'UNKNOWN'):row.state==='INITIALIZING'?'STARTING':row.state,availability:legacyActive?'Available (legacy unmanaged)':availability,gpu_name:live?.gpus?.map((g:any)=>g.name).join(', ') || null,telemetry:live,active_jobs:live?.active_jobs ?? null,queued_or_leased_jobs:row.leased_jobs,current_task:live?.current_tasks || [],session_duration_sec:row.started_at && row.state!=='OFF'?Math.max(0,Math.floor((Date.now()-new Date(row.started_at).getTime())/1000)):null,last_shutdown:row.last_shutdown_at,error:legacyActive?'Legacy worker is still active and does not implement safe shutdown. One-time Kaggle session cleanup is required; this is not OFF.':row.error,telemetry_is_live:Boolean(live),session_status:row.session_status};
+    return {service_id:row.service_id,account:row.username?.toLowerCase() || null,model_name:row.model_name || null,status:legacyActive?'ON':row.state==='ON'?(live?'ON':'UNKNOWN'):row.state==='INITIALIZING'?'STARTING':row.state,availability:legacyActive?'Available (legacy unmanaged)':availability,gpu_name:live?.gpus?.map((g:any)=>g.name).join(', ') || null,telemetry:live,active_jobs:live?.active_jobs ?? null,queued_or_leased_jobs:row.leased_jobs,current_task:live?.current_tasks || [],session_duration_sec:row.started_at && row.state!=='OFF'?Math.max(0,Math.floor((Date.now()-new Date(row.started_at).getTime())/1000)):null,last_shutdown:row.last_shutdown_at,error:legacyActive?'Legacy worker is still active and does not implement safe shutdown. One-time Kaggle session cleanup is required; this is not OFF.':row.error,telemetry_is_live:Boolean(live),session_status:row.session_status};
   }));
 }

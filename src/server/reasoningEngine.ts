@@ -347,6 +347,7 @@ export async function generateStandaloneMusicPlan(customTheme?: string): Promise
     const sys = `You are Scarlett Monroe's executive Amapiano + Afrobeats Fusion music producer creating original TikTok/Reels anthems for MiniMax Music 3 Q4_0 GGUF in ComfyUI. Reply ONLY with valid JSON.`;
     const usr = `Compose a 100% original, infectious AMAPIANO + AFROBEATS FUSION song (${bpm} BPM, ${key})${customTheme ? ` inspired by theme: "${customTheme}"` : ''}.
 Must include catchy female vocals, signature South African Amapiano log drums, West African Afrobeats percussion, deep punchy bass, memorable vocal hook, repetitive chorus, dance-friendly instrumental section, energetic drop, and satisfying ending.
+Introduce the signature vocal or instrumental hook within 0-2 seconds; no silence, long spoken setup or ambient-only intro. Use a distinctive short, easy-to-remember rhythmic motif and a repeatable chorus with clear eight-count dance phrasing. Align the planned drop and transitions to the stated tempo. Use original lyrics, avoid imitating a named artist, and do not claim guaranteed virality or measured beat accuracy.
 Do NOT repeat these previous hooks/keys: ${history.recentHooks.join(' | ') || 'None'}.
 ${feedback}
 
