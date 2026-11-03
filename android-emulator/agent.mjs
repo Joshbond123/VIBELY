@@ -81,6 +81,7 @@ let lastChangeFingerprint = '';
 let pendingChangeFp = '';
 let lastAdbHealthyAt = Date.now();
 let lastDutyTickAt = Date.now();
+let lastEncodedPacketAt = 0;
 
 const pendingLogLines = [];
 let logFlushTimer = null;
@@ -294,6 +295,7 @@ async function quickAdbRecovery() {
 /** Recreate the scrcpy control + video channel for the (new) emulator instance. */
 async function startLive() {
   liveDevice = await startLiveDevice((packet) => {
+    lastEncodedPacketAt = Date.now();
     if (mediaWs?.readyState !== WebSocket.OPEN) return;
     const flags = packet.readBigUInt64BE(1), isConfig = Boolean(flags & (1n << 63n)), isKey = Boolean(flags & (1n << 62n));
     if (isConfig) { mediaWs.send(packet, { binary: true }); return; }
@@ -327,10 +329,20 @@ async function ensureLiveAttached(reason = 'watchdog') {
     }
     for (let attempt = 1; attempt <= 6; attempt++) {
       try {
-        await hostSh('adb shell pkill -f genymobile.scrcpy 2>/dev/null || true', 12000);
+        // Stop the previous device object first: its recovery timer would otherwise
+        // recreate a scrcpy server on the OLD scid that nobody is connected to, and
+        // that orphan would keep the abstract socket and swallow taps.
+        try { liveDevice?.close?.(); } catch (_) {}
+        liveDevice = undefined;
+        await hostSh('adb shell "ps -A -o PID,ARGS | grep genymobile.scrcpy | grep -v grep | awk \'{print $1}\' | while read p; do kill -9 $p 2>/dev/null; done" || true', 15000);
         await sleep(1500);
         await startLive();
         mediaNeedsKey = true;
+        // Belt and braces: kill any server that is not one of the two we just made.
+        if (liveDevice?.scids) {
+          const keep = liveDevice.scids.map((x) => "scid=" + x).join(' -e ');
+          await hostSh(`adb shell "ps -A -o PID,ARGS | grep genymobile.scrcpy | grep -v grep | grep -v -e ${keep} | awk '{print \$1}' | while read p; do kill -9 \$p 2>/dev/null; done" || true`, 15000);
+        }
         if (wsClient && wsClient.readyState === WebSocket.OPEN && liveDevice?.profile) {
           wsClient.send(JSON.stringify({ type: 'stream_profile', profile: liveDevice.profile }));
         }
@@ -375,7 +387,7 @@ async function restartEmulatorLocally(reason = 'adb-lost') {
     log(`EMULATOR SELF-HEAL: relaunching ${AVD_NAME} from its own disk (reason=${reason}; apps/accounts/data are preserved).`);
     await captureEmulatorForensics(reason);
 
-    try { liveDevice?.release?.(); } catch (_) {}
+    try { liveDevice?.close?.(); } catch (_) {}
     liveDevice = undefined;
 
     await hostSh('pkill -9 -f "qemu-system-x86_64" || true', 15000);
@@ -1394,6 +1406,12 @@ function startEmulatorSupervisor() {
       if (await deviceOnline()) {
         lastAdbHealthyAt = Date.now();
         // The OS is up: make sure the live picture/touch channel is up too.
+        if (liveDevice && !liveAttachInFlight && lastEncodedPacketAt &&
+            Date.now() - lastEncodedPacketAt > 25000) {
+          log(`SUPERVISOR: no video packet for ${Math.round((Date.now() - lastEncodedPacketAt) / 1000)}s - re-attaching the display.`);
+          ensureLiveAttached('encoder-stalled').catch(() => {});
+          return;
+        }
         if (!liveDevice && !liveAttachInFlight) {
           const boot = (await adbShell('getprop sys.boot_completed', 15000).catch(() => ({ stdout: '' }))).stdout.trim();
           if (boot.startsWith('1')) ensureLiveAttached('supervisor').catch(() => {});
@@ -1577,6 +1595,9 @@ async function main() {
         // (root cause of "stuck screen": picture frozen while the OS is fine).
         if (!liveDevice) {
           if (!liveAttachInFlight) ensureLiveAttached('duty-loop').catch(() => {});
+        } else if (lastEncodedPacketAt && Date.now() - lastEncodedPacketAt > 25000) {
+          log('Video stream stalled for >25s - re-attaching the display channel.');
+          ensureLiveAttached('stream-stalled').catch(() => {});
         } else if (liveDevice.ensureHealthy) {
           try {
             const h = await liveDevice.ensureHealthy();

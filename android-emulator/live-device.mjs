@@ -22,18 +22,21 @@ export const STREAM_PROFILES=[
  * with a frozen picture and no touch control after a self-heal.
  */
 async function killGuestScrcpyServers(onlyScid = '') {
- const ps = await exec('adb', ['shell', 'ps -A -o PID,ARGS']).catch(() => ({ stdout: '' }));
- const lines = String(ps.stdout || '').split('\n');
- const pids = [];
- for (const line of lines) {
-  if (!line.includes('genymobile.scrcpy')) continue;
-  if (onlyScid && !line.includes('scid=' + onlyScid)) continue;
-  const pid = line.trim().split(/\s+/)[0];
-  if (/^\d+$/.test(pid) && pid !== '1') pids.push(pid);
- }
- for (const pid of pids) await exec('adb', ['shell', 'kill', '-9', pid]).catch(() => {});
- if (onlyScid) await exec('adb', ['shell', 'pkill', '-f', '[s]cid=' + onlyScid]).catch(() => {});
- return pids.length;
+ const filter = onlyScid ? " | grep 'scid=" + onlyScid + "'" : '';
+ const cmd = "ps -A -o PID,ARGS | grep genymobile.scrcpy | grep -v grep" + filter +
+  " | awk '{print $1}' | while read p; do kill -9 $p 2>/dev/null; done; echo swept";
+ const out = await exec('adb', ['shell', cmd]).catch(() => ({ stdout: '' }));
+ return String(out.stdout || '').includes('swept');
+}
+
+/** Kill every scrcpy server that is NOT one of ours (stale orphans swallow input). */
+async function killForeignScrcpyServers(keepScids = []) {
+ if (!keepScids.length) return false;
+ const keep = keepScids.map((s) => "scid=" + s).join(' -e ');
+ const cmd = "ps -A -o PID,ARGS | grep genymobile.scrcpy | grep -v grep | grep -v -e " + keep +
+  " | awk '{print $1}' | while read p; do kill -9 $p 2>/dev/null; done; echo swept";
+ const out = await exec('adb', ['shell', cmd]).catch(() => ({ stdout: '' }));
+ return String(out.stdout || '').includes('swept');
 }
 
 let attachGeneration = 0;
@@ -176,5 +179,5 @@ export async function startLiveDevice(onPacket,onStatus=()=>{}){
   }else throw new Error('Unsupported native input');
  }
  await startControl();await setProfile(0);
- return {input,setProfile,ensureHealthy,release(){for(const p of [...pointers.values()])input({...p,action:'up'});},get config(){return config;},get dimensions(){return {width,height};},get profile(){return {...STREAM_PROFILES[Math.max(0,current)],width,height,encoder_generation:videoGeneration};},close(){stopped=true;clearTimeout(recoverTimer);videoGeneration++;try{video?.destroy();}catch{}try{control?.destroy();}catch{}try{videoServer?.kill();}catch{}try{controlServer?.kill();}catch{}}};
+ return {scids:[scidControl,scidVideo],stop(){stopped=true;},input,setProfile,ensureHealthy,release(){for(const p of [...pointers.values()])input({...p,action:'up'});},get config(){return config;},get dimensions(){return {width,height};},get profile(){return {...STREAM_PROFILES[Math.max(0,current)],width,height,encoder_generation:videoGeneration};},close(){stopped=true;clearTimeout(recoverTimer);videoGeneration++;try{video?.destroy();}catch{}try{control?.destroy();}catch{}try{videoServer?.kill();}catch{}try{controlServer?.kill();}catch{}}};
 }
