@@ -328,13 +328,38 @@ def phase_root() -> bool:
         return False
     record("emulator boots with patched ramdisk", True)
     time.sleep(20)
+    for probe in ("magisk -v", "ls /debug_ramdisk", "ls /data/adb/magisk 2>/dev/null | head -5",
+                  "echo PATH=$PATH", "command -v su || echo no_su_in_path",
+                  "ls -l /system/bin/su /system/xbin/su /debug_ramdisk/su 2>/dev/null"):
+        print(f"[root probe] {probe} -> {sh(probe)[:400]}", flush=True)
     version = sh("magisk -v || /debug_ramdisk/magisk -v || echo NO_MAGISK")
     record("Magisk running in guest", "NO_MAGISK" not in version, version[:160])
-    out = sh("su -c id || echo NO_SU", timeout=120)
+
+    # Grant shell (uid 2000) superuser without a UI prompt: magiskd runs as root,
+    # so its own sqlite front-end can write the policy table.
+    for sql in ("UPDATE settings SET value=3 WHERE key='root_access'",
+                "INSERT OR REPLACE INTO policies (uid, process, policy, until, logging, notification)"
+                " VALUES (2000, '*', 2, 0, 0, 0)"):
+        for runner in (f'magisk --sqlite "{sql}"', f'/debug_ramdisk/magisk --sqlite "{sql}"'):
+            out = sh(runner + " 2>&1")
+            print(f"[policy] {runner[:70]} -> {out[:160]}", flush=True)
+            if "error" not in out.lower():
+                break
+
+    out = ""
+    for cmd in ("su -c id", "/debug_ramdisk/su -c id", "/data/adb/magisk/su -c id",
+                "su 0 id", "magisk su -c id"):
+        out = sh(cmd, timeout=120)
+        print(f"[su] {cmd} -> {out[:160]}", flush=True)
+        if "uid=0" in out:
+            break
     if "uid=0" not in out:
-        # Magisk shows a superuser prompt for the shell uid on first request.
+        adb("install", "-r", "/tmp/Magisk.apk", timeout=600)
+        launch_package("com.topjohnwu.magisk")
+        time.sleep(6)
+        adb("shell", "/debug_ramdisk/su -c id", timeout=120)
         if tap_text(["Grant", "ALLOW", "Allow"]):
-            out = sh("su -c id || echo NO_SU", timeout=120)
+            out = sh("su -c id", timeout=120)
     record("root available (su -c id)", "uid=0" in out, out[:200])
     return "uid=0" in out
 
