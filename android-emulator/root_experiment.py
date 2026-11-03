@@ -235,79 +235,94 @@ def phase_prepare() -> bool:
 
 
 def phase_root() -> bool:
-    """Patch ramdisk on the host, boot it, finish Magisk's setup via its UI."""
-    env = dict(os.environ, ANDROID_HOME=SDK, ANDROID_SDK_ROOT=SDK, PATH=f"{os.path.join(SDK, 'platform-tools')}:{env_path()}")
-    # rootAVD patches the ramdisk in the SDK image dir, boots the emulator itself
-    # and waits for the Magisk app to produce a patched image. Run it in the
-    # background so we can drive the UI at the same time.
-    rel = "system-images/android-34/google_apis_playstore/x86_64/ramdisk.img"
-    log = open(os.path.join(WORK, "rootavd.log"), "w")
-    proc = subprocess.Popen([f"{WORK}/rootAVD/rootAVD.sh", rel, "FAKEBOOTIMG"],
-                            cwd=WORK, stdout=log, stderr=subprocess.STDOUT, env=env,
-                            start_new_session=True)
-    print("[root] rootAVD started, waiting for the emulator it boots...", flush=True)
+    """Headless: patch the emulator ramdisk with Magisk on the host.
 
-    # rootAVD may or may not boot the AVD itself; make sure one is running.
-    for _ in range(40):
-        if "emulator-5554" in run([ADB, "devices"]).stdout:
-            break
-        time.sleep(10)
-    else:
-        boot(os.path.join(WORK, "ramdisk-orig.img"))
-    adb("wait-for-device", timeout=300)
-    if not wait_boot():
-        record("emulator booted for root phase", False, "boot_completed never set")
-        return False
-    record("emulator booted for root phase", True)
+    Magisk's app flow is only a wrapper around boot_patch.sh, which downloads a
+    boot image, unpacks it, and runs a fixed set of `magiskboot cpio` operations
+    (add 0750 init magiskinit / overlay.d/sbin/magisk.xz / init-ld.xz / patch /
+    backup / .backup/.magisk config). The emulator's ramdisk.img is a gzipped
+    cpio, so the same operations apply directly - no boot image, no UI taps.
+    """
+    payload = os.path.join(WORK, "magisk")
+    os.makedirs(payload, exist_ok=True)
+    p = run(["unzip", "-o", "-q", "/tmp/Magisk.apk", "lib/x86_64/*", "assets/stub.apk",
+             "-d", payload], timeout=300)
+    libs = os.path.join(payload, "lib", "x86_64")
+    bins = {"magiskboot": "libmagiskboot.so", "magiskinit": "libmagiskinit.so",
+            "magisk": "libmagisk.so", "init-ld": "libinit-ld.so"}
+    for tool, lib in bins.items():
+        src = os.path.join(libs, lib)
+        dst = os.path.join(payload, tool)
+        if os.path.exists(src):
+            shutil.copy(src, dst)
+            os.chmod(dst, 0o755)
+        else:
+            print(f"[magisk] missing {lib} (have: {os.listdir(libs) if os.path.isdir(libs) else 'none'})",
+                  flush=True)
+    record("Magisk payload extracted", all(os.path.exists(os.path.join(payload, t)) for t in bins),
+           p.stdout[-300:])
 
-    # Install Magisk and walk its 'Select and Patch a File' flow.
-    p = adb("install", "-r", "/tmp/Magisk.apk", timeout=900)
-    record("Magisk APK installed", "Success" in p.stdout, p.stdout.strip()[-200:])
-    launch_package("com.topjohnwu.magisk")
-    time.sleep(8)
-    if tap_text(["Magisk", "Install"]):          # top card "Install"
-        tap_text(["Select and Patch a File"])
-        time.sleep(3)
-        tap_text(["Download", "fakeboot", "sdcard"])
-        tap_text(["LET'S GO", "Let's Go", "OK"])
-    patched = wait_patched_image(420)
-    record("Magisk patched image produced", bool(patched), patched or "none")
-    if not patched:
+    magiskboot = os.path.join(payload, "magiskboot")
+    rd_work = os.path.join(WORK, "rd")
+    os.makedirs(rd_work, exist_ok=True)
+    raw = os.path.join(rd_work, "ramdisk.cpio")
+    # ramdisk.img is gzip'd cpio; fall back to treating it as a raw cpio.
+    gz = run(f"gzip -dc {os.path.join(IMG_DIR, 'ramdisk.img')} > {raw} 2>/dev/null; "
+             f"[ -s {raw} ] || cp {os.path.join(IMG_DIR, 'ramdisk.img')} {raw}; "
+             f"file {raw}; ls -l {raw}")
+    print("[rd]", gz.stdout.strip(), flush=True)
+    test = run([magiskboot, "cpio", raw, "test"], cwd=rd_work)
+    record("ramdisk is a supported cpio", test.returncode == 0,
+           f"rc={test.returncode} {test.stdout[-200:]}")
+    if test.returncode != 0:
         return False
-    # rootAVD re-applies the final ramdisk once the image exists; give it time.
-    for _ in range(60):
-        if proc.poll() is not None:
-            break
-        time.sleep(10)
-    out = open(os.path.join(WORK, "rootavd.log")).read()
-    record("rootAVD finished", proc.poll() == 0, out[-400:].replace("\n", " | "))
-    kill_emulator()
-    patched_ramdisk = os.path.join(IMG_DIR, "ramdisk.img")
-    record("patched ramdisk in place", os.path.getsize(patched_ramdisk) !=
-           os.path.getsize(os.path.join(WORK, "ramdisk-orig.img")))
-    boot(patched_ramdisk)
+
+    shutil.copy(raw, os.path.join(rd_work, "ramdisk.cpio.orig"))
+    # config Magisk expects inside .backup/.magisk
+    with open(os.path.join(rd_work, "config"), "w") as fh:
+        fh.write("KEEPVERITY=false\nKEEPFORCEENCRYPT=false\nRECOVERYMODE=false\nVENDORBOOT=false\n")
+    for src, out in ((os.path.join(payload, "magisk"), "magisk.xz"),
+                     (os.path.join(payload, "init-ld"), "init-ld.xz")):
+        run([magiskboot, "compress=xz", src, out], cwd=rd_work)
+
+    ops = [magiskboot, "cpio", raw,
+           "add 0750 init magiskinit",
+           "mkdir 0750 overlay.d",
+           "mkdir 0750 overlay.d/sbin",
+           "add 0644 overlay.d/sbin/magisk.xz magisk.xz",
+           "add 0644 overlay.d/sbin/init-ld.xz init-ld.xz",
+           "patch",
+           "backup ramdisk.cpio.orig",
+           "mkdir 000 .backup",
+           "add 000 .backup/.magisk config"]
+    patch = run(ops, cwd=rd_work, timeout=600)
+    print("[patch]", patch.returncode, patch.stdout[-800:], patch.stderr[-400:], flush=True)
+    record("ramdisk patched", patch.returncode == 0, f"rc={patch.returncode}")
+    if patch.returncode != 0:
+        return False
+
+    patched = os.path.join(WORK, "ramdisk-patched.img")
+    run(f"gzip -9 -n -c {raw} > {patched}", timeout=300)
+    size = os.path.getsize(patched) if os.path.exists(patched) else 0
+    record("patched ramdisk built", size > 100_000, f"{size} bytes")
+    if size == 0:
+        return False
+
+    boot(patched)
     if not wait_boot():
         record("emulator boots with patched ramdisk", False)
         return False
     record("emulator boots with patched ramdisk", True)
+    time.sleep(20)
+    version = sh("magisk -v || /debug_ramdisk/magisk -v || echo NO_MAGISK")
+    record("Magisk running in guest", "NO_MAGISK" not in version, version[:160])
     out = sh("su -c id || echo NO_SU", timeout=120)
+    if "uid=0" not in out:
+        # Magisk shows a superuser prompt for the shell uid on first request.
+        if tap_text(["Grant", "ALLOW", "Allow"]):
+            out = sh("su -c id || echo NO_SU", timeout=120)
     record("root available (su -c id)", "uid=0" in out, out[:200])
     return "uid=0" in out
-
-
-def wait_patched_image(timeout: int) -> str:
-    adb("shell", "mkdir -p /sdcard/Download", timeout=60)
-    t0 = time.time()
-    while time.time() - t0 < timeout:
-        listing = sh("ls /sdcard/Download/ 2>/dev/null")
-        for name in listing.split():
-            if name.startswith("magisk_patched") and name.endswith(".img"):
-                dest = os.path.join(WORK, name)
-                adb("pull", f"/sdcard/Download/{name}", dest, timeout=300)
-                if os.path.getsize(dest) > 100_000:
-                    return dest
-        time.sleep(10)
-    return ""
 
 
 def env_path() -> str:
