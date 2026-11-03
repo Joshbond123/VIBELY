@@ -21,17 +21,17 @@ if [[ ! -d "$AVD_DIR" ]]; then
 fi
 
 # Claim write ownership so rotated sessions can publish (root-cause fix)
-python3 android-emulator/github_state.py claim --owner "$OWNER" || true
+python3 github_state.py claim --owner "$OWNER" || true
 
 ARGS=(capture --avd "$AVD_DIR" --archive "$ARCHIVE")
 [[ "$HOLD" == "true" ]] && ARGS+=(--hold)
 
 echo "[save-whole-avd] Capturing..."
-python3 android-emulator/avd_checkpoint.py "${ARGS[@]}"
+python3 avd_checkpoint.py "${ARGS[@]}"
 META=$(jq -n --arg run "${GITHUB_RUN_ID:-}" --arg avd "$AVD_NAME" --arg fam "$ANDROID_CHECKPOINT_IMAGE_FAMILY" \
   --argjson held "$([ "$HOLD" = true ] && echo true || echo false)" \
   '{source_run:$run,avd:$avd,family:$fam,format:"whole-avd-v1",source_held:$held}')
 echo "[save-whole-avd] Publishing (incomplete snapshots never become current)..."
-python3 android-emulator/github_state.py publish --archive "$ARCHIVE" --owner "$OWNER" --metadata "$META"
+python3 github_state.py publish --archive "$ARCHIVE" --owner "$OWNER" --metadata "$META"
 rm -f "$ARCHIVE"
 echo "[save-whole-avd] Done"
