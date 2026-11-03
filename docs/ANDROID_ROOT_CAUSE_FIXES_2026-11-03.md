@@ -131,3 +131,116 @@ gateway is unreachable), with the phone's real state reported in the job summary
    session, then re-verifies package + version + app data + granted permissions +
    Google account on the replacement emulator.
 4. Evidence JSON, screenshots and the session log are uploaded as artifacts.
+
+---
+
+## RC9 — Google Play refused to start any install: the "Complete account setup" gate
+
+**Evidence (live phone, 09:38Z).** Tapping *Install* on a real Play listing opened
+`com.android.vending/com.google.android.finsky.billing.acquire.SheetUiBuilderHostActivity`:
+
+```
+Complete account setup
+replyraven001@gmail.com
+Add a payment option to complete your account. You won't be charged unless you make a purchase.
+[Add card] [+ more] [Add PayPal] [Redeem code]   [Skip]
+```
+
+While that sheet is up the store **accepts the Install tap and never starts the
+download** — the install sits at *Pending* forever, on every attempt, on every
+rotation, which is exactly the reported "installations get stuck repeatedly and
+never complete". No cache clear, no restart, no system image change can fix it.
+
+**Fix.** `dismissPlayStoreBlockers()` in the agent detects the gate and other Play
+dialogs and taps **Skip** (no payment method is added, nothing is purchased, the
+account is untouched). It runs after every promotion and every 2 minutes while the
+store is in the foreground. `play_install_test.py` detects the gate, records it as
+evidence, dismisses it, re-taps Install if the gate swallowed the tap, and fails
+fast with a clear reason if Play is asking for a Google sign-in.
+
+**Result (proof).** Immediately after tapping Skip the download jumped to 29% and
+`org.wikipedia` finished installing through the real store:
+
+```
+09:39:40  pm path org.wikipedia -> package:/data/app/~~0y_1foIg-.../org.wikipedia-...
+          versionName=50614-r-2026-10-20   firstInstallTime=2026-11-03 09:39:40
+```
+
+A later automated in-session test installed it unattended in 79 s
+(`[install] {"installed": true, "waited_s": 79.0}`, app launched, pid 9005), and
+the package was still present on a **fresh runner** afterwards
+(`preflight: package_installed: true`) — i.e. the install survived a full rotation.
+
+## RC10 — Checkpoints froze the phone while it was in use
+
+The first change-triggered checkpoint fired two minutes after the phone went live
+and paused the vCPU for ~3 minutes *while a Play install test was running* — the
+guest clock lost 6 minutes and every adb call hung. That is indistinguishable from
+"the phone hangs" for a user.
+
+**Fix.** A capture now requires **all** of: no persistence lease, nothing in
+DownloadManager/PackageInstaller, no Play Store in the foreground, no attached
+viewer, and 180 s of guest quiescence. The install test holds a lease so automation
+can never be frozen, and the lease is released the moment the test ends so the
+install is persisted immediately. Verified live:
+
+```
+09:51:09  State changed but Play/download busy (play_store_foreground) — defer persist
+09:52:13  Whole-AVD capture deferred (guest busy: play_store_foreground)
+```
+
+## RC11 — A dead emulator was never restarted (the permanent hang)
+
+**Evidence (live phone, 11:43Z).**
+
+```
+11:43:42  Adaptive encoder: adb forward ...: device offline
+11:43:43  CRITICAL: adb has no emulator device — running recoverAdbConnection()
+11:47:34  CRITICAL: adb has no emulator device (3 consecutive)
+11:49:22  CRITICAL: adb has no emulator device (4 consecutive)   <- still dead
+```
+
+`adb devices` was empty: the qemu process itself was gone. The agent answered with
+`adb kill-server / reconnect / wait-for-device`, which **cannot resurrect a process
+that is not running**. Each cycle burned ~100 s inside the duty loop, it took six
+cycles (~10 min) before a replacement runner was even requested, and the gateway
+kept the dead session as its active pointer, so the web phone showed a frozen
+picture indefinitely. This is the "phone gets stuck and never comes back" bug.
+
+**Fix.** The AVD disk on the runner still contains every app, account, setting and
+download, so the phone is relaunched **from that same disk on that same runner**:
+
+* `restartEmulatorLocally()` — forensics, SIGKILL leftovers, clear stale QEMU
+  locks, spawn the identical AVD/emulator options, wait for boot, re-attach
+  display+touch, re-apply Play/permission/realism tuning, re-announce health.
+* An independent **supervisor** (20 s timer) does this even if the duty loop is
+  stuck in a long await; a replacement runner is requested only if a local
+  relaunch fails.
+* Recovery no longer blocks the duty loop; `adb` children are killed with SIGKILL
+  (adb ignores SIGTERM, so `execFile` timeouts never fired and one hung `adb` could
+  freeze the whole agent); `unhandledRejection`/`uncaughtException` are logged
+  instead of terminating the agent; the log relay retries instead of dropping
+  evidence during a gateway restart.
+* Checkpoint pause shortened (only state-bearing files) and the resume is verified;
+  a guest that fails to resume triggers an immediate relaunch.
+
+**Result (proof, deliberate crash on the live phone).**
+
+```
+12:03:38  SIMULATION: killing the emulator process to prove self-heal
+12:04:03  ADB quick recovery failed while qemu is alive (device offline): relaunching
+12:04:07  EMULATOR SELF-HEAL: spawned /usr/local/lib/android/sdk/emulator/emulator pid=6888
+12:04:37  EMULATOR SELF-HEAL: Android booted
+12:05:07  DOCTOR post-self-heal: boot_completed=1, data 1.9G used / 5.6G free
+12:05:08  EMULATOR SELF-HEAL COMPLETE: the phone is live again with its data intact.
+```
+
+**90 seconds** from a killed emulator to a booted phone with all data, same session,
+no userdata wipe, no workflow replacement. `GET /api/screen.jpg` returned the live
+Play Store UI straight afterwards.
+
+**Follow-up found by that test:** the scrcpy channel failed to bind on its first
+attempt right after boot, leaving a healthy phone with a frozen picture.
+`ensureLiveAttached()` now kills a stale server and retries the attach up to six
+times with backoff, re-requesting a key frame; the self-heal, the duty loop and the
+supervisor all call it.
