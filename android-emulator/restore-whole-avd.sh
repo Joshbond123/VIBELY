@@ -27,14 +27,14 @@ fi
 
 echo "[restore-whole-avd] Downloading verified whole-AVD checkpoint..."
 set +e
-python3 android-emulator/github_state.py restore --archive "$ARCHIVE" 2>/tmp/restore-whole-avd.err
+python3 github_state.py restore --archive "$ARCHIVE" 2>/tmp/restore-whole-avd.err
 RC=$?
 set -e
 if [[ $RC -ne 0 ]]; then
   echo "[restore-whole-avd] No verified checkpoint available (expected on first production boot):"
   tail -n 40 /tmp/restore-whole-avd.err || true
   # Ensure CAS branch exists so the next save can publish
-  python3 android-emulator/github_state.py init --owner "bootstrap_${GITHUB_RUN_ID:-0}" 2>/tmp/state-init.err || true
+  python3 github_state.py init --owner "bootstrap_${GITHUB_RUN_ID:-0}" 2>/tmp/state-init.err || true
   exit 0
 fi
 
@@ -42,7 +42,7 @@ echo "[restore-whole-avd] Extracting into $AVD_DIR"
 python3 - <<'PY'
 from pathlib import Path
 import os, sys
-sys.path.insert(0, 'android-emulator')
+sys.path.insert(0, '.')
 from avd_checkpoint import extract
 avd = Path(os.environ.get('HOME', '/home/runner')) / '.android/avd/vibely_pixel6_api34.avd'
 archive = Path('/tmp/vibely-whole-avd-restore.tar.zst')
