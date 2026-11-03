@@ -206,7 +206,7 @@ jobs:
           cores: 4
           ram-size: 4096M
           heap-size: 512M
-          disk-size: 8192M
+          disk-size: 12288M
           sdcard-path-or-size: 2048M
           avd-name: vibely_pixel6_api34
           force-avd-creation: ${{ steps.avd.outputs.force }}
