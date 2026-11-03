@@ -99,8 +99,18 @@ def boot(ramdisk: str | None, extra=()) -> None:
         args += ["-ramdisk", ramdisk]
     print("[boot]", " ".join(args), flush=True)
     subprocess.Popen(args, stdout=open(os.path.join(WORK, "emulator.log"), "a"),
-                     stderr=subprocess.STDOUT, start_new_session=True)
-    adb("wait-for-device", timeout=300)
+                     stderr=subprocess.STDOUT, start_new_session=True,
+                     env=dict(os.environ))
+    try:
+        adb("wait-for-device", timeout=300)
+    except Exception as exc:  # noqa: BLE001
+        tail = ""
+        try:
+            tail = open(os.path.join(WORK, "emulator.log")).read()[-1500:]
+        except OSError:
+            pass
+        record("emulator came up", False, f"{exc} :: {tail}".replace("\n", " | ")[:600])
+        raise SystemExit(12)
 
 
 def kill_emulator() -> None:
@@ -199,7 +209,17 @@ def phase_prepare() -> bool:
         print("[avd]", detail, flush=True)
         if os.path.isdir(os.path.expanduser(f"~/.android/avd/{AVD}.avd")):
             break
-    record("AVD created", os.path.isdir(os.path.expanduser(f"~/.android/avd/{AVD}.avd")), detail)
+    created = os.path.isdir(os.path.expanduser(f"~/.android/avd/{AVD}.avd"))
+    if not created:
+        # Runners sometimes redirect AVD storage; find it and pin the env var.
+        found = run(f"find / -maxdepth 6 -name '{AVD}.avd' -type d 2>/dev/null | head -1").stdout.strip()
+        if found:
+            os.environ["ANDROID_AVD_HOME"] = os.path.dirname(found)
+            print(f"[avd] found at {found} -> ANDROID_AVD_HOME={os.environ['ANDROID_AVD_HOME']}", flush=True)
+            created = True
+    listed = run([EMU, "-list-avds"], timeout=120).stdout.strip().split()
+    print(f"[avd] emulator -list-avds -> {listed}", flush=True)
+    record("AVD created", created, detail)
     # rootAVD + Magisk
     if not os.path.isdir(os.path.join(WORK, "rootAVD")):
         run(f"git clone --depth 1 https://gitlab.com/newbit/rootAVD.git {WORK}/rootAVD", timeout=600)
