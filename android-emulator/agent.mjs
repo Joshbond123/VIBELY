@@ -82,6 +82,7 @@ let pendingChangeFp = '';
 let lastAdbHealthyAt = Date.now();
 let lastDutyTickAt = Date.now();
 let lastEncodedPacketAt = 0;
+let lastLiveInputAt = 0;
 
 const pendingLogLines = [];
 let logFlushTimer = null;
@@ -975,7 +976,7 @@ function escapeAndroidInputText(str) {
 
 async function handleGatewayRpc(action, payload) {
   switch (action) {
-    case 'live_input': if(!liveDevice)throw new Error('Live Android control is not ready');liveDevice.input(payload);return {injected_at:Date.now()};
+    case 'live_input': if(!liveDevice)throw new Error('Live Android control is not ready');lastLiveInputAt=Date.now();liveDevice.input(payload);return {injected_at:Date.now()};
     case 'release_input': liveDevice?.release();return {ok:true};
     case 'adb_shell': {
       const { stdout, stderr } = await adbShell(String(payload?.command || 'echo ok'), 40000);
@@ -1406,12 +1407,35 @@ function startEmulatorSupervisor() {
       if (await deviceOnline()) {
         lastAdbHealthyAt = Date.now();
         // The OS is up: make sure the live picture/touch channel is up too.
-        if (liveDevice && !liveAttachInFlight && lastEncodedPacketAt &&
-            Date.now() - lastEncodedPacketAt > 25000) {
-          log(`SUPERVISOR: no video packet for ${Math.round((Date.now() - lastEncodedPacketAt) / 1000)}s - re-attaching the display.`);
-          ensureLiveAttached('encoder-stalled').catch(() => {});
-          return;
+        // A static Android screen legitimately produces no new H.264 frames, so
+        // silence alone is NOT a fault. Only re-attach when a frame is actually
+        // expected: a viewer just interacted (input with no picture afterwards),
+        // or the device object reports a dead channel.
+        if (liveDevice && !liveAttachInFlight) {
+          const sinceInput = Date.now() - lastLiveInputAt;
+          const sincePacket = Date.now() - lastEncodedPacketAt;
+          if (lastLiveInputAt && sinceInput < 20000 && sincePacket > 8000) {
+            log(`SUPERVISOR: input ${Math.round(sinceInput / 1000)}s ago but no video for ${Math.round(sincePacket / 1000)}s - re-attaching the display.`);
+            ensureLiveAttached('input-without-frame').catch(() => {});
+            return;
+          }
+          try {
+            const h = await liveDevice.ensureHealthy();
+            if (!h?.ok) { log('SUPERVISOR: live channel unhealthy (' + JSON.stringify(h) + ') - re-attaching.'); ensureLiveAttached('unhealthy').catch(() => {}); return; }
+          } catch (_) {}
         }
+        // Orphan sweep: scrcpy servers survive client disconnects, and a leftover
+        // server keeps the abstract socket and swallows taps. Keep only the newest
+        // server pair (wrapper + app_process = the two highest PIDs).
+        try {
+          const psOut = await hostSh(`adb shell "ps -A -o PID,ARGS | grep genymobile.scrcpy.Server | grep -v grep | awk '{print \$1}' | sort -n"`, 15000);
+          const pids = psOut.split(/\n+/).map((x) => x.trim()).filter((x) => /^\d+$/.test(x));
+          if (pids.length > 2) {
+            const doomed = pids.slice(0, pids.length - 2);
+            await hostSh(`adb shell "kill -9 ${doomed.join(' ')}" || true`, 12000);
+            log(`Orphan sweep: killed ${doomed.length} stale scrcpy server process(es).`);
+          }
+        } catch (_) {}
         if (!liveDevice && !liveAttachInFlight) {
           const boot = (await adbShell('getprop sys.boot_completed', 15000).catch(() => ({ stdout: '' }))).stdout.trim();
           if (boot.startsWith('1')) ensureLiveAttached('supervisor').catch(() => {});
@@ -1595,9 +1619,10 @@ async function main() {
         // (root cause of "stuck screen": picture frozen while the OS is fine).
         if (!liveDevice) {
           if (!liveAttachInFlight) ensureLiveAttached('duty-loop').catch(() => {});
-        } else if (lastEncodedPacketAt && Date.now() - lastEncodedPacketAt > 25000) {
-          log('Video stream stalled for >25s - re-attaching the display channel.');
-          ensureLiveAttached('stream-stalled').catch(() => {});
+        } else if (lastLiveInputAt && Date.now() - lastLiveInputAt < 20000 &&
+                   Date.now() - lastEncodedPacketAt > 8000) {
+          log('Input sent but no video frame arrived - re-attaching the display channel.');
+          ensureLiveAttached('input-without-frame').catch(() => {});
         } else if (liveDevice.ensureHealthy) {
           try {
             const h = await liveDevice.ensureHealthy();
