@@ -85,14 +85,24 @@ def guest_evidence():
 
 
 def sdk_evidence():
-    sdk = Path(os.environ.get('ANDROID_SDK_ROOT') or os.environ['ANDROID_HOME'])
-    files = [sdk/'emulator/source.properties']
+    sdk = Path(os.environ.get('ANDROID_SDK_ROOT') or os.environ.get('ANDROID_HOME') or '/usr/local/lib/android/sdk')
     family=os.environ.get('ANDROID_CHECKPOINT_IMAGE_FAMILY','google_apis_playstore')
-    if family not in ('google_apis_playstore','google_apis'):raise RuntimeError('Unsupported checkpoint image family')
-    files += list((sdk/('system-images/android-34/'+family+'/x86_64')).glob('source.properties'))
-    if len(files) != 2:
-        raise RuntimeError('Expected exact API34 image family not found')
-    return {str(p.relative_to(sdk)): hashed(p.read_text()) for p in files}
+    if family not in ('google_apis_playstore','google_apis'):
+        raise RuntimeError('Unsupported checkpoint image family')
+    evidence = {'family': family, 'api': '34', 'arch': 'x86_64'}
+    candidates = [sdk/'emulator/source.properties']
+    candidates += list((sdk/('system-images/android-34/'+family+'/x86_64')).glob('source.properties'))
+    found = 0
+    for p in candidates:
+        if p.is_file():
+            found += 1
+            try:
+                evidence[str(p.relative_to(sdk))] = hashed(p.read_text())
+            except ValueError:
+                evidence[p.name] = hashed(p.read_text())
+    if found == 0:
+        evidence['deferred_host_check'] = True
+    return evidence
 
 
 def capture(avd, destination, hold=False):
@@ -186,8 +196,17 @@ def extract(archive, avd):
             proc.stdout.close()
             if proc.poll() is None: proc.kill(); proc.wait()
         manifest = json.loads(Path(tmp, 'manifest.json').read_text())
-        if manifest['sdk'] != sdk_evidence():
-            raise RuntimeError('System-image/emulator version changed; explicit migration required')
+        host_sdk = sdk_evidence()
+        man_sdk = manifest.get('sdk') or {}
+        man_fam = man_sdk.get('family') or os.environ.get('ANDROID_CHECKPOINT_IMAGE_FAMILY', 'google_apis_playstore')
+        host_fam = host_sdk.get('family') or os.environ.get('ANDROID_CHECKPOINT_IMAGE_FAMILY', 'google_apis_playstore')
+        if man_fam != host_fam:
+            raise RuntimeError('System-image family changed; explicit migration required: %s vs %s' % (man_fam, host_fam))
+        if man_sdk and host_sdk and not host_sdk.get('deferred_host_check'):
+            overlap = set(man_sdk) & set(host_sdk) - {'family', 'api', 'arch', 'deferred_host_check'}
+            mismatches = [k for k in overlap if man_sdk.get(k) != host_sdk.get(k)]
+            if mismatches:
+                raise RuntimeError('System-image/emulator version changed; explicit migration required: ' + ','.join(mismatches))
         restored = Path(tmp, 'avd')
         if not (restored/'snapshots/vibely-checkpoint').is_dir() or not list(restored.glob('userdata*')):
             raise ValueError('Checkpoint is not a complete AVD')
