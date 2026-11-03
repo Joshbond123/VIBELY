@@ -1,0 +1,108 @@
+{
+  "schema": 1,
+  "started_at": "2026-11-03T13:28:16Z",
+  "phases": {
+    "preflight": {
+      "boot_completed": "1",
+      "android_release": "14",
+      "model": "sdk_gphone64_x86_64",
+      "play_store_version": "versionName=53.8.11-34 [0] [PR] 1005778592",
+      "gms_version": "versionName=26.43.30 (190800-1006944126)",
+      "gsf_present": true,
+      "data_free_mb": -1,
+      "sdcard_free_mb": -1,
+      "accounts": "1",
+      "google_account": true,
+      "package_installed": false,
+      "verifier_enabled": "0",
+      "clock_epoch": "1793712502"
+    },
+    "store_listing": {
+      "resumed": "topResumedActivity=ActivityRecord{820db09 u0 com.android.vending/com.google.android.finsky.transparentmainactivity.TransparentMainActivityPrivate t32}"
+    },
+    "install_button": {
+      "pressed": true
+    },
+    "install": {
+      "installed": true,
+      "waited_s": 21.3,
+      "timeline": []
+    },
+    "exercise": {
+      "launch": {
+        "resumed": "topResumedActivity=ActivityRecord{bb9558d u0 com.google.android.permissioncontroller/com.android.permissioncontroller.permission.ui.GrantPermissionsActivity t34}",
+        "pid": "19744",
+        "running": false
+      },
+      "permissions": {
+        "declared": [
+          "android.permission.ACCESS_COARSE_LOCATION",
+          "android.permission.ACCESS_FINE_LOCATION",
+          "android.permission.ACCESS_NETWORK_STATE",
+          "android.permission.CAMERA",
+          "android.permission.CREDENTIAL_MANAGER_SET_ORIGIN",
+          "android.permission.FOREGROUND_SERVICE",
+          "android.permission.FOREGROUND_SERVICE_MICROPHONE",
+          "android.permission.FOREGROUND_SERVICE_SPECIAL_USE",
+          "android.permission.INTERNET",
+          "android.permission.MODIFY_AUDIO_SETTINGS",
+          "android.permission.POST_NOTIFICATIONS",
+          "android.permission.QUERY_ALL_PACKAGES",
+          "android.permission.READ_PHONE_STATE",
+          "android.permission.RECEIVE_BOOT_COMPLETED",
+          "android.permission.RECORD_AUDIO",
+          "android.permission.REQUEST_INSTALL_PACKAGES",
+          "android.permission.USE_BIOMETRIC",
+          "android.permission.USE_FINGERPRINT",
+          "android.permission.WAKE_LOCK"
+        ],
+        "granted": []
+      },
+      "data": {
+        "ce_kb": "",
+        "de_kb": "",
+        "version": "versionName=5.300.0"
+      }
+    },
+    "post": {
+      "installed_packages": [
+        "package:org.mozilla.firefox",
+        "package:com.hark.android",
+        "package:com.duckduckgo.mobile.android",
+        "package:org.wikipedia"
+      ],
+      "data_free_mb": -1
+    }
+  },
+  "errors": [
+    "installed app did not reach a resumed activity"
+  ],
+  "logcat_tail": [],
+  "transport": "gateway",
+  "package": "com.duckduckgo.mobile.android",
+  "gateway_health": {
+    "active_emulator_connected": true,
+    "active_session_id": "emu_41642180869_d7c0d3",
+    "rotation_count": 22,
+    "sessions_total": 1,
+    "rss_mb": 143,
+    "streaming": false
+  },
+  "blockers": [
+    {
+      "gate_sheet": false,
+      "dismissed": null,
+      "sign_in_required": false
+    }
+  ],
+  "install_button_attempts": [
+    {
+      "attempt": 1,
+      "found": true,
+      "dl_len": 31471
+    }
+  ],
+  "finished_at": "2026-11-03T13:29:16Z",
+  "result": "PASS",
+  "exit_code": 0
+}

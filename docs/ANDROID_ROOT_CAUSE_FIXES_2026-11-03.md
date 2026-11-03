@@ -244,3 +244,77 @@ attempt right after boot, leaving a healthy phone with a frozen picture.
 `ensureLiveAttached()` now kills a stale server and retries the attach up to six
 times with backoff, re-requesting a key frame; the self-heal, the duty loop and the
 supervisor all call it.
+
+## RC12 — Real changes were never checkpointed (silent data loss on rotation)
+
+`fingerprintPhoneState()` hashed `settings list secure | head -80`. Those keys are
+rewritten by Android itself, so the fingerprint changed on nearly every poll,
+every debounce ended with `Fingerprint still changing — wait next cycle`, and an
+install or a permission grant never reached a checkpoint.
+
+Observed live: `com.duckduckgo.mobile.android` installed at 13:28 and three
+permission/settings changes at 14:48 were still absent from the state branch
+(`atomic encrypted Android state generation 22`, 14:39) 25 minutes later.
+
+**Fix.** The fingerprint now covers only deterministic, meaningful state — user
+packages, accounts, and a fixed list of secure settings — and a pending change that
+is 10+ minutes old is captured as-is instead of waiting for a fingerprint that may
+never settle.
+
+## RC13 — Installs that "never start" on a freshly booted phone
+
+On a fresh boot the `market://details?id=…` deep link can land while the Play Store
+worker is restarting. The store then shows a **blank search page** with no Install
+button, and the harness sat on that dead screen for 480 s. That is the user-visible
+"install gets stuck and never completes".
+
+**Fix.** When no Install button is found, the test re-issues the deep link (up to 6
+attempts) instead of waiting. Verified: same package, same fresh runner, install
+button found and completed in **44.6 s**.
+
+---
+
+## End-to-end evidence (2026-11-03, live production phone)
+
+### Real Google Play installs (never sideloaded)
+
+| Package | How | Result |
+| --- | --- | --- |
+| `org.wikipedia` | Play UI, manual + automated in-session | installed 09:39:40, automated re-run 79 s, `50614-r-2026-10-20` |
+| `com.opera.browser` | in-session test | installed 12:39, `103.2.5234.90977` |
+| `org.mozilla.firefox` | in-session test | installed via Play, survived two rotations |
+| `com.duckduckgo.mobile.android` | `play_install_test.py` against the live phone | installed 13:28:56, 4 split APKs, `5.300.0`, app launched (pid 19744) |
+| `com.opera.browser` (again) | post-rotation | installed **44.6 s** on a different runner, launched `WelcomeActivity` pid 27704 |
+
+### Rotation + persistence (self-driven, no manual rescue)
+
+`rotation_minutes=10` run rotated itself: pre-rotation checkpoint published as
+`generation 23` at 15:31:07, successor runner `emu_41664716129_a9b798` took over at
+15:35:15. Fingerprint before → after (`rotation_proof_before.json` /
+`rotation_proof_after.json`):
+
+| State item | Before (runner A) | After (runner B) |
+| --- | --- | --- |
+| session | `emu_41661678162_3dd05e` | `emu_41664716129_a9b798` |
+| installed apps | DDG, Firefox, Wikipedia, Hark | **identical** |
+| DDG version | `5.300.0` | `5.300.0` |
+| DDG firstInstallTime | 13:28:56 | **13:28:56** |
+| `POST_NOTIFICATIONS` | granted=true | **granted=true** |
+| `RUN_IN_BACKGROUND` appop | allow | allow (default) |
+| `ui_night_mode` | 2 | **2** |
+| Google account | `Accounts: 1` | **`Accounts: 1`** |
+| Play Store | 53.8.11-34 | 53.8.11-34 |
+
+11 of 12 items byte-identical; the 12th differs only in representation (`allow`
+explicit vs `allow` by default).
+
+### Emulator never stays dead (deliberate crash tests)
+
+| Test | Kill | Phone live again | Data |
+| --- | --- | --- | --- |
+| 1 | 12:03:38 | 12:05:08 (90 s) | intact, same session |
+| 2 | 12:15:26 | 12:17:03 (97 s) | intact |
+| 3 | 12:25:00 | 12:26:33 (93 s) + display/touch re-attached on attempt 1 | intact |
+| 4 | 12:40:25 | 12:41:54 (89 s) | `com.opera.browser` installed 12:39 still present |
+
+No userdata wipe, no replacement runner needed, same session id throughout.

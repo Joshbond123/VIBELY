@@ -1,0 +1,30 @@
+{
+  "accounts_line": "Accounts: 1",
+  "collected_at": "2026-11-03T15:35:23Z",
+  "ddg": {
+    "apk_paths": [
+      "package:/data/app/~~JjXf1GCgZMz2Gl9O9QagdA==/com.duckduckgo.mobile.android-UW5ZnPxY5Bzjm9Byx5xilg==/base.apk",
+      "package:/data/app/~~JjXf1GCgZMz2Gl9O9QagdA==/com.duckduckgo.mobile.android-UW5ZnPxY5Bzjm9Byx5xilg==/split_config.en.apk",
+      "package:/data/app/~~JjXf1GCgZMz2Gl9O9QagdA==/com.duckduckgo.mobile.android-UW5ZnPxY5Bzjm9Byx5xilg==/split_config.x86_64.apk",
+      "package:/data/app/~~JjXf1GCgZMz2Gl9O9QagdA==/com.duckduckgo.mobile.android-UW5ZnPxY5Bzjm9Byx5xilg==/split_config.xxhdpi.apk"
+    ],
+    "appop_run_in_background": "No operations.\nDefault mode: allow",
+    "first_install": "firstInstallTime=2026-11-03 13:28:56",
+    "post_notifications": "android.permission.POST_NOTIFICATIONS: granted=true, flags=[ USER_SENSITIVE_WHEN_GRANTED|USER_SENSITIVE_WHEN_DENIED]",
+    "version": "versionName=5.300.0"
+  },
+  "google_account_present": "1",
+  "play_store": "versionName=53.8.11-34 [0] [PR] 1005778592",
+  "rotation_count": 22,
+  "session_id": "emu_41664716129_a9b798",
+  "settings": {
+    "screen_timeout": "2147483647",
+    "ui_night_mode": "2"
+  },
+  "third_party_packages": [
+    "com.duckduckgo.mobile.android",
+    "com.hark.android",
+    "org.mozilla.firefox",
+    "org.wikipedia"
+  ]
+}
