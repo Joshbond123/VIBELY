@@ -435,7 +435,13 @@ def main() -> int:
                 EVIDENCE["errors"].append("store already shows Open/Uninstall for the package")
                 pressed = True
                 break
-            time.sleep(4)
+            # No Install button: the store may have fallen back to search / a blank
+            # page (it does this when a deep link lands while its worker restarts).
+            # Re-issue the listing deep link instead of waiting on a dead screen -
+            # this is what made an install look "stuck forever" on a fresh boot.
+            print(f"[install] no Install button on attempt {attempt}; re-opening the store listing")
+            open_store_listing(dev, pkg)
+            time.sleep(6)
         EVIDENCE["phases"]["install_button"] = {"pressed": pressed}
         print("[install] button pressed:", pressed)
 
