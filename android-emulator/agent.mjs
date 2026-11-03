@@ -30,7 +30,10 @@ const SIMULATE_BOOT_FAILURE = String(process.env.SIMULATE_BOOT_FAILURE || 'false
 const EMERGENCY_EMPTY_ONLY = String(process.env.EMULATOR_EMPTY_GATEWAY_ONLY || 'false').toLowerCase() === 'true';
 // Whole-AVD captures pause the virtual CPU (adb emu avd stop) for the duration of
 // the disk copy. Doing that on every change froze Play Store downloads mid-install.
-const WHOLE_AVD_MIN_INTERVAL_MS = Math.max(10, Number(process.env.WHOLE_AVD_MIN_INTERVAL_MIN || 45)) * 60 * 1000;
+// Short enough that a fresh install/download is durable within ~10 minutes, long
+// enough that the (short) vCPU pause happens rarely. Every capture is still gated
+// on no viewer, no download/install and 2 minutes of quiet.
+const WHOLE_AVD_MIN_INTERVAL_MS = Math.max(5, Number(process.env.WHOLE_AVD_MIN_INTERVAL_MIN || 10)) * 60 * 1000;
 const INSTALL_TEST_PACKAGE = (process.env.VIBELY_INSTALL_TEST_PACKAGE || '').trim();
 // A run only boots when the workflow coordination decided it should, so a booted
 // emulator is a legitimate replacement candidate and may take the phone over from
@@ -820,7 +823,7 @@ async function runStateManager(mode, opts = {}) {
         const viewers = await activeViewerCount();
         if (viewers > 0) { log(`Whole-AVD capture deferred (${viewers} live viewer attached).`); return false; }
         const quietSec = Math.round((Date.now() - lastGuestChangeAt) / 1000);
-        if (quietSec < 180) { log(`Whole-AVD capture deferred (guest changed ${quietSec}s ago; need 180s of quiet).`); return false; }
+        if (quietSec < 120) { log(`Whole-AVD capture deferred (guest changed ${quietSec}s ago; need 120s of quiet).`); return false; }
       }
       const started = Date.now();
       const env={...process.env,EMULATOR_SESSION_ID:SESSION_ID,CHECKPOINT_HOLD:hold?'true':'false',AVD_DIR:process.env.AVD_DIR||`${process.env.HOME}/.android/avd/vibely_pixel6_api34.avd`};
