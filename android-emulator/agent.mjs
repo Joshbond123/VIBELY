@@ -32,6 +32,10 @@ const EMERGENCY_EMPTY_ONLY = String(process.env.EMULATOR_EMPTY_GATEWAY_ONLY || '
 // the disk copy. Doing that on every change froze Play Store downloads mid-install.
 const WHOLE_AVD_MIN_INTERVAL_MS = Math.max(10, Number(process.env.WHOLE_AVD_MIN_INTERVAL_MIN || 45)) * 60 * 1000;
 const INSTALL_TEST_PACKAGE = (process.env.VIBELY_INSTALL_TEST_PACKAGE || '').trim();
+// A run only boots when the workflow coordination decided it should, so a booted
+// emulator is a legitimate replacement candidate and may take the phone over from
+// a live predecessor (the gateway retires the predecessor after cutover).
+const FORCE_TAKEOVER = String(process.env.VIBELY_FORCE_TAKEOVER || 'true').toLowerCase() !== 'false';
 
 const SESSION_ID = process.env.GITHUB_AVD_ONLY==='true' && process.env.EMULATOR_SESSION_ID ? process.env.EMULATOR_SESSION_ID : `emu_${RUN_ID}_${crypto.randomBytes(3).toString('hex')}`;
 process.env.EMULATOR_SESSION_ID = SESSION_ID;
@@ -50,8 +54,34 @@ let replacementRetries = 0;
 let stateOpLock = Promise.resolve();
 let reconnecting = false;
 
+const pendingLogLines = [];
+let logFlushTimer = null;
+
 function log(msg) {
   console.log(`[${new Date().toISOString()}] [${SESSION_ID}] ${msg}`);
+  // Mirror into the gateway so a stuck 5-hour session can be debugged live
+  // instead of waiting for the job log to be published after it ends.
+  try {
+    pendingLogLines.push(`${new Date().toISOString()} ${msg}`);
+    if (pendingLogLines.length > 400) pendingLogLines.shift();
+    if (!logFlushTimer) {
+      logFlushTimer = setTimeout(async () => {
+        logFlushTimer = null;
+        if (!GATEWAY_URL || !GATEWAY_SECRET) return;
+        const batch = pendingLogLines.splice(0, pendingLogLines.length);
+        if (!batch.length) return;
+        try {
+          await fetch(`${GATEWAY_URL}/api/internal/agent-log`, {
+            method: 'POST',
+            headers: { Authorization: `Bearer ${GATEWAY_SECRET}`, 'Content-Type': 'application/json' },
+            body: JSON.stringify({ session_id: SESSION_ID, lines: batch }),
+            signal: AbortSignal.timeout(15000),
+          });
+        } catch { /* logging must never break the phone */ }
+      }, 3000);
+      logFlushTimer.unref?.();
+    }
+  } catch {}
 }
 
 function sleep(ms) {
@@ -694,6 +724,75 @@ function connectTunnelWebSocket(deviceInfo, force = false) {
   });
 }
 
+let postPromotionDone = false;
+let installTestStarted = false;
+
+/** Everything that must happen once this emulator owns the active pointer.
+ * Deliberately does NOT run a whole-AVD checkpoint: the disk was just restored,
+ * and a capture pauses the guest for minutes right when the phone goes live.
+ */
+async function onPromoted() {
+  if (postPromotionDone) return;
+  postPromotionDone = true;
+
+  // Soft permission grants + dialog cleanup (never force-stops a user app).
+  await prepareDevicePermissions().catch(() => {});
+
+  // Device realism: Pixel-6 hardware identity, sensors, telephony, sleep policy.
+  try {
+    const realism = path.join(SCRIPTS_DIR, 'device-realism.sh');
+    const { stdout, stderr } = await execFileAsync('bash', [realism], { timeout: 120000, maxBuffer: 4 * 1024 * 1024 });
+    if (stdout) log(String(stdout).trim().slice(-2000));
+    if (stderr) log('device-realism note: ' + String(stderr).trim().slice(-500));
+  } catch (e) { log('device-realism warning: ' + e.message); }
+
+  // Root surface check (Play images are unrooted by design; no adb root here).
+  try {
+    const hide = path.join(SCRIPTS_DIR, 'hide-root-emulator.sh');
+    const { stdout, stderr } = await execFileAsync('bash', [hide], { timeout: 90000, maxBuffer: 2 * 1024 * 1024 });
+    if (stdout) log(String(stdout).trim().slice(-1500));
+    if (stderr) log('hide-root note: ' + String(stderr).trim().slice(-400));
+  } catch (e) { log('hide-root warning: ' + e.message); }
+
+  // Claim GitHub state ownership so this session can publish checkpoints.
+  try {
+    const { stdout } = await execFileAsync('python3', [path.join(SCRIPTS_DIR, 'github_state.py'), 'claim', '--owner', SESSION_ID], {
+      timeout: 120000, env: { ...process.env, EMULATOR_SESSION_ID: SESSION_ID },
+    });
+    if (stdout) log('GitHub state claim: ' + String(stdout).trim());
+  } catch (e) { log('GitHub state claim warning: ' + e.message); }
+
+  // Play Store download/install path (background, device-idle and storage friendly).
+  await tunePlayStoreForEmulator().catch((e) => log('Play tune: ' + e.message));
+  await reconcileInstallQueue('promote').catch((e) => log('Install reconcile: ' + e.message));
+  await deviceDoctor('post-promotion').catch((e) => log('Doctor: ' + e.message));
+
+  // NOTE: no whole-AVD checkpoint here. The data disk this emulator booted from is
+  // already the published checkpoint, and a capture pauses the guest for minutes
+  // exactly when the phone becomes available. Captures happen later, driven by
+  // rotation (forced) or the rate-limited change/safety schedule.
+
+  // Optional real Play Store install test, run in the background so the duty loop
+  // (heartbeats, self-healing, watchdog) is never blocked by UI automation.
+  if (INSTALL_TEST_PACKAGE && !installTestStarted) {
+    installTestStarted = true;
+    (async () => {
+      try {
+        log(`Running real Play Store install test for ${INSTALL_TEST_PACKAGE}...`);
+        const { stdout } = await execFileAsync('python3', [path.join(SCRIPTS_DIR, 'play_install_test.py'), '--package', INSTALL_TEST_PACKAGE, '--json', '/tmp/vibely_install_test.json'], {
+          timeout: 25 * 60 * 1000, maxBuffer: 16 * 1024 * 1024,
+        });
+        log('INSTALL TEST OUTPUT:\n' + String(stdout).slice(-6000));
+      } catch (e) {
+        log('INSTALL TEST FAILED: ' + e.message);
+        if (e.stdout) log('INSTALL TEST STDOUT:\n' + String(e.stdout).slice(-6000));
+      }
+      await reconcileInstallQueue('post-install-test').catch(() => {});
+      await livePersist('post-install-test', { whole: true, hold: false, force: true }).catch((e) => log(`Post-test persist: ${e.message}`));
+    })().catch((e) => log('Install test top-level: ' + e.message));
+  }
+}
+
 /** Verify this emulator end-to-end through the public gateway, then promote it.
  *
  * Safe to call repeatedly (boot, gateway restart, duty loop). Returns true once
@@ -918,6 +1017,7 @@ async function main() {
   // throw killed the emulator workflow, the phone went dark, and the next cron
   // run repeated the same failure 33 times.
   const promoted = await promoteIntoTunnel();
+  if (promoted) await onPromoted();
   if (!promoted) {
     await gatewayFetch('/api/internal/report-failed-candidate', {
       method: 'POST',
@@ -929,65 +1029,6 @@ async function main() {
       }),
     }).catch(() => {});
     log('Handover not completed yet — remaining connected as standby; duty loop will keep retrying.');
-  }
-
-  // Clear stuck permission dialogs and grant notification perms before user interaction
-  await prepareDevicePermissions();
-  // Device realism: Pixel-6-aligned props, sensors, telephony
-  try {
-    const realism = path.join(SCRIPTS_DIR, 'device-realism.sh');
-    const { stdout, stderr } = await execFileAsync('bash', [realism], { timeout: 120000, maxBuffer: 4 * 1024 * 1024 });
-    if (stdout) log(String(stdout).trim().slice(-2000));
-    if (stderr) log('device-realism note: ' + String(stderr).trim().slice(-500));
-  } catch (e) {
-    log('device-realism warning: ' + e.message);
-  }
-  // Hide root signals + drop adb root (no Magisk — phone must not look rooted)
-  try {
-    const hide = path.join(SCRIPTS_DIR, 'hide-root-emulator.sh');
-    const { stdout, stderr } = await execFileAsync('bash', [hide], { timeout: 90000, maxBuffer: 2 * 1024 * 1024 });
-    if (stdout) log(String(stdout).trim().slice(-1500));
-    if (stderr) log('hide-root note: ' + String(stderr).trim().slice(-400));
-  } catch (e) {
-    log('hide-root warning: ' + e.message);
-  }
-  // Claim GitHub state ownership so this session can publish checkpoints (fixes fenced writer after rotation)
-  try {
-    const { stdout } = await execFileAsync('python3', [path.join(SCRIPTS_DIR, 'github_state.py'), 'claim', '--owner', SESSION_ID], {
-      timeout: 120000, env: { ...process.env, EMULATOR_SESSION_ID: SESSION_ID },
-    });
-    if (stdout) log('GitHub state claim: ' + String(stdout).trim());
-  } catch (e) {
-    log('GitHub state claim warning: ' + e.message);
-  }
-
-  // Play Store install path + evidence (never destructive: no wipes, no force-stop
-  // of user apps, accounts untouched).
-  await tunePlayStoreForEmulator().catch((e) => log('Play tune: ' + e.message));
-  await reconcileInstallQueue('promote').catch((e) => log('Install reconcile: ' + e.message));
-  await deviceDoctor('post-promotion').catch((e) => log('Doctor: ' + e.message));
-
-  // Immediate verified whole-AVD after promotion (must actually publish — no adopt-and-skip)
-  {
-    const busy = await isGuestBusyForPersist();
-    if (busy) log('Skipping immediate post-promotion whole-AVD; guest busy: ' + busy);
-    else await livePersist('post-promotion', { whole: true, hold: false, force: true }).catch((e) => log(`Initial persist note: ${e.message}`));
-  }
-
-  // Optional real Play Store install test (runs on the live phone, in-band).
-  if (INSTALL_TEST_PACKAGE) {
-    try {
-      const script = path.join(SCRIPTS_DIR, 'play_install_test.py');
-      const { stdout } = await execFileAsync('python3', [script, '--package', INSTALL_TEST_PACKAGE, '--json', '/tmp/vibely_install_test.json'], {
-        timeout: 25 * 60 * 1000, maxBuffer: 16 * 1024 * 1024,
-      });
-      log('INSTALL TEST OUTPUT:\n' + String(stdout).slice(-6000));
-    } catch (e) {
-      log('INSTALL TEST FAILED: ' + e.message);
-      if (e.stdout) log('INSTALL TEST STDOUT:\n' + String(e.stdout).slice(-6000));
-    }
-    await reconcileInstallQueue('post-install-test').catch(() => {});
-    await livePersist('post-install-test', { whole: true, hold: false, force: true }).catch((e) => log(`Post-test persist: ${e.message}`));
   }
 
   // PRIMARY persistence = change-triggered write-through (package/account/settings).
@@ -1106,11 +1147,15 @@ async function main() {
           if (!promotedAtMs) promotedAtMs = Date.now();
         } else if (!activeId) {
           log(`Self-heal: gateway has no active phone (ours is ${SESSION_ID}); promoting.`);
-          const ok = await promoteIntoTunnel('self_heal_no_active');
-          if (ok) await tunePlayStoreForEmulator().catch(() => {});
+          if (await promoteIntoTunnel('self_heal_no_active')) await onPromoted();
+        } else if (FORCE_TAKEOVER && activeId !== SESSION_ID) {
+          // A booted emulator is a legitimate replacement candidate: the workflow
+          // coordination already decided this run should own a phone. Without this
+          // a rotation deadlocked whenever the predecessor stayed connected.
+          log(`Self-heal: ${activeId} currently holds the phone; attempting coordinated takeover.`);
+          if (await promoteIntoTunnel('rotation_takeover', { attempts: 2 })) await onPromoted();
         } else {
-          // Someone else owns the phone. If we were the active one, we have been
-          // superseded: keep serving as a warm standby and stop streaming.
+          // Superseded: stay warm, keep heartbeating, stop streaming.
           log(`Self-heal: another session is active (${activeId}); staying warm as standby.`);
           shouldStreamFrames = false;
         }

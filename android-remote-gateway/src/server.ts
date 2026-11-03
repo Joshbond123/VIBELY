@@ -193,6 +193,12 @@ function isSessionAlive(s: AgentSession): boolean {
   return s.ws.readyState === WebSocket.OPEN && Date.now() - s.lastHeartbeatAt <= SESSION_SILENCE_MS;
 }
 
+/** Transport is up but the guest OS has been unreachable for a while. */
+function isSessionGuestDegraded(s: AgentSession): boolean {
+  const since = (s as any).degradedSince || 0;
+  return Boolean(since) && Date.now() - since > 45_000;
+}
+
 /** Promote the newest verified standby when the active session is gone. */
 function failoverToVerifiedStandby(reason: string): AgentSession | null {
   const ready = Array.from(sessions.values())
@@ -332,7 +338,8 @@ app.get('/api/public/health', (_req: Request, res: Response) => {
   res.json({
     ok: true,
     service: 'vibely-android-remote-gateway',
-    active_emulator_connected: Boolean(active),
+    active_emulator_connected: Boolean(active) && !isSessionGuestDegraded(active!),
+    active_guest_degraded: Boolean(active) && isSessionGuestDegraded(active!),
     active_session_id: active ? active.sessionId : null,
     active_github_run_id: active ? active.githubRunId : null,
     active_uptime_sec: active ? Math.round((Date.now() - (active.promotedAt || active.connectedAt)) / 1000) : 0,
@@ -566,10 +573,12 @@ app.post('/api/internal/handover', requireGatewayAuth, async (req: Request, res:
     const newSession = sessions.get(newSessionId);
 
     if (!newSession || newSession.ws.readyState !== WebSocket.OPEN) {
+      console.warn(`[Handover] rejected: ${newSessionId} not connected`);
       res.status(404).json({ ok: false, error: `New session ${newSessionId} is not connected` });
       return;
     }
     if (!newSession.verified) {
+      console.warn(`[Handover] rejected: ${newSessionId} not verified`);
       res.status(412).json({ ok: false, error: `New session ${newSessionId} must pass /verify-standby before handover` });
       return;
     }
@@ -687,6 +696,33 @@ app.post('/api/internal/handover', requireGatewayAuth, async (req: Request, res:
 // ============================================================================
 // AUTHENTICATED REMOTE EMULATOR CONTROL & TELEMETRY APIs
 // ============================================================================
+
+// ---------------------------------------------------------------------------
+// Agent log relay.
+//
+// The emulator job log is only published after the job finishes, which makes a
+// stuck 5-hour session impossible to debug while it matters. Agents push their
+// own log lines here and operators (and the test job) can tail them live.
+const agentLogRing: { at: string; session_id: string; line: string }[] = [];
+const AGENT_LOG_MAX = 4000;
+
+app.post('/api/internal/agent-log', requireGatewayAuth, (req: Request, res: Response) => {
+  const sessionId = String(req.body?.session_id || 'unknown');
+  const lines: string[] = Array.isArray(req.body?.lines) ? req.body.lines.map((l: any) => String(l).slice(0, 2000)) : [];
+  const at = new Date().toISOString();
+  for (const line of lines.slice(0, 200)) agentLogRing.push({ at, session_id: sessionId, line });
+  while (agentLogRing.length > AGENT_LOG_MAX) agentLogRing.shift();
+  res.json({ ok: true, stored: agentLogRing.length });
+});
+
+app.get('/api/public/agent-log', (req: Request, res: Response) => {
+  const lines = Math.min(2000, Number(req.query.lines || 300));
+  const sessionFilter = typeof req.query.session === 'string' ? req.query.session : '';
+  const out = agentLogRing
+    .filter((e) => !sessionFilter || e.session_id === sessionFilter)
+    .slice(-lines);
+  res.json({ ok: true, count: out.length, entries: out });
+});
 
 app.get('/api/status', requireUserAuth, (_req: Request, res: Response) => {
   const active = getActiveSession();
@@ -985,6 +1021,12 @@ wssAgent.on('connection', (ws: WebSocket, req: http.IncomingMessage) => {
       } else if (msg.type === 'hello' || msg.type === 'heartbeat') {
         if (msg.deviceInfo) {
           session.deviceInfo = { ...session.deviceInfo, ...msg.deviceInfo };
+          // A live agent process with a dead guest OS must not be advertised as a
+          // working phone. Track it so failover can hand the screen to a healthy
+          // standby instead of serving a black frame.
+          const degraded = Boolean(msg.deviceInfo.degraded);
+          if (degraded && !(session as any).degradedSince) (session as any).degradedSince = Date.now();
+          if (!degraded) (session as any).degradedSince = 0;
         }
       } else if (msg.type === 'rpc_response' && msg.reqId) {
         const pending = session.pendingRpc.get(msg.reqId);
@@ -1110,6 +1152,16 @@ setInterval(() => {
   for (const s of Array.from(sessions.values())) {
     if (s.ws.readyState !== WebSocket.OPEN) { dropSession(s.sessionId, 'transport_closed'); continue; }
     if (Date.now() - s.lastHeartbeatAt > SESSION_SILENCE_MS) { dropSession(s.sessionId, 'heartbeat_timeout'); }
+  }
+  if (activeSessionId) {
+    const a = sessions.get(activeSessionId);
+    if (a && isSessionGuestDegraded(a)) {
+      const standbys = Array.from(sessions.values()).filter((s) => s.verified && isSessionAlive(s) && !isSessionGuestDegraded(s));
+      if (standbys.length) {
+        console.warn(`[Gateway] Active session ${a.sessionId} guest is unreachable; failing over to a verified standby.`);
+        failoverToVerifiedStandby('active_guest_degraded');
+      }
+    }
   }
   if (activeSessionId && !sessions.has(activeSessionId) && Date.now() - gatewayStartedAt > ACTIVE_GRACE_MS) {
     console.log(`[Gateway] Clearing stale restored active pointer ${activeSessionId}`);
