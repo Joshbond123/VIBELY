@@ -6,9 +6,14 @@ set -euo pipefail
 log() { echo "[device-realism] $*"; }
 
 adb wait-for-device
-adb root >/dev/null 2>&1 || true
-sleep 1
-adb wait-for-device || true
+# NOTE: google_apis_playstore images are production builds — `adb root` always
+# fails there and the attempt bounces adbd (a 1-3s transport drop that aborts
+# in-flight RPC/install work). Detect once and never touch it again.
+if adb shell id 2>/dev/null | grep -q 'uid=0'; then
+  log "adbd already root"
+else
+  log "adbd is unprivileged (expected on Play images) — using shell-only tuning"
+fi
 
 SERIAL="${DEVICE_SERIAL:-$(echo -n "${GITHUB_REPOSITORY:-vibely}${GITHUB_RUN_ID:-0}" | sha256sum | cut -c1-12 | tr '[:lower:]' '[:upper:]')}"
 if [[ -f /tmp/vibely_persisted_android_id ]]; then

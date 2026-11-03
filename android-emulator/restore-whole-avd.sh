@@ -58,17 +58,16 @@ extract(archive, avd)
 print("[restore-whole-avd] extract complete")
 PY
 
-if [[ -d "$AVD_DIR/snapshots/vibely-checkpoint" ]]; then
-  echo "[restore-whole-avd] RAM snapshot vibely-checkpoint present"
-  echo "vibely-checkpoint" > /tmp/vibely_snapshot_name
-  if [[ -f "$AVD_DIR/config.ini" ]]; then
-    sed -i '/^quickboot.chosen=/d;/^snapshot.present=/d' "$AVD_DIR/config.ini" || true
-    echo "quickboot.chosen=vibely-checkpoint" >> "$AVD_DIR/config.ini"
-    echo "snapshot.present=true" >> "$AVD_DIR/config.ini"
-  fi
-else
-  rm -f /tmp/vibely_snapshot_name
+# Disk-only restore: drop any RAM snapshot so the phone cold-boots from the
+# verified data disk. Loading a snapshot captured mid-install is what kept Play
+# Store installations stuck forever across rotations.
+rm -rf "$AVD_DIR/snapshots"
+rm -f /tmp/vibely_snapshot_name
+if [[ -f "$AVD_DIR/config.ini" ]]; then
+  sed -i '/^quickboot[.]/d;/^snapshot[.]present=/d;/^fastboot[.]/d' "$AVD_DIR/config.ini" || true
+  echo "snapshot.present=false" >> "$AVD_DIR/config.ini"
 fi
+echo "[restore-whole-avd] Quick-boot disabled; data disk will cold-boot."
 
 if [[ ! -f "$INI" ]]; then
   cat > "$INI" <<INI

@@ -25,9 +25,11 @@ trap cleanup EXIT
 
 ensure_adb_root() {
   adb wait-for-device
-  adb root >/dev/null 2>&1 || true
-  sleep 1
-  adb wait-for-device
+  # No `adb root` here: unsupported on google_apis_playstore (production builds)
+  # and the failed attempt restarts adbd mid-session.
+  if ! adb shell id 2>/dev/null | grep -q 'uid=0'; then
+    echo "[state-manager] adbd unprivileged (expected on Play image); private app-data dumps will be skipped"
+  fi
 }
 
 backup_state() {

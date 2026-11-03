@@ -91,16 +91,26 @@ EOF
   echo "[pre-launch] Applied Pixel 6 realistic hardware profile to $AVD_DIR/config.ini"
 fi
 
-
-# Load whole-AVD RAM snapshot so restored userdata/settings/accounts match the checkpoint.
-if [[ -d "$AVD_DIR/snapshots/vibely-checkpoint" ]]; then
-  echo "[pre-launch] Enabling quick-boot from snapshot vibely-checkpoint"
+# ROOT CAUSE FIX — never quick-boot from a RAM snapshot.
+# A RAM snapshot captured while Play Store was mid-install carries a frozen
+# DownloadManager/PackageInstaller state that can never complete, so "Installing…"
+# reappeared after every single rotation. The persisted whole-AVD disks are
+# crash-consistent (captured with the vCPU paused), so every rotation now boots a
+# clean Android from the saved disk: accounts, apps, app data, permissions and
+# downloads are all present, with no stale in-flight work.
+if [[ -d "$AVD_DIR" ]]; then
+  rm -rf "$AVD_DIR/snapshots"
+  rm -f /tmp/vibely_snapshot_name
   if [[ -f "$AVD_DIR/config.ini" ]]; then
-    sed -i '/^quickboot.chosen=/d;/snapshot.present=/d' "$AVD_DIR/config.ini" || true
-    {
-      echo "quickboot.chosen=vibely-checkpoint"
-      echo "snapshot.present=true"
-    } >> "$AVD_DIR/config.ini"
+    sed -i '/^quickboot[.]/d;/^snapshot[.]present=/d;/^fastboot[.]/d' "$AVD_DIR/config.ini" || true
+    echo "snapshot.present=false" >> "$AVD_DIR/config.ini"
   fi
-  echo "vibely-checkpoint" > /tmp/vibely_snapshot_name
+  echo "[pre-launch] Disabled quick-boot; guest will cold-boot from the persisted data disk."
+fi
+
+# Storage headroom check: Play Store refuses/!stalls installs when /data is tight.
+if [[ -f "$AVD_DIR/config.ini" ]]; then
+  echo "[pre-launch] AVD disk layout:"
+  du -sh "$AVD_DIR" 2>/dev/null || true
+  ls -la "$AVD_DIR" | awk '{print "  "$5" "$9}' | grep -E 'img|qcow2' || true
 fi

@@ -24,6 +24,14 @@ const RUNNER_NAME = process.env.RUNNER_NAME || 'github-actions-ubuntu';
 const ROTATION_MINUTES = Math.max(2, Number(process.env.ROTATION_MINUTES || 240));
 const RAPID_TEST_CYCLES = Math.max(0, Number(process.env.RAPID_TEST_CYCLES || 0));
 const SIMULATE_BOOT_FAILURE = String(process.env.SIMULATE_BOOT_FAILURE || 'false').toLowerCase() === 'true';
+// Emergency-only mode: refuse to promote onto a gateway that still has a live
+// phone. Normal 4h rotation MUST be able to replace a live source, otherwise
+// every rotation is rejected and the old emulator is destroyed with no successor.
+const EMERGENCY_EMPTY_ONLY = String(process.env.EMULATOR_EMPTY_GATEWAY_ONLY || 'false').toLowerCase() === 'true';
+// Whole-AVD captures pause the virtual CPU (adb emu avd stop) for the duration of
+// the disk copy. Doing that on every change froze Play Store downloads mid-install.
+const WHOLE_AVD_MIN_INTERVAL_MS = Math.max(10, Number(process.env.WHOLE_AVD_MIN_INTERVAL_MIN || 45)) * 60 * 1000;
+const INSTALL_TEST_PACKAGE = (process.env.VIBELY_INSTALL_TEST_PACKAGE || '').trim();
 
 const SESSION_ID = process.env.GITHUB_AVD_ONLY==='true' && process.env.EMULATOR_SESSION_ID ? process.env.EMULATOR_SESSION_ID : `emu_${RUN_ID}_${crypto.randomBytes(3).toString('hex')}`;
 process.env.EMULATOR_SESSION_ID = SESSION_ID;
@@ -165,9 +173,8 @@ async function recoverAdbConnection() {
   }
   try { await execFileAsync('adb', ['reconnect', 'offline'], { timeout: 12000 }); } catch (_) {}
   try { await execFileAsync('adb', ['wait-for-device'], { timeout: 90000 }); } catch (e) { log('wait-for-device: ' + e.message); }
-  // Prefer device state; do not leave adb as root (looks rooted + can desync serial)
-  try { await execFileAsync('adb', ['unroot'], { timeout: 10000 }); } catch (_) {}
-  await sleep(800);
+  // Never `adb unroot` here: on this Play image adbd is already unprivileged and
+  // `adb unroot` restarts adbd, dropping the transport we are trying to restore.
   try {
     const { stdout } = await execFileAsync('adb', ['devices', '-l'], { timeout: 10000 });
     log('ADB devices after recovery: ' + String(stdout).trim());
@@ -197,15 +204,87 @@ async function adbShell(cmd, timeout = 30000) {
   return { stdout: stdout || '', stderr: stderr || '' };
 }
 
-/** Detect Play/DownloadManager activity. Capture uses `avd stop` and freezes installs. */
+/** Detect Play/DownloadManager/PackageInstaller activity.
+ * A whole-AVD capture runs `adb emu avd stop` (virtual CPU paused) while the
+ * disk image is copied. Freezing the guest in the middle of a Play download is
+ * what makes an installation sit at "Downloading/Pending" forever: the
+ * DownloadManager socket times out and the queued install session never
+ * completes. Any sign of an in-flight download or install must therefore defer
+ * the capture, not merely slow it down.
+ */
 async function isGuestBusyForPersist() {
   try {
     const dl = (await adbShell('dumpsys download 2>/dev/null | head -100', 15000)).stdout || '';
-    if (/Status:\s*(190|192)|STATUS_RUNNING|STATUS_PENDING/i.test(dl)) return 'download_manager';
+    if (/Status:\s*(190|192|193|194|195|196)/i.test(dl) || /STATUS_(RUNNING|PENDING|PAUSED)/i.test(dl)) return 'download_manager';
+    // PackageInstaller sessions (Play Store commits installs through them).
+    const sessions = (await adbShell('pm list sessions -a 2>/dev/null | head -40', 15000)).stdout || '';
+    if (/\bactive=true\b|\bsealed=true\b|SESSION_/i.test(sessions) && /package:/i.test(sessions)) return 'package_installer_session';
+    const inst = (await adbShell('dumpsys package installer 2>/dev/null | grep -iE "sessionId|Session [0-9]|active|staged" | head -20', 15000)).stdout || '';
+    if (/active=true|sealed=true|SessionId;i=0/i.test(inst) && !/No sessions/i.test(inst)) return 'package_installer';
     const act = (await adbShell('dumpsys activity activities 2>/dev/null | grep -iE "vending|PackageInstaller|Download" | head -25', 15000)).stdout || '';
-    if (/DOWNLOADING|downloading|Installing|INSTALLING/i.test(act)) return 'play_or_installer_ui';
+    if (/DOWNLOADING|downloading|Installing|INSTALLING|Pending\.{0,3}$/i.test(act)) return 'play_or_installer_ui';
   } catch (_) {}
   return null;
+}
+
+/** Real-device health/install-path diagnostics. Evidence first, never guesses. */
+async function deviceDoctor(reason = 'periodic') {
+  const report = {};
+  const sh = async (cmd, t = 25000) => { try { return (await adbShell(cmd, t)).stdout.trim(); } catch (e) { return 'ERR:' + e.message; } };
+  report.reason = reason;
+  report.at = new Date().toISOString();
+  report.boot_completed = await sh('getprop sys.boot_completed');
+  report.uptime_guest = await sh('cat /proc/uptime');
+  report.data_free = await sh("df -h /data | tail -1");
+  report.sdcard_free = await sh("df -h /sdcard | tail -1");
+  report.low_ram = await sh("cat /proc/meminfo | head -3 | tr '\\n' ' '");
+  report.play_version = await sh('dumpsys package com.android.vending | grep -m1 versionName');
+  report.gms_version = await sh('dumpsys package com.google.android.gms | grep -m1 versionName');
+  report.gsf_present = await sh('pm path com.google.android.gsf');
+  report.account_count = await sh("dumpsys account | grep -c 'Account {name=' ");
+  report.play_protect = await sh('settings get global package_verifier_enable');
+  report.installer_sessions = await sh('pm list sessions -a 2>/dev/null | head -20');
+  report.downloads = await sh('dumpsys download 2>/dev/null | grep -E "Status:|Uri:" | head -20');
+  report.clock_skew_sec = await sh('echo $(( $(date +%s) - ' + Math.floor(Date.now() / 1000) + ' ))');
+  report.device_idle = await sh('dumpsys deviceidle enabled 2>/dev/null | head -2');
+  report.top_resumed = await sh('dumpsys activity activities | grep -m1 ResumedActivity');
+  report.loadavg = await sh('cat /proc/loadavg');
+  report.thermal = await sh('cat /sys/class/thermal/thermal_zone*/temp 2>/dev/null | head -3 | tr "\\n" " "');
+  log('DOCTOR ' + JSON.stringify(report));
+  return report;
+}
+
+/**
+ * Reconcile a broken Play/installer queue WITHOUT touching user data.
+ * A checkpoint captured mid-install can leave PackageInstaller sessions and
+ * DownloadManager rows that can never finish; the store then shows
+ * "Installing…/Pending" forever after every boot. Abandon only sessions the
+ * system itself reports as inactive/stale, and restart the store only when
+ * nothing is downloading.
+ */
+async function reconcileInstallQueue(where = 'promote') {
+  try {
+    // Never touch the queue while anything is genuinely in flight.
+    const inFlight = await isGuestBusyForPersist();
+    if (inFlight) { log(`Install queue reconcile (${where}): guest busy (${inFlight}) — leaving the queue untouched.`); return { busy: inFlight }; }
+    const sessions = (await adbShell('pm list sessions -a 2>/dev/null', 25000)).stdout || '';
+    const ids = [...sessions.matchAll(/Session \[(\d+)\]/g)].map((m) => m[1]);
+    const stale = ids.filter((_, i) => /Session \[\d+\][\s\S]{0,200}?active=false/.test(sessions.split('Session [')[i + 1] || ''));
+    for (const id of stale.slice(0, 20)) {
+      try { await adbShell(`pm install-abandon ${id}`, 20000); log(`Abandoned stale install session ${id}`); } catch (_) {}
+    }
+    if (!stale.length) log('Install queue reconcile: no stale PackageInstaller sessions.');
+    // Restarting the store drops no account and no app data; it clears a wedged
+    // Finsky download worker. Only done when nothing is in flight.
+    await adbShell('am force-stop com.android.vending', 15000).catch(() => {});
+    await sleep(1500);
+    await adbShell('monkey -p com.android.vending -c android.intent.category.LAUNCHER 1', 20000).catch(() => {});
+    log(`Install queue reconcile (${where}): Play Store worker restarted cleanly.`);
+    return { stale: stale.length, busy: null };
+  } catch (e) {
+    log('Install queue reconcile warning: ' + e.message);
+    return { error: e.message };
+  }
 }
 
 async function tunePlayStoreForEmulator() {
@@ -272,31 +351,57 @@ async function saveWholeAvd(hold = false) {
   return wholeAvdSaveInFlight;
 }
 
-/** Live persistence: logical backup + optional full AVD image (never blocks duty loop forever). */
-async function livePersist(reason = 'periodic', { whole = false, hold = false } = {}) {
-  log(`Live persist start (${reason}, whole=${whole}, hold=${hold})`);
+let lastWholeAvdAt = 0;
+
+/** Live persistence.
+ *
+ *  `whole` is the ONLY path that preserves Google sign-in and full app data on a
+ *  Play system image (adb is unprivileged there, so per-app tar backups cannot
+ *  read /data/user/0).
+ *
+ *  But a whole-AVD capture pauses the virtual CPU while the multi-gigabyte disk
+ *  image is copied, so it must never run while Play Store/DownloadManager has
+ *  work in flight and it must not run on every fingerprint change — that is what
+ *  froze installs at "Downloading…". Captures are now rate limited (default
+ *  45 min) plus a quiet-window check, and a forced capture (rotation) skips only
+ *  the rate limit.
+ */
+async function livePersist(reason = 'periodic', { whole = false, hold = false, force = false } = {}) {
+  log(`Live persist start (${reason}, whole=${whole}, hold=${hold}, force=${force})`);
   try {
-    await runStateManager('backup');
+    await runStateManager('backup', { reason, hold, force, whole });
   } catch (e) {
-    log(`Live logical backup warning (${reason}): ${e.message}`);
-  }
-  if (whole || hold) {
-    await saveWholeAvd(hold).catch((e) => log(`Live whole-AVD warning (${reason}): ${e.message}`));
+    log(`Live persist warning (${reason}): ${e.message}`);
   }
   log(`Live persist done (${reason})`);
 }
 
-async function runStateManager(mode) {
+async function runStateManager(mode, opts = {}) {
   const run = async () => {
     if(process.env.GITHUB_AVD_ONLY==='true'){
       // Whole-AVD is authoritative. Restore already happened pre-boot in the workflow.
       if(mode==='restore'){log('Native-verified whole AVD already restored pre-boot; skipping logical restore.');return;}
-      // ROOT-CAUSE FIX: never skip the first backup. Previous code "adopted" the
-      // old checkpoint and returned without publishing, so installs/login after
-      // promotion never became the GitHub current pointer.
-      const env={...process.env,EMULATOR_SESSION_ID:SESSION_ID,AVD_DIR:process.env.AVD_DIR||`${process.env.HOME}/.android/avd/vibely_pixel6_api34.avd`};
-      const {stdout,stderr}=await execFileAsync('python3',[path.join(SCRIPTS_DIR,'github_live_checkpoint.py')],{timeout:1800000,maxBuffer:16*1024*1024,env});
-      if(stdout)process.stdout.write(stdout);if(stderr)process.stderr.write(stderr);return;
+      const hold = Boolean(opts.hold);
+      const force = Boolean(opts.force) || hold;
+      if (!force && Date.now() - lastWholeAvdAt < WHOLE_AVD_MIN_INTERVAL_MS) {
+        log(`Whole-AVD capture skipped (rate limit: ${Math.round((Date.now()-lastWholeAvdAt)/60000)}m < ${WHOLE_AVD_MIN_INTERVAL_MS/60000}m since last; reason=${opts.reason||mode})`);
+        return;
+      }
+      if (!hold) {
+        const busy = await isGuestBusyForPersist();
+        if (busy) { log(`Whole-AVD capture deferred (guest busy: ${busy}); installs/downloads must not be frozen.`); return; }
+      }
+      const started = Date.now();
+      const env={...process.env,EMULATOR_SESSION_ID:SESSION_ID,CHECKPOINT_HOLD:hold?'true':'false',AVD_DIR:process.env.AVD_DIR||`${process.env.HOME}/.android/avd/vibely_pixel6_api34.avd`};
+      try {
+        const {stdout,stderr}=await execFileAsync('python3',[path.join(SCRIPTS_DIR,'github_live_checkpoint.py')],{timeout:1800000,maxBuffer:16*1024*1024,env});
+        if(stdout)process.stdout.write(stdout);if(stderr)process.stderr.write(stderr);
+        lastWholeAvdAt = Date.now();
+        log(`Whole-AVD checkpoint published in ${Math.round((Date.now()-started)/1000)}s (reason=${opts.reason||mode}, hold=${hold}).`);
+      } catch (e) {
+        log(`Whole-AVD checkpoint failed after ${Math.round((Date.now()-started)/1000)}s: ${e.message}`);
+      }
+      return;
     }
     const { stdout, stderr } = await execFileAsync('bash', [STATE_SCRIPT, mode], {
       timeout: 180000,
@@ -391,9 +496,12 @@ async function verifyLocalEmulatorReadiness() {
     throw new Error('Emulator did not reach sys.boot_completed=1 + PackageManager readiness');
   }
 
-  await execFileAsync('adb', ['root'], { timeout: 15000 }).catch(() => {});
-  await sleep(1500);
-  await execFileAsync('adb', ['wait-for-device'], { timeout: 15000 });
+  // `adb root` is unsupported on google_apis_playstore production builds and the
+  // attempt restarts adbd. Only try it when the shell is not already root.
+  try {
+    const who = await adbShell('id', 8000);
+    if (!/uid=0/.test(who.stdout || '')) log('Guest adbd is unprivileged (expected on Play images); continuing as shell.');
+  } catch (_) {}
 
   // User explicitly selected always-awake operation. Preserve credentials/radios;
   // do not dismiss keyguard or change the user's PIN/password.
@@ -512,7 +620,14 @@ function connectMediaTunnel(){
  socket.on('close',()=>{if(mediaWs===socket)mediaWs=null;if(!retiring)mediaTimer=setTimeout(connectMediaTunnel,Math.min(8000,400*2**mediaRetry++)+Math.random()*200);});
 }
 
-function connectTunnelWebSocket(deviceInfo) {
+function connectTunnelWebSocket(deviceInfo, force = false) {
+  if (!force && wsClient && wsClient.readyState === WebSocket.OPEN) return Promise.resolve(wsClient);
+  if (force && wsClient) {
+    // Replace the transport deliberately: detach the auto-reconnect handler so a
+    // forced reconnect cannot start a second recovery loop.
+    try { wsClient.removeAllListeners('close'); wsClient.close(); } catch {}
+    wsClient = null;
+  }
   return new Promise((resolve, reject) => {
     const wsProto = GATEWAY_URL.startsWith('https://') ? 'wss://' : 'ws://';
     const hostPart = GATEWAY_URL.replace(/^https?:\/\//, '');
@@ -577,6 +692,64 @@ function connectTunnelWebSocket(deviceInfo) {
       if (!opened) reject(err);
     });
   });
+}
+
+/** Verify this emulator end-to-end through the public gateway, then promote it.
+ *
+ * Safe to call repeatedly (boot, gateway restart, duty loop). Returns true once
+ * this session owns the active pointer.
+ */
+async function promoteIntoTunnel(reason = null, { attempts = 4, baseDelayMs = 3000 } = {}) {
+  for (let attempt = 1; attempt <= attempts; attempt++) {
+    try {
+      if (!wsClient || wsClient.readyState !== WebSocket.OPEN) await connectTunnelWebSocket(await collectDeviceInfo().catch(() => ({})), true);
+
+      const verResp = await gatewayFetch(`/api/internal/verify-standby/${encodeURIComponent(SESSION_ID)}`, { method: 'POST' });
+      const verJson = await verResp.json().catch(() => ({}));
+      if (!verResp.ok || !verJson.verified) {
+        // A stale/paused guest cannot produce a frame; retry after the current
+        // ADB work finishes instead of aborting the whole workflow.
+        throw new Error(`verify-standby rejected: ${JSON.stringify(verJson).slice(0, 240)}`);
+      }
+      log(`Remote standby verification PASSED (${verJson.frame_bytes}B frame over tunnel, attempt ${attempt}).`);
+
+      const hoResp = await gatewayFetch('/api/internal/handover', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          new_session_id: SESSION_ID,
+          // Emergency-recovery only. Rotating a live phone MUST be allowed to
+          // replace the live source, otherwise every rotation is refused and the
+          // old emulator is killed with no successor.
+          expect_empty: EMERGENCY_EMPTY_ONLY,
+          // The new emulator already restored the authoritative encrypted whole
+          // AVD, so the gateway must not block the cutover on a live delta RPC.
+          state_source: process.env.GITHUB_AVD_ONLY === 'true' ? 'github-whole-avd' : 'live-delta',
+          reason: reason || (RAPID_TEST_CYCLES > 0 ? 'rapid_e2e_rotation_verification' : 'automatic_4h_workflow_rotation'),
+        }),
+      });
+      const hoJson = await hoResp.json().catch(() => ({}));
+      if (!hoResp.ok || !hoJson.ok) throw new Error(`handover rejected: ${JSON.stringify(hoJson).slice(0, 240)}`);
+
+      promotedAtMs = Date.now();
+      log(`HANDOVER COMPLETE! Active session is now ${SESSION_ID} (cutover=${hoJson.cutover_ms}ms, stateSynced=${hoJson.state_synced}, prev=${hoJson.previous_session_id || 'none'}).`);
+      return true;
+    } catch (err) {
+      log(`Promotion attempt ${attempt}/${attempts} failed: ${err.message}`);
+      if (attempt < attempts) await sleep(baseDelayMs * attempt);
+    }
+  }
+  return false;
+}
+
+/** Ask the gateway whether this session is still the active one. */
+async function gatewayActiveSessionId() {
+  try {
+    const r = await fetch(`${GATEWAY_URL}/api/public/health`, { signal: AbortSignal.timeout(10000) });
+    if (!r.ok) return undefined;
+    const j = await r.json();
+    return j.active_pointer === undefined ? (j.active_session_id || null) : j.active_pointer;
+  } catch { return undefined; }
 }
 
 async function dispatchReplacementWorkflow() {
@@ -678,22 +851,17 @@ async function reconnectTunnel(deviceInfo) {
       // An already promoted runner must reclaim an EMPTY gateway after restart.
       // Never displace a successor which has already become active.
       if (promotedAtMs) {
-        const health = await fetch(`${GATEWAY_URL}/api/public/health`, { signal: AbortSignal.timeout(10000) });
-        if (!health.ok) throw new Error(`Health ${health.status}`);
-        const state = await health.json();
-        if (state.active_session_id && state.active_session_id !== SESSION_ID) {
+        const activeId = await gatewayActiveSessionId();
+        if (activeId === undefined) throw new Error('Gateway health unavailable');
+        if (activeId && activeId !== SESSION_ID) {
+          log(`Another session (${activeId}) is active; retiring this superseded emulator cleanly.`);
           retiring = true;
-          wsClient?.close();
+          try { wsClient?.close(); } catch {}
           process.exit(0);
         }
-        if (!state.active_session_id) {
-          const verified = await gatewayFetch(`/api/internal/verify-standby/${encodeURIComponent(SESSION_ID)}`, { method: 'POST' });
-          if (!verified.ok || !(await verified.json()).verified) throw new Error('Reconnect verification failed');
-          const promoted = await gatewayFetch('/api/internal/handover', {
-            method: 'POST', headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ new_session_id: SESSION_ID, reason: 'gateway_restart_recovery' }),
-          });
-          if (!promoted.ok || !(await promoted.json()).ok) throw new Error('Reconnect promotion failed');
+        if (!activeId) {
+          const ok = await promoteIntoTunnel('gateway_restart_recovery', { attempts: 3 });
+          if (!ok) throw new Error('Reconnect promotion failed');
         }
       }
       if (wsClient?.readyState !== WebSocket.OPEN) throw new Error('Tunnel closed during recovery');
@@ -745,54 +913,22 @@ async function main() {
     }
   }
 
-  // Verify end-to-end tunnel reachability through android.aivideo.blitz.cloud BEFORE promoting!
-  log('Running remote standby verification via android.aivideo.blitz.cloud...');
-  const verResp = await gatewayFetch(`/api/internal/verify-standby/${encodeURIComponent(SESSION_ID)}`, {
-    method: 'POST',
-  });
-  const verJson = await verResp.json();
-  if (!verResp.ok || !verJson.verified) {
+  // Verify + promote, with bounded retries and self-healing.
+  // ROOT CAUSE: this used to be a single attempt that threw on any hiccup. The
+  // throw killed the emulator workflow, the phone went dark, and the next cron
+  // run repeated the same failure 33 times.
+  const promoted = await promoteIntoTunnel();
+  if (!promoted) {
     await gatewayFetch('/api/internal/report-failed-candidate', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         session_id: SESSION_ID,
         github_run_id: RUN_ID,
-        reason: `Standby remote verification failed: ${JSON.stringify(verJson)}`,
+        reason: 'Standby verification/handover did not complete; staying connected as standby and retrying',
       }),
     }).catch(() => {});
-    throw new Error(`Remote standby verification failed: ${JSON.stringify(verJson)}`);
-  }
-  log(`Remote standby verification PASSED (${verJson.frame_bytes}B screen frame verified over tunnel).`);
-
-  // Execute coordinated zero-downtime handover (flushes OLD final delta -> restores onto NEW -> swaps active pointer -> retires OLD)
-  log('Executing atomic zero-downtime handover on android.aivideo.blitz.cloud...');
-  const hoResp = await gatewayFetch('/api/internal/handover', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      new_session_id: SESSION_ID,
-      expect_empty: process.env.GITHUB_AVD_ONLY==='true',
-      reason: RAPID_TEST_CYCLES > 0 ? 'rapid_e2e_rotation_verification' : 'automatic_4h_workflow_rotation',
-    }),
-  });
-  const hoJson = await hoResp.json();
-  if (!hoResp.ok || !hoJson.ok) {
-    throw new Error(`Handover failed: ${JSON.stringify(hoJson)}`);
-  }
-  promotedAtMs = Date.now();
-  log(`HANDOVER COMPLETE! Active session is now ${SESSION_ID} (cutover=${hoJson.cutover_ms}ms, stateSynced=${hoJson.state_synced}).`);
-
-  // Verify external user-facing endpoint serves this exact emulator
-  if (ACCESS_TOKEN) {
-    const extCheck = await fetch(`${GATEWAY_URL}/api/status`, {
-      headers: { Authorization: `Bearer ${ACCESS_TOKEN}` },
-    });
-    const extData = await extCheck.json();
-    if (!extCheck.ok || extData?.active_emulator?.session_id !== SESSION_ID) {
-      throw new Error(`Post-handover external status mismatch: ${JSON.stringify(extData)}`);
-    }
-    log('Verified external android.aivideo.blitz.cloud user endpoint is live and routed to this emulator!');
+    log('Handover not completed yet — remaining connected as standby; duty loop will keep retrying.');
   }
 
   // Clear stuck permission dialogs and grant notification perms before user interaction
@@ -825,22 +961,47 @@ async function main() {
     log('GitHub state claim warning: ' + e.message);
   }
 
-  // Immediate verified whole-AVD after promotion (must actually publish — no adopt-and-skip)
+  // Play Store install path + evidence (never destructive: no wipes, no force-stop
+  // of user apps, accounts untouched).
   await tunePlayStoreForEmulator().catch((e) => log('Play tune: ' + e.message));
+  await reconcileInstallQueue('promote').catch((e) => log('Install reconcile: ' + e.message));
+  await deviceDoctor('post-promotion').catch((e) => log('Doctor: ' + e.message));
+
+  // Immediate verified whole-AVD after promotion (must actually publish — no adopt-and-skip)
   {
     const busy = await isGuestBusyForPersist();
     if (busy) log('Skipping immediate post-promotion whole-AVD; guest busy: ' + busy);
-    else await livePersist('post-promotion', { whole: true, hold: false }).catch((e) => log(`Initial persist note: ${e.message}`));
+    else await livePersist('post-promotion', { whole: true, hold: false, force: true }).catch((e) => log(`Initial persist note: ${e.message}`));
+  }
+
+  // Optional real Play Store install test (runs on the live phone, in-band).
+  if (INSTALL_TEST_PACKAGE) {
+    try {
+      const script = path.join(SCRIPTS_DIR, 'play_install_test.py');
+      const { stdout } = await execFileAsync('python3', [script, '--package', INSTALL_TEST_PACKAGE, '--json', '/tmp/vibely_install_test.json'], {
+        timeout: 25 * 60 * 1000, maxBuffer: 16 * 1024 * 1024,
+      });
+      log('INSTALL TEST OUTPUT:\n' + String(stdout).slice(-6000));
+    } catch (e) {
+      log('INSTALL TEST FAILED: ' + e.message);
+      if (e.stdout) log('INSTALL TEST STDOUT:\n' + String(e.stdout).slice(-6000));
+    }
+    await reconcileInstallQueue('post-install-test').catch(() => {});
+    await livePersist('post-install-test', { whole: true, hold: false, force: true }).catch((e) => log(`Post-test persist: ${e.message}`));
   }
 
   // PRIMARY persistence = change-triggered write-through (package/account/settings).
   // Secondary safety net = infrequent whole-AVD only if something was missed.
   const CHANGE_POLL_MS = 20 * 1000;
-  const SAFETY_WHOLE_MS = 30 * 60 * 1000; // safety only, not primary
+  const SAFETY_WHOLE_MS = 60 * 60 * 1000; // safety net only; captures pause the guest
   let lastChangeFingerprint = '';
   let lastWholeAvdMs = Date.now();
   let lastBlitzWakeMs = Date.now();
   let changePersistInFlight = false;
+  let lastSelfHealMs = 0;
+  let lastDoctorMs = Date.now();
+  let lastActiveSeenMs = Date.now();
+  let consecutiveAdbFailures = 0;
 
   async function fingerprintPhoneState() {
     try {
@@ -878,10 +1039,20 @@ async function main() {
         if (wsClient && wsClient.readyState === WebSocket.OPEN) {
           wsClient.send(JSON.stringify({ type: 'heartbeat', sessionId: SESSION_ID, deviceInfo: { degraded: !ok, adbRecovered: ok, adbDevices: devices } }));
         }
+        consecutiveAdbFailures += 1;
         if (!ok) {
-          log('ADB recovery failed this cycle; will retry next health check');
+          log(`ADB recovery failed this cycle (${consecutiveAdbFailures} consecutive); will retry next health check`);
+        }
+        if (consecutiveAdbFailures >= 6) {
+          // Never reboot or wipe: re-save state knowledge and let the workflow's
+          // supervisor hand the phone to a fresh successor with the same disk.
+          log('WATCHDOG: emulator ADB unreachable for 6 cycles; publishing checkpoint and requesting replacement.');
+          await livePersist('watchdog-adb-lost', { whole: false, hold: false, force: false }).catch(() => {});
+          await dispatchReplacementWorkflow();
+          consecutiveAdbFailures = 0;
         }
       } else {
+        consecutiveAdbFailures = 0;
         // Soft-clear stuck system permission dialogs only (never force-stop apps)
         try { await prepareDevicePermissions(); } catch (_) {}
 
@@ -919,6 +1090,41 @@ async function main() {
       log(`Health check warning: ${err.message}`);
     }
 
+    // 1b. SELF-HEALING OWNERSHIP: if the gateway has no active phone (container
+    // restart, reaped session, failed rotation) this emulator re-verifies and
+    // promotes itself. Without this the phone stayed dark while the agent sat in
+    // the duty loop as an unverified standby until the 4h rotation.
+    if (Date.now() - lastSelfHealMs > 60000) {
+      lastSelfHealMs = Date.now();
+      try {
+        const activeId = await gatewayActiveSessionId();
+        if (activeId === undefined) {
+          log('Self-heal: gateway health unreachable; waking it.');
+          await wakeGatewayOnBlitz();
+        } else if (activeId === SESSION_ID) {
+          lastActiveSeenMs = Date.now();
+          if (!promotedAtMs) promotedAtMs = Date.now();
+        } else if (!activeId) {
+          log(`Self-heal: gateway has no active phone (ours is ${SESSION_ID}); promoting.`);
+          const ok = await promoteIntoTunnel('self_heal_no_active');
+          if (ok) await tunePlayStoreForEmulator().catch(() => {});
+        } else {
+          // Someone else owns the phone. If we were the active one, we have been
+          // superseded: keep serving as a warm standby and stop streaming.
+          log(`Self-heal: another session is active (${activeId}); staying warm as standby.`);
+          shouldStreamFrames = false;
+        }
+      } catch (e) {
+        log('Self-heal warning: ' + e.message);
+      }
+    }
+
+    // 1c. Periodic evidence collection (cheap, non-destructive).
+    if (Date.now() - lastDoctorMs > 30 * 60 * 1000) {
+      lastDoctorMs = Date.now();
+      await deviceDoctor('periodic').catch((e) => log('Doctor: ' + e.message));
+    }
+
     // 2. Proactive Blitz.cloud resume every 10m so android.aivideo.blitz.cloud (15m sleep tier) never sleeps
     if (Date.now() - lastBlitzWakeMs >= 10 * 60 * 1000) {
       lastBlitzWakeMs = Date.now();
@@ -944,7 +1150,7 @@ async function main() {
             if (busy2) { log('Still busy after debounce (' + busy2 + ') — skip'); return; }
             const fp2 = await fingerprintPhoneState();
             if (fp2 !== pendingFp) { log('Fingerprint still changing — wait next cycle'); lastChangeFingerprint = fp2; return; }
-            log('Phone state stable — whole-AVD persist');
+            log('Phone state stable — whole-AVD persist (rate limited; never mid-install)');
             await livePersist('change-triggered', { whole: true, hold: false });
           })()
             .catch((e) => log(`Change-triggered persist warning: ${e.message}`))

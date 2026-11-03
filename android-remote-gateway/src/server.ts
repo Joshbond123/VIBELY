@@ -74,6 +74,8 @@ let rotationCount = 0;
 let failedReplacementCount = 0;
 let lastFailedCandidate: any = null;
 let handoverInProgress = false;
+let lastViewerSeenAt = 0;
+const gatewayStartedAt = Date.now();
 
 function readJsonSafe<T>(filePath: string, fallback: T): T {
   try {
@@ -96,6 +98,15 @@ const persistedCoord = readJsonSafe<{ rotationCount?: number; failedReplacementC
 );
 rotationCount = Number(persistedCoord.rotationCount || 0);
 failedReplacementCount = Number(persistedCoord.failedReplacementCount || 0);
+
+// Restore the active pointer across container restarts (Blitz sleep/wake and
+// deploy restarts wipe in-memory state). Without this the returning emulator is
+// demoted to an unverified standby and the phone stays dark until a handover
+// happens to succeed. The reaper clears this if the run never reconnects.
+if (persistedCoord.lastActiveSessionId && typeof persistedCoord.lastActiveSessionId === 'string') {
+  activeSessionId = persistedCoord.lastActiveSessionId;
+  console.log(`[Gateway] Restored active session pointer: ${activeSessionId}`);
+}
 
 function saveCoordinatorState() {
   writeJsonAtomic(COORDINATOR_FILE, {
@@ -154,11 +165,74 @@ function safeCompare(a: string, b: string): boolean {
   return crypto.timingSafeEqual(bufA, bufB);
 }
 
+// ---------------------------------------------------------------------------
+// Liveness policy.
+//
+// Root cause of the recurring "black screen" / "phone offline" loop: the gateway
+// never reaped half-open agent sockets. A cancelled/killed workflow leaves a
+// WebSocket that the Cloudflare hop still reports as OPEN, so `activeSessionId`
+// kept pointing at a dead emulator. Viewers were routed to a dead phone and the
+// next rotation was refused ("Working source preserved"). The session map also
+// grew without bound, which inflated gateway memory and restarted the container.
+//
+// The agent heartbeats every ~15s and the gateway pings every 20s, so 75s of
+// silence is unambiguous proof the transport is dead.
+const SESSION_SILENCE_MS = 75_000;
+const ACTIVE_GRACE_MS = 10 * 60_000; // allow the same run to reconnect after a gateway restart
+const MAX_SESSIONS = 4;
+
 function getActiveSession(): AgentSession | null {
   if (!activeSessionId) return null;
   const s = sessions.get(activeSessionId);
   if (!s || s.ws.readyState !== WebSocket.OPEN) return null;
+  if (Date.now() - s.lastHeartbeatAt > SESSION_SILENCE_MS) return null;
   return s;
+}
+
+function isSessionAlive(s: AgentSession): boolean {
+  return s.ws.readyState === WebSocket.OPEN && Date.now() - s.lastHeartbeatAt <= SESSION_SILENCE_MS;
+}
+
+/** Promote the newest verified standby when the active session is gone. */
+function failoverToVerifiedStandby(reason: string): AgentSession | null {
+  const ready = Array.from(sessions.values())
+    .filter((s) => s.verified && isSessionAlive(s))
+    .sort((a, b) => b.connectedAt - a.connectedAt)[0];
+  if (!ready) {
+    activeSessionId = null;
+    saveCoordinatorState();
+    return null;
+  }
+  activeSessionId = ready.sessionId;
+  ready.role = 'active';
+  ready.promotedAt = Date.now();
+  rotationCount += 1;
+  saveCoordinatorState();
+  notifyStreamStateToAgents();
+  broadcastViewerJson({
+    type: 'session_switched',
+    active_session_id: ready.sessionId,
+    previous_session_id: null,
+    rotation_count: rotationCount,
+    reason,
+    device_info: ready.deviceInfo,
+  });
+  console.log(`[Gateway] Failover to verified standby ${ready.sessionId} (${reason})`);
+  return ready;
+}
+
+function dropSession(sessionId: string, why: string) {
+  const s = sessions.get(sessionId);
+  if (!s) return;
+  console.log(`[Gateway] Reaping session ${sessionId} (${why})`);
+  try { s.ws.terminate(); } catch {}
+  for (const [, p] of s.pendingRpc) { clearTimeout(p.timer); p.reject(new Error(`Session ${sessionId} reaped`)); }
+  s.pendingRpc.clear();
+  sessions.delete(sessionId);
+  if (activeSessionId === sessionId) {
+    activeSessionId = null;
+    if (!failoverToVerifiedStandby('active_session_reaped')) saveCoordinatorState();
+  }
 }
 
 function callAgentRpc(session: AgentSession, action: string, payload: any = {}, timeoutMs = 30000): Promise<any> {
@@ -179,8 +253,16 @@ function callAgentRpc(session: AgentSession, action: string, payload: any = {}, 
 }
 
 function notifyStreamStateToAgents() {
-  // User-selected always-live mode: keep the real encoder transport warm.
-  const shouldStream = true;
+  // Root cause of Play Store install stalls + workflow CPU exhaustion:
+  // this used to be a hard-coded `true`, so the active emulator ran a software
+  // H.264 encoder at 1280px/30fps for the whole 4-hour session even with nobody
+  // watching. On a 4-vCPU swiftshader runner that starved com.android.vending /
+  // DownloadManager and made installs hang forever. Stream only while a viewer
+  // (display or control) is actually attached, with a short linger so a page
+  // refresh does not churn the encoder.
+  const watchers = viewerSockets.size + controlSockets.size;
+  if (watchers > 0) lastViewerSeenAt = Date.now();
+  const shouldStream = watchers > 0 || (Date.now() - lastViewerSeenAt < 20000);
   for (const s of sessions.values()) {
     if (s.ws.readyState === WebSocket.OPEN) {
       const activeForThis = s.sessionId === activeSessionId && shouldStream;
@@ -246,6 +328,7 @@ app.get('/api/public/health', (_req: Request, res: Response) => {
     }));
 
   const manifest = readJsonSafe<any>(MANIFEST_FILE, null);
+  const mem = process.memoryUsage();
   res.json({
     ok: true,
     service: 'vibely-android-remote-gateway',
@@ -253,6 +336,16 @@ app.get('/api/public/health', (_req: Request, res: Response) => {
     active_session_id: active ? active.sessionId : null,
     active_github_run_id: active ? active.githubRunId : null,
     active_uptime_sec: active ? Math.round((Date.now() - (active.promotedAt || active.connectedAt)) / 1000) : 0,
+    active_heartbeat_age_sec: active ? Math.round((Date.now() - active.lastHeartbeatAt) / 1000) : null,
+    // Diagnostics the agent uses for self-healing and operators use for evidence.
+    active_pointer: activeSessionId,
+    active_pointer_connected: Boolean(active),
+    gateway_uptime_sec: Math.round((Date.now() - gatewayStartedAt) / 1000),
+    sessions_total: sessions.size,
+    viewers: viewerSockets.size,
+    control_clients: controlSockets.size,
+    streaming: Boolean(active) && (viewerSockets.size + controlSockets.size > 0 || Date.now() - lastViewerSeenAt < 20000),
+    rss_mb: Math.round(mem.rss / 1048576),
     standby_count: standbyList.length,
     standby_sessions: standbyList,
     rotation_count: rotationCount,
@@ -484,25 +577,34 @@ app.post('/api/internal/handover', requireGatewayAuth, async (req: Request, res:
     const oldSession = getActiveSession();
     if(req.body?.expect_empty===true && oldSession && oldSession.sessionId!==newSession.sessionId){res.status(409).json({ok:false,error:'Working source preserved; emergency recovery requires an empty gateway'});return;}
     let stateSynced = false;
+    // GitHub-whole-AVD sessions already restored the authoritative encrypted
+    // disk checkpoint before boot, so a live delta flush is redundant. Doing it
+    // anyway added up to 210s of RPC latency to every rotation, and any hiccup
+    // aborted the handover and killed a healthy emulator (failed_replacement 33).
+    const avdAuthoritative = String(req.body?.state_source || '') === 'github-whole-avd'
+      || String(process.env.GITHUB_AVD_ONLY || '').toLowerCase() === 'true';
 
     // Step 1: If an active emulator is currently running, flush its live delta & apply to newSession BEFORE cutover!
-    if (oldSession && oldSession.sessionId !== newSession.sessionId) {
+    if (oldSession && oldSession.sessionId !== newSession.sessionId && !avdAuthoritative) {
       try {
         console.log(`[Handover] Flushing final live state from active session ${oldSession.sessionId}...`);
-        const flushRes = await callAgentRpc(oldSession, 'flush_final_state', {}, 90000);
+        const flushRes = await callAgentRpc(oldSession, 'flush_final_state', {}, 45000);
         if (flushRes?.ok) {
           console.log(`[Handover] Applying live delta state onto standby session ${newSession.sessionId}...`);
-          const applyRes = await callAgentRpc(newSession, 'apply_delta_state', {}, 120000);
+          const applyRes = await callAgentRpc(newSession, 'apply_delta_state', {}, 60000);
           stateSynced = Boolean(applyRes?.ok);
         }
       } catch (syncErr: any) {
         console.warn(`[Handover] Live delta sync note (${syncErr?.message}); base snapshot already restored.`);
       }
+    } else if (oldSession && oldSession.sessionId !== newSession.sessionId) {
+      stateSynced = newSession.verified; // whole-AVD already restored + verified over the tunnel
+      console.log('[Handover] Whole-AVD authoritative mode: skipping live delta RPC (disk checkpoint already restored pre-boot).');
     } else {
-      stateSynced = fs.existsSync(SNAPSHOT_FILE);
+      stateSynced = fs.existsSync(SNAPSHOT_FILE) || newSession.verified;
     }
 
-    if(oldSession && oldSession.sessionId!==newSession.sessionId && !stateSynced){res.status(503).json({ok:false,error:'Live state synchronization failed; existing Android session preserved'});return;}
+    if(oldSession && oldSession.sessionId!==newSession.sessionId && !stateSynced && !avdAuthoritative){res.status(503).json({ok:false,error:'Live state synchronization failed; existing Android session preserved'});return;}
 
     // Step 2: Atomic pointer swap (<1ms downtime!)
     const cutoverStart = Date.now();
@@ -832,6 +934,16 @@ wssAgent.on('connection', (ws: WebSocket, req: http.IncomingMessage) => {
   const existing = sessions.get(sessionId);
   const keepActive = activeSessionId === sessionId;
 
+  // Bound the session table: a long-lived phone can rotate many times through a
+  // container that never restarts. Unbounded standby sockets were part of the
+  // memory growth that restarted the gateway under the phone.
+  if (sessions.size >= MAX_SESSIONS) {
+    const victims = Array.from(sessions.values())
+      .filter((s) => s.sessionId !== sessionId && s.sessionId !== activeSessionId)
+      .sort((a, b) => a.connectedAt - b.connectedAt);
+    for (const v of victims.slice(0, sessions.size - MAX_SESSIONS + 1)) dropSession(v.sessionId, 'session_cap');
+  }
+
   const session: AgentSession = {
     sessionId,
     githubRunId,
@@ -853,6 +965,11 @@ wssAgent.on('connection', (ws: WebSocket, req: http.IncomingMessage) => {
   };
   sessions.set(sessionId, session);
   console.log(`[Gateway] Agent connected: ${sessionId} (role=${session.role}, runId=${githubRunId})`);
+
+  // Protocol-level pong is the cheapest trustworthy liveness signal: it is
+  // answered by the ws library even while the agent is busy running a
+  // checkpoint or an ADB command.
+  ws.on('pong', () => { session.lastHeartbeatAt = Date.now(); });
 
   notifyStreamStateToAgents();
 
@@ -892,23 +1009,7 @@ wssAgent.on('connection', (ws: WebSocket, req: http.IncomingMessage) => {
       if (activeSessionId === sessionId) {
         console.log(`[Gateway] Active session ${sessionId} disconnected.`);
         // Auto-failover if a verified standby session is already waiting!
-        const readyStandby = Array.from(sessions.values()).find((s) => s.verified && s.ws.readyState === WebSocket.OPEN);
-        if (readyStandby) {
-          activeSessionId = readyStandby.sessionId;
-          readyStandby.role = 'active';
-          readyStandby.promotedAt = Date.now();
-          rotationCount += 1;
-          saveCoordinatorState();
-          notifyStreamStateToAgents();
-          broadcastViewerJson({
-            type: 'session_switched',
-            active_session_id: readyStandby.sessionId,
-            rotation_count: rotationCount,
-            device_info: readyStandby.deviceInfo,
-          });
-        } else {
-          activeSessionId = null;
-        }
+        if (!failoverToVerifiedStandby('active_session_disconnected')) saveCoordinatorState();
       }
     }
   });
@@ -1002,6 +1103,25 @@ setInterval(() => {
     if (v.readyState === WebSocket.OPEN) v.ping();
   }
 }, 20000);
+
+// Session reaper: evicts dead transports, keeps the active pointer honest and
+// hands the phone to a verified standby when the active emulator disappears.
+setInterval(() => {
+  for (const s of Array.from(sessions.values())) {
+    if (s.ws.readyState !== WebSocket.OPEN) { dropSession(s.sessionId, 'transport_closed'); continue; }
+    if (Date.now() - s.lastHeartbeatAt > SESSION_SILENCE_MS) { dropSession(s.sessionId, 'heartbeat_timeout'); }
+  }
+  if (activeSessionId && !sessions.has(activeSessionId) && Date.now() - gatewayStartedAt > ACTIVE_GRACE_MS) {
+    console.log(`[Gateway] Clearing stale restored active pointer ${activeSessionId}`);
+    activeSessionId = null;
+    failoverToVerifiedStandby('stale_active_pointer');
+    saveCoordinatorState();
+  }
+}, 15000);
+
+// A relay must never die on a single bad frame/agent message.
+process.on('uncaughtException', (err) => console.error('[Gateway] uncaughtException', err?.stack || String(err)));
+process.on('unhandledRejection', (err: any) => console.error('[Gateway] unhandledRejection', err?.stack || String(err)));
 
 server.listen(PORT, '0.0.0.0', () => {
   console.log(`[AndroidRemoteGateway] Listening on 0.0.0.0:${PORT} (DATA_DIR=${DATA_DIR})`);

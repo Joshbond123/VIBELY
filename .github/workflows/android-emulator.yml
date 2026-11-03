@@ -35,6 +35,11 @@ on:
         required: false
         default: 'false'
         type: string
+      install_test_package:
+        description: 'Play Store package to install for a real in-session install test (blank = skip)'
+        required: false
+        default: ''
+        type: string
 
 permissions:
   contents: write
@@ -129,6 +134,7 @@ jobs:
       ROTATION_MINUTES: ${{ inputs.rotation_minutes || '240' }}
       RAPID_TEST_CYCLES: ${{ inputs.rapid_test_cycles || '0' }}
       SIMULATE_BOOT_FAILURE: ${{ inputs.simulate_boot_failure || 'false' }}
+      VIBELY_INSTALL_TEST_PACKAGE: ${{ inputs.install_test_package || '' }}
       ANDROID_CHECKPOINT_IMAGE_FAMILY: google_apis_playstore
       ANDROID_STATE_BRANCH: android-state-v1
       # Whole-AVD is the sole authoritative persistence path (userdata + accounts).
@@ -213,9 +219,24 @@ jobs:
           emulator-boot-timeout: 480
           disable-animations: true
           enable-hw-keyboard: true
-          emulator-options: -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back emulated -camera-front emulated -dns-server 8.8.8.8,1.1.1.1
+          # -no-snapshot-load/-save: the phone must always cold-boot from the
+          # persisted, crash-consistent data disk. Loading a RAM snapshot taken
+          # mid-install is what made Play Store installs stick forever again after
+          # every rotation.
+          emulator-options: -no-window -no-snapshot-load -no-snapshot-save -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back emulated -camera-front emulated -dns-server 8.8.8.8,1.1.1.1 -netdelay none -netspeed full
           pre-emulator-launch-script: ./android-emulator/pre-launch.sh
-          script: ./android-emulator/run-session.sh
+          script: ./android-emulator/run-session.sh 2>&1 | tee -a /tmp/vibely-agent.log
+
+      - name: Publish session diagnostics artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: android-session-diagnostics-${{ github.run_id }}
+          path: |
+            /tmp/vibely_install_test.json
+            /tmp/vibely-agent.log
+          if-no-files-found: warn
+          retention-days: 14
 
       - name: Automatic Failure Notification & Cold-Start Self-Healing
         if: failure() && inputs.simulate_boot_failure != 'true'

@@ -1,113 +1,81 @@
-name: Keep Android Emulator Awake (Playwright Stealth)
+name: Keep Android Emulator Awake
+
+# The Blitz container sleeps after ~15 minutes without HTTP traffic, which dropped
+# the reverse tunnel and left the phone offline (one cause of the black screen).
+# This job used to spin a full Playwright/Chromium install every 10 minutes —
+# ~8 runner-minutes of overhead per attempt. A plain keep-alive request is enough
+# to keep the container hot, and it reports the phone's real state so a dead
+# emulator is visible in the Actions history instead of being silently ignored.
 
 on:
   schedule:
     - cron: '*/10 * * * *'
   workflow_dispatch:
 
+permissions:
+  contents: read
+
+concurrency:
+  group: vibely-keep-awake
+  cancel-in-progress: true
+
 jobs:
   wake:
     runs-on: ubuntu-latest
-    timeout-minutes: 8
+    timeout-minutes: 6
+    env:
+      GATEWAY: ${{ vars.EMULATOR_GATEWAY_URL || 'https://android.aivideo.blitz.cloud' }}
+      BLITZ_API_KEY: ${{ secrets.BLITZ_API_KEY }}
+      BLITZ_ANDROID_APP: ${{ secrets.BLITZ_ANDROID_APP }}
 
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Setup Node
-        uses: actions/setup-node@v4
-        with:
-          node-version: '20'
-
-      - name: Install Playwright + Stealth
+      - name: Keep-alive request + phone status
+        id: keepalive
         run: |
-          npm init -y
-          npm install playwright playwright-extra puppeteer-extra-plugin-stealth
-          npx playwright install chromium --with-deps
+          set -o pipefail
+          HEALTH=$(curl -fsSL --max-time 20 "${GATEWAY}/api/public/health" 2>/dev/null || echo '')
+          if [[ -z "$HEALTH" ]]; then
+            echo "Gateway did not answer; attempting a Blitz resume."
+            if [[ -n "${BLITZ_API_KEY}" && -n "${BLITZ_ANDROID_APP}" ]]; then
+              python3 - <<'PY' || true
+import json, os, urllib.request
+key, app = os.environ["BLITZ_API_KEY"], os.environ["BLITZ_ANDROID_APP"]
+hdrs = {"Authorization": f"Bearer {key}", "Content-Type": "application/json",
+        "Accept": "application/json, text/event-stream"}
+def call(method, params, rid):
+    req = urllib.request.Request("https://mcp.blitz.cloud/mcp",
+        data=json.dumps({"jsonrpc": "2.0", "id": rid, "method": method, "params": params}).encode(),
+        headers=hdrs, method="POST")
+    with urllib.request.urlopen(req, timeout=30) as r:
+        return r.headers.get("mcp-session-id"), r.read().decode()
+sid, out = call("initialize", {"protocolVersion": "2024-11-05", "capabilities": {}, "clientInfo": {"name": "keep-awake", "version": "1"}}, 1)
+if sid: hdrs["Mcp-Session-Id"] = sid
+sid, out = call("tools/call", {"name": "apps_resume", "arguments": {"app": app}}, 2)
+print(out[:400])
+PY
+              sleep 20
+              HEALTH=$(curl -fsSL --max-time 20 "${GATEWAY}/api/public/health" 2>/dev/null || echo '')
+            fi
+          fi
 
-      - name: Wake attempt (stealth browser)
-        id: wake
-        run: |
-          node << 'EOF'
-          const { chromium } = require('playwright-extra');
-          const stealth = require('puppeteer-extra-plugin-stealth')();
-          chromium.use(stealth);
-
-          (async () => {
-            const browser = await chromium.launch({
-              headless: true,
-              args: [
-                '--disable-blink-features=AutomationControlled',
-                '--disable-features=IsolateOrigins,site-per-process',
-                '--no-sandbox',
-                '--disable-setuid-sandbox',
-                '--disable-infobars',
-                '--window-size=1920,1080',
-                '--start-maximized',
-                '--disable-dev-shm-usage',
-                '--lang=en-US,en'
-              ]
-            });
-
-            const context = await browser.newContext({
-              viewport: { width: 1920, height: 1080 },
-              userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36',
-              locale: 'en-US',
-              timezoneId: 'Africa/Lagos',
-              permissions: ['geolocation'],
-              colorScheme: 'light',
-              deviceScaleFactor: 1,
-              hasTouch: false,
-              isMobile: false
-            });
-
-            await context.addInitScript(() => {
-              Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
-              window.chrome = { runtime: {} };
-            });
-
-            const page = await context.newPage();
-
-            console.log('Navigating to emulator...');
-            const response = await page.goto('https://android.aivideo.blitz.cloud/', {
-              waitUntil: 'networkidle',
-              timeout: 45000
-            });
-
-            const status = response ? response.status() : 0;
-            const body = await page.content();
-            const isAsleep = body.includes('"status":"asleep"') || body.includes('This app is asleep');
-
-            console.log('HTTP status:', status);
-            console.log('Appears asleep:', isAsleep);
-
-            // Human-like behaviour
-            await page.mouse.move(400, 300);
-            await page.waitForTimeout(1200 + Math.random() * 800);
-            await page.mouse.move(800, 500, { steps: 12 });
-            await page.waitForTimeout(800);
-            await page.evaluate(() => window.scrollBy(0, 200));
-            await page.waitForTimeout(1500);
-
-            const finalBody = await page.content();
-            const stillAsleep = finalBody.includes('"status":"asleep"');
-
-            if (stillAsleep) {
-              console.log('❌ Still asleep after stealth visit');
-              process.exitCode = 1;
-            } else {
-              console.log('✅ Appears awake (or at least not returning asleep JSON)');
-            }
-
-            await browser.close();
-          })().catch(err => {
-            console.error(err);
-            process.exit(1);
-          });
-          EOF
-
-      - name: Summary
-        if: always()
-        run: |
-          echo "Keep-alive attempt finished."
-          echo "Check the logs above for success/failure."
+          if [[ -z "$HEALTH" ]]; then
+            echo "::error::Gateway unreachable even after a resume attempt"
+            exit 1
+          fi
+          echo "$HEALTH" | jq .
+          CONNECTED=$(echo "$HEALTH" | jq -r '.active_emulator_connected // false')
+          STANDBY=$(echo "$HEALTH" | jq -r '.standby_count // 0')
+          RSS=$(echo "$HEALTH" | jq -r '.rss_mb // 0')
+          echo "connected=${CONNECTED} standby=${STANDBY} gateway_rss_mb=${RSS}"
+          {
+            echo "### Android phone keep-alive"
+            echo "- gateway reachable: yes"
+            echo "- active phone: ${CONNECTED}"
+            echo "- standby candidates: ${STANDBY}"
+            echo "- gateway RSS: ${RSS} MB"
+          } >> "$GITHUB_STEP_SUMMARY"
+          if [[ "$CONNECTED" != "true" ]]; then
+            # Not fatal: the scheduled rotation / self-healing agent is responsible
+            # for recovery. Surfacing it keeps the failure visible in history.
+            echo "::warning::No active Android phone right now (standby=${STANDBY}); self-healing rotation will restore it."
+          fi

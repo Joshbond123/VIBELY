@@ -91,18 +91,48 @@ def sdk_evidence():
         raise RuntimeError('Unsupported checkpoint image family')
     evidence = {'family': family, 'api': '34', 'arch': 'x86_64'}
     candidates = [sdk/'emulator/source.properties']
-    candidates += list((sdk/('system-images/android-34/'+family+'/x86_64')).glob('source.properties'))
+    try:
+        candidates += list((sdk/('system-images/android-34/'+family+'/x86_64')).glob('source.properties'))
+    except OSError:
+        pass
     found = 0
     for p in candidates:
-        if p.is_file():
+        # Restore runs before the emulator package is installed by the workflow,
+        # so a missing source.properties is normal and must never abort a restore.
+        try:
+            if not p.is_file():
+                continue
             found += 1
-            try:
-                evidence[str(p.relative_to(sdk))] = hashed(p.read_text())
-            except ValueError:
-                evidence[p.name] = hashed(p.read_text())
+            evidence[str(p.relative_to(sdk))] = hashed(p.read_text())
+        except (OSError, ValueError):
+            continue
     if found == 0:
         evidence['deferred_host_check'] = True
     return evidence
+
+
+class GuestBusy(RuntimeError):
+    """A download/install is in flight; freezing the vCPU now would wedge it."""
+
+
+def guest_install_busy():
+    """True when Play Store / DownloadManager / PackageInstaller has work queued.
+
+    A capture pauses the virtual CPU for the whole disk copy. Doing that mid
+    download is the reason installations sat at "Downloading/Pending" forever:
+    the DownloadManager connection times out and the install session never
+    commits.
+    """
+    try:
+        dl = adb('dumpsys download 2>/dev/null | head -100')
+        if re.search(r'Status:\s*(190|192|193|194|195|196)', dl):
+            return 'download_manager'
+        sessions = adb('pm list sessions -a 2>/dev/null | head -40')
+        if 'package:' in sessions and re.search(r'active=true|sealed=true|SESSION_', sessions):
+            return 'package_installer'
+        return None
+    except Exception:
+        return None
 
 
 def capture(avd, destination, hold=False):
@@ -113,8 +143,14 @@ def capture(avd, destination, hold=False):
         raise ValueError('Refusing snapshot without actual userdata disks')
     if destination.is_relative_to(avd):
         raise ValueError('Archive must not be stored inside its own source AVD')
-    evidence = {'schema': 1, 'guest': guest_evidence(), 'sdk': sdk_evidence(),
-                'avd_name': avd.name.removesuffix('.avd'), 'snapshot': 'vibely-checkpoint', 'created_at': int(time.time()), 'source_held': bool(hold)}
+    if not hold:
+        busy = guest_install_busy()
+        if busy:
+            raise GuestBusy('guest busy (%s); checkpoint deferred so the install/download is not frozen' % busy)
+    evidence = {'schema': 2, 'guest': guest_evidence(), 'sdk': sdk_evidence(),
+                'avd_name': avd.name.removesuffix('.avd'), 'snapshot': None,
+                'format': 'whole-avd-v2-disk-only',
+                'created_at': int(time.time()), 'source_held': bool(hold)}
     if not evidence['guest']['boot']:
         raise RuntimeError('Unbooted Android is not a valid checkpoint')
     destination.parent.mkdir(parents=True, exist_ok=True)
@@ -134,24 +170,31 @@ def capture(avd, destination, hold=False):
             shutil.copyfile(key, host_keys/name)
             os.chmod(host_keys/name, 0o600)
         stopped = False
+        pause_started = 0.0
         try:
-            adb('sync')
+            run('sync')
+            pause_started = time.time()
             console('avd', 'stop'); stopped = True
             if 'stopped' not in console('avd', 'status').lower():
                 raise RuntimeError('VM pause not confirmed; refusing live disk copy')
-            console('avd', 'snapshot', 'save', 'vibely-checkpoint')
-            if 'stopped' not in console('avd', 'status').lower():
-                raise RuntimeError('Snapshot unexpectedly resumed VM; refusing disk copy')
             run('sync')
-            # Full AVD: userdata, metadata/encryption/keystore disks, SD card,
-            # hardware config, qcow2 overlays and RAM snapshot all travel together.
-            run('cp', '-a', '--reflink=auto', str(avd), str(stage), timeout=600)
-            for p in stage.rglob('*'):
+            # Full AVD disks: userdata, metadata/encryption/keystore, SD card,
+            # hardware config and qcow2 overlays travel together. The guest is
+            # paused, therefore the copy is crash-consistent and boots cold.
+            # The staging copy must be independent of the live disks (the guest is
+            # resumed immediately afterwards, and a hardlink farm would then
+            # mutate while tar reads it), so this stays a real copy.
+            # RAM snapshots are no longer part of the format — dropping them from
+            # the copy keeps the vCPU-pause window short and the archive small.
+            run('cp', '-a', '--reflink=auto', str(avd), str(stage), timeout=900)
+            shutil.rmtree(stage/'snapshots', ignore_errors=True)
+            for p in list(stage.rglob('*')):
                 if p.name.endswith('.lock'):
-                    if p.is_dir(): shutil.rmtree(p)
-                    else: p.unlink()
-            if not (stage/'snapshots/vibely-checkpoint').is_dir():
-                raise RuntimeError('Saved RAM snapshot missing')
+                    try:
+                        if p.is_dir(): shutil.rmtree(p)
+                        else: p.unlink()
+                    except OSError:
+                        pass
         except BaseException:
             # --hold is only valid after a SUCCESSFUL capture. Any failed
             # capture must release the original phone, including copy errors.
@@ -161,6 +204,7 @@ def capture(avd, destination, hold=False):
         finally:
             if stopped and not hold:
                 console('avd', 'start')
+                print('[capture] guest resumed after %.1fs of vCPU pause' % (time.time() - pause_started))
         Path(tmp, 'manifest.json').write_text(json.dumps(evidence, sort_keys=True))
         partial = destination.with_suffix(destination.suffix + '.partial')
         try:
@@ -206,10 +250,19 @@ def extract(archive, avd):
             overlap = set(man_sdk) & set(host_sdk) - {'family', 'api', 'arch', 'deferred_host_check'}
             mismatches = [k for k in overlap if man_sdk.get(k) != host_sdk.get(k)]
             if mismatches:
-                raise RuntimeError('System-image/emulator version changed; explicit migration required: ' + ','.join(mismatches))
+                # ROOT CAUSE: GitHub's ubuntu-latest image bumps the emulator /
+                # system-image package regularly. Treating that byte-level drift
+                # as fatal aborted the restore and the phone never came back.
+                # The AVD disks are compatible for a matching image family + API +
+                # arch (already enforced above), so version drift is evidence only.
+                print('[extract] WARNING: emulator/system-image build differs from checkpoint (%s); '
+                      'disks are family/API compatible, continuing.' % ','.join(sorted(mismatches)))
         restored = Path(tmp, 'avd')
-        if not (restored/'snapshots/vibely-checkpoint').is_dir() or not list(restored.glob('userdata*')):
-            raise ValueError('Checkpoint is not a complete AVD')
+        # Disk-only checkpoints are the supported format: the guest is paused while
+        # the disks are copied, so the image is crash-consistent and boots cold.
+        # RAM snapshots are no longer required (and are no longer loaded).
+        if not list(restored.glob('userdata*')):
+            raise ValueError('Checkpoint is not a complete AVD (no userdata disk)')
         # Never overwrite a preexisting phone implicitly, even on a failed restore.
         if avd.exists():
             raise RuntimeError('Destination already exists; explicit isolated destination required')

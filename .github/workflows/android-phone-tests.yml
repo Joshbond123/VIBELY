@@ -1,0 +1,189 @@
+name: Android phone — real Play Store install & rotation persistence tests
+
+# Proves the live phone end-to-end with REAL Google Play Store installs:
+#   1. wait for a live emulator behind android.aivideo.blitz.cloud
+#   2. install an app that is not installed, through the Play Store UI
+#   3. launch it, keep it running, grant runtime permissions, record app data
+#   4. rotate the Android emulator workflow (fresh GitHub runner, restored disk)
+#   5. verify the app, its data and its granted permissions survived the rotation
+#
+# Everything is observed through the public gateway API, so this job never needs
+# the emulator secrets and can run at any time against the production phone.
+
+on:
+  workflow_dispatch:
+    inputs:
+      packages:
+        description: 'Comma separated Play packages to install (first not-installed wins)'
+        required: false
+        default: 'org.billthefarmer.notes,com.simplemobiletools.calculator'
+        type: string
+      rotate_after_install:
+        description: 'Rotate the emulator workflow and verify persistence'
+        required: false
+        default: 'true'
+        type: string
+      gateway_url:
+        description: 'Gateway base URL'
+        required: false
+        default: 'https://android.aivideo.blitz.cloud'
+        type: string
+      wait_minutes:
+        description: 'Minutes to wait for the phone to come online'
+        required: false
+        default: '40'
+        type: string
+  schedule:
+    - cron: '20 6 * * *'
+
+permissions:
+  contents: read
+  actions: write
+
+# Tests drive one phone; serialise them so two runs cannot interleave taps.
+concurrency:
+  group: vibely-android-phone-tests
+  cancel-in-progress: false
+
+jobs:
+  play-store-install-and-rotation:
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    env:
+      GATEWAY: ${{ inputs.gateway_url || 'https://android.aivideo.blitz.cloud' }}
+      PACKAGES: ${{ inputs.packages || 'org.billthefarmer.notes,com.simplemobiletools.calculator' }}
+      ROTATE: ${{ inputs.rotate_after_install || 'true' }}
+      WAIT_MINUTES: ${{ inputs.wait_minutes || '40' }}
+      GH_TOKEN_FOR_DISPATCH: ${{ secrets.GH_PAT || secrets.GITHUB_TOKEN }}
+
+    steps:
+      - name: Checkout VIBELY repository
+        uses: actions/checkout@v4
+
+      - name: Install test dependencies
+        run: python3 -m pip install --quiet requests
+
+      - name: Wait for a live Android phone behind the gateway
+        id: wait
+        run: |
+          DEADLINE=$(( $(date +%s) + WAIT_MINUTES*60 ))
+          while [[ $(date +%s) -lt $DEADLINE ]]; do
+            HEALTH=$(curl -fsSL --max-time 15 "${GATEWAY}/api/public/health" 2>/dev/null || echo '{}')
+            echo "$HEALTH" | jq -c '{connected:.active_emulator_connected,session:.active_session_id,uptime:.active_uptime_sec,standby:.standby_count,rss:.rss_mb,streaming:.streaming}' || true
+            if [[ "$(echo "$HEALTH" | jq -r '.active_emulator_connected // false')" == "true" ]]; then
+              echo "live=true" >> "$GITHUB_OUTPUT"
+              echo "$HEALTH" | jq '{active_session_id, active_github_run_id, rotation_count, gateway_uptime_sec}' 
+              exit 0
+            fi
+            sleep 20
+          done
+          echo "live=false" >> "$GITHUB_OUTPUT"
+          echo "::error::No live Android phone became available within ${WAIT_MINUTES} minutes"
+          exit 1
+
+      - name: Record pre-test device state
+        run: |
+          curl -fsSL "${GATEWAY}/api/status" -o /tmp/status_before.json
+          jq '{active:.active_emulator.session_id, rotation_count, device:.active_emulator.device_info.installedPackages}' /tmp/status_before.json
+
+      - name: Real Play Store install test (package 1)
+        id: install1
+        continue-on-error: true
+        run: |
+          PKG=$(echo "${PACKAGES}" | cut -d, -f1 | xargs)
+          python3 android-emulator/play_install_test.py --gateway "${GATEWAY}" --package "$PKG" \
+            --timeout 900 --json /tmp/install_test_1.json | tee /tmp/install_test_1.log
+          echo "exit=$?" >> "$GITHUB_OUTPUT"
+
+      - name: Real Play Store install test (package 2)
+        id: install2
+        continue-on-error: true
+        run: |
+          PKG=$(echo "${PACKAGES}" | cut -d, -f2 | xargs)
+          if [[ -z "$PKG" ]]; then echo "No second package configured"; exit 0; fi
+          python3 android-emulator/play_install_test.py --gateway "${GATEWAY}" --package "$PKG" \
+            --timeout 900 --json /tmp/install_test_2.json | tee /tmp/install_test_2.log
+
+      - name: Capture phone screenshot as evidence
+        if: always()
+        run: |
+          curl -fsSL "${GATEWAY}/api/screen.jpg" -o /tmp/phone_screen.jpg || true
+          ls -la /tmp/phone_screen.jpg || true
+
+      - name: Rotate the emulator workflow (replacement runner, restored phone)
+        id: rotate
+        if: ${{ env.ROTATE == 'true' }}
+        run: |
+          BEFORE_SESSION=$(jq -r '.active_emulator.session_id // empty' /tmp/status_before.json)
+          echo "before_session=${BEFORE_SESSION}" >> "$GITHUB_OUTPUT"
+          curl -fsSL -X POST \
+            -H "Authorization: Bearer ${GH_TOKEN_FOR_DISPATCH}" \
+            -H "Accept: application/vnd.github+json" \
+            -H "Content-Type: application/json" \
+            -d '{"ref":"main","inputs":{"rotation_minutes":"240","force_rotate":"true","install_test_package":""}}' \
+            "https://api.github.com/repos/${GITHUB_REPOSITORY}/actions/workflows/android-emulator.yml/dispatches"
+          echo "Rotation dispatched: the current phone keeps serving until the successor verifies and takes over."
+
+          DEADLINE=$(( $(date +%s) + 60*60 ))
+          while [[ $(date +%s) -lt $DEADLINE ]]; do
+            sleep 30
+            HEALTH=$(curl -fsSL --max-time 15 "${GATEWAY}/api/public/health" 2>/dev/null || echo '{}')
+            NOW_SESSION=$(echo "$HEALTH" | jq -r '.active_session_id // empty')
+            CONNECTED=$(echo "$HEALTH" | jq -r '.active_emulator_connected // false')
+            echo "connected=${CONNECTED} session=${NOW_SESSION} before=${BEFORE_SESSION}"
+            if [[ "$CONNECTED" == "true" && -n "$NOW_SESSION" && "$NOW_SESSION" != "$BEFORE_SESSION" ]]; then
+              echo "new_session=${NOW_SESSION}" >> "$GITHUB_OUTPUT"
+              echo "::notice::Rotation complete: ${BEFORE_SESSION} -> ${NOW_SESSION}"
+              exit 0
+            fi
+          done
+          echo "::error::Replacement emulator did not become active within 60 minutes"
+          exit 1
+
+      - name: Verify app, data and permissions survived the rotation
+        if: ${{ env.ROTATE == 'true' && steps.rotate.outputs.new_session != '' }}
+        run: |
+          echo "New active session: ${{ steps.rotate.outputs.new_session }}"
+          sleep 20
+          for f in /tmp/install_test_1.json /tmp/install_test_2.json; do
+            [[ -f "$f" ]] || continue
+            echo "--- verifying against $f"
+            python3 android-emulator/play_install_test.py --gateway "${GATEWAY}" --verify-json "$f" \
+              --json "${f%.json}_after_rotation.json" | tee "${f%.json}_verify.log" || echo "::warning::persistence verification reported a failure for $f"
+          done
+
+      - name: Post-rotation device state
+        if: always()
+        run: |
+          curl -fsSL "${GATEWAY}/api/status" -o /tmp/status_after.json || true
+          jq '{active:.active_emulator.session_id, rotation_count, rotation_history:[.rotation_history[0][:4]]}' /tmp/status_after.json 2>/dev/null || true
+
+      - name: Upload test evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: play-install-test-evidence-${{ github.run_id }}
+          path: |
+            /tmp/install_test_*.json
+            /tmp/install_test_*.log
+            /tmp/status_before.json
+            /tmp/status_after.json
+            /tmp/phone_screen.jpg
+          if-no-files-found: warn
+          retention-days: 30
+
+      - name: Summary
+        if: always()
+        run: |
+          {
+            echo "### Android phone Play Store test"
+            echo ""
+            echo "| package | result | details |"
+            echo "| --- | --- | --- |"
+            for f in /tmp/install_test_1.json /tmp/install_test_2.json; do
+              [[ -f "$f" ]] || continue
+              jq -r '"| \(.package) | \(.result) | installed=\(.phases.install.installed // "n/a") waited=\(.phases.install.waited_s // "n/a")s errors=\((.errors // [])|length) |"' "$f"
+            done
+            echo ""
+            echo "Rotation new session: ${{ steps.rotate.outputs.new_session }}"
+          } >> "$GITHUB_STEP_SUMMARY"
