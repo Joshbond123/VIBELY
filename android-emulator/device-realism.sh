@@ -85,3 +85,13 @@ adb shell getprop gsm.network.type || true
 adb shell getprop gsm.sim.state || true
 adb shell getprop persist.sys.timezone || true
 log "Done (ro.* fingerprints may remain SDK defaults without Magisk resetprop)"
+
+# Play Store install reliability (no account wipe)
+adb shell "settings put global package_verifier_enable 0" 2>/dev/null || true
+adb shell "settings put global verifier_verify_adb_installs 0" 2>/dev/null || true
+adb shell "cmd deviceidle disable" 2>/dev/null || true
+adb shell "dumpsys deviceidle whitelist +com.android.vending" 2>/dev/null || true
+adb shell "dumpsys deviceidle whitelist +com.google.android.gms" 2>/dev/null || true
+adb shell "cmd appops set com.android.vending RUN_ANY_IN_BACKGROUND allow" 2>/dev/null || true
+adb shell "svc power stayon true" 2>/dev/null || true
+echo "[device-realism] Play install path tuned"
