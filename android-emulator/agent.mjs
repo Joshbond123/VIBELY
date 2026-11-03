@@ -250,7 +250,7 @@ async function runStateManager(mode) {
       // old checkpoint and returned without publishing, so installs/login after
       // promotion never became the GitHub current pointer.
       const env={...process.env,EMULATOR_SESSION_ID:SESSION_ID,AVD_DIR:process.env.AVD_DIR||`${process.env.HOME}/.android/avd/vibely_pixel6_api34.avd`};
-      const {stdout,stderr}=await execFileAsync('python3',['android-emulator/github_live_checkpoint.py'],{timeout:1800000,maxBuffer:16*1024*1024,env});
+      const {stdout,stderr}=await execFileAsync('python3',[path.join(SCRIPTS_DIR,'github_live_checkpoint.py')],{timeout:1800000,maxBuffer:16*1024*1024,env});
       if(stdout)process.stdout.write(stdout);if(stderr)process.stderr.write(stderr);return;
     }
     const { stdout, stderr } = await execFileAsync('bash', [STATE_SCRIPT, mode], {
@@ -772,7 +772,7 @@ async function main() {
   }
   // Claim GitHub state ownership so this session can publish checkpoints (fixes fenced writer after rotation)
   try {
-    const { stdout } = await execFileAsync('python3', ['android-emulator/github_state.py', 'claim', '--owner', SESSION_ID], {
+    const { stdout } = await execFileAsync('python3', [path.join(SCRIPTS_DIR, 'github_state.py'), 'claim', '--owner', SESSION_ID], {
       timeout: 120000, env: { ...process.env, EMULATOR_SESSION_ID: SESSION_ID },
     });
     if (stdout) log('GitHub state claim: ' + String(stdout).trim());
