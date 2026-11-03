@@ -231,15 +231,14 @@ jobs:
           # persisted, crash-consistent data disk. Loading a RAM snapshot taken
           # mid-install is what made Play Store installs stick forever again after
           # every rotation.
-          # -prop ro.hw_timeout_multiplier: AOSP's supported way to scale every system
-          #   timeout (ANR, system_server watchdog, activity launch, installer) on a slow
-          #   emulated device - ART's own docs recommend it. Without it a 179MB ARM
-          #   translated install (TikTok) trips ANRs and the framework looks frozen.
-          # -prop pm.dexopt.install=verify: install with verification only instead of
-          #   speed-profile dex2oat. Documented AOSP filter; installs stop saturating
-          #   all 4 vCPUs for minutes. JIT still warms code at run time.
-          # It must be a boot property: shell cannot set pm.dexopt.* at run time.
-          emulator-options: -no-window -no-snapshot-load -no-snapshot-save -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back emulated -camera-front emulated -dns-server 8.8.8.8,1.1.1.1 -netdelay none -netspeed full -prop ro.hw_timeout_multiplier=10 -prop pm.dexopt.install=verify -prop ro.product.model=Pixel_6
+          # NOTE: -prop is NOT used. On current emulators it only accepts qemu.*
+          #   ("unexpected -prop value ..., only 'qemu.*' properties are supported"),
+          #   and a Play (production) image has no adb root, so ro.* / pm.dexopt.*
+          #   cannot be set at all - both verified on the live device. Hardware and
+          #   timeout tuning is done where it actually takes effect:
+          #   pre-launch.sh (config.ini, after the whole-AVD restore) and
+          #   device-realism.sh (settings/appops/deviceidle).
+          emulator-options: -no-window -no-snapshot-load -no-snapshot-save -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back emulated -camera-front emulated -dns-server 8.8.8.8,1.1.1.1 -netdelay none -netspeed full
           pre-emulator-launch-script: ./android-emulator/pre-launch.sh
           script: ./android-emulator/run-session.sh 2>&1 | tee -a /tmp/vibely-agent.log
 

@@ -453,12 +453,9 @@ async function restartEmulatorLocally(reason = 'adb-lost') {
       '-no-snapshot-load', '-no-snapshot-save', '-gpu', 'swiftshader_indirect',
       '-camera-back', 'emulated', '-camera-front', 'emulated',
       '-dns-server', '8.8.8.8,1.1.1.1', '-netdelay', 'none', '-netspeed', 'full',
+      // 6 GB: a 179MB split install plus dexopt must not trip the low-memory killer.
+      // (-prop is deliberately absent: modern emulators accept only qemu.* there.)
       '-memory', '6144', '-cores', '4',
-      // Same boot properties as the workflow launch, so a self-healed emulator keeps
-      // the slow-device timeout scaling and the verify-only install filter.
-      '-prop', 'ro.hw_timeout_multiplier=10',
-      '-prop', 'pm.dexopt.install=verify',
-      '-prop', 'ro.product.model=Pixel_6',
     ];
     let logFd;
     try { logFd = fs.openSync(EMULATOR_RESTART_LOG, 'a'); } catch (_) { logFd = 'ignore'; }

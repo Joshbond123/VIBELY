@@ -50,6 +50,13 @@ done
 adb shell cmd appops set com.android.vending WAKE_LOCK allow >/dev/null 2>&1 || true
 adb shell settings put global cached_apps_freezer disabled >/dev/null 2>&1 || true
 
+# --- Watchdog timeout (the one slow-device timeout knob that IS settable) ---
+# `ro.hw_timeout_multiplier` cannot be set on a Play image (no adb root, and the
+# emulator's -prop only accepts qemu.*), but the framework watchdog reads this
+# documented global setting at boot. On a 4-vCPU emulator installing a 179MB
+# ARM-translated app, the default 60s stall window is far too tight.
+log "system_server_watchdog_timeout_ms -> 300000 (verified: $(adb shell settings put global system_server_watchdog_timeout_ms 300000 >/dev/null 2>&1; adb shell settings get global system_server_watchdog_timeout_ms | tr -d '\r'))"
+
 # --- Report the effective emulator tuning (evidence, not decoration) ---
 log "timeout multiplier: $(adb shell getprop ro.hw_timeout_multiplier | tr -d '\r')"
 log "install dexopt filter: $(adb shell getprop pm.dexopt.install | tr -d '\r')"
