@@ -104,7 +104,16 @@ class Gateway:
     def shell(self, cmd: str, timeout: int = 60) -> str:
         res = self._post("/api/adb/shell", {"command": cmd}, timeout=min(timeout + 20, 300))
         if not res.get("ok"):
+            err = str(res.get("error") or "")
+            # The gateway reports a non-zero adb exit code as an error, e.g.
+            # `pm path <not-installed>` exits 1 with empty output. That is a normal
+            # answer ("not installed"), not a transport failure - treating it as an
+            # exception aborted every test before it could install anything.
+            if "Command failed:" in err:
+                rest = err.split("Command failed:", 1)[1]
+                return rest.split("\n", 1)[1].strip() if "\n" in rest else ""
             raise RuntimeError(f"gateway shell failed: {res.get('error')}")
+        return (res.get("stdout") or "").strip()
         self.session = res.get("session_id", self.session)
         return res.get("stdout", "")
 
