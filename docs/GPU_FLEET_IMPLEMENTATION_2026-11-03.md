@@ -82,3 +82,9 @@ Both account-owned private datasets now report **ready**, version **1**, with th
 The corrected transport uses bounded byte ranges, retries only failed ranges, checks exact range lengths and verifies the entire SHA256 before publication. It refused a truncated transfer rather than accepting a partial checkpoint. Both datasets are private; no Scarlett reference or generation history was published.
 
 Fresh CPU sessions with internet **disabled** were submitted to attach and rehash those persistent datasets without Hugging Face downloads. Their final read-back results are recorded separately; submission alone is not acceptance. This does not claim GPU restart/switch testing or a complete installed text-encoder/VAE/inference stack.
+
+## Completed fresh-session cache read-back
+
+Both fresh CPU read-back jobs completed successfully. With internet disabled, each attached its account-owned private version-1 dataset and rehashed the full 12,741,204,960-byte checkpoint to `c43e655ea8e76420630526291c75359c7fd4114efb592b07f67c0d99ab51296f`. Neither verification script downloaded from Hugging Face. See `WAN_OFFLINE_CACHE_READBACK_2026-11-03.json`.
+
+The corrected bounded-range publication jobs also completed. Earlier failed staging jobs are terminal; no preparation session remains running. This resolves checkpoint publication and offline CPU persistence verification, **not** the missing full Wan renderer/dependency installation, new music-primary provisioning, real GPU rotation or new generation acceptance. Those remain incomplete.

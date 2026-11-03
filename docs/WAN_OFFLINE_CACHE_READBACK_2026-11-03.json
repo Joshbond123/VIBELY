@@ -1,0 +1,26 @@
+{
+  "verified_at": "2026-11-03T23:48:52.541059+00:00",
+  "scope": "Fresh offline CPU-session persistence test, not GPU inference or switching",
+  "accounts": {
+    "temilolo": {
+      "scope": "diffusion checkpoint only, not complete renderer",
+      "attached_persistent_dataset": true,
+      "size": 12741204960,
+      "sha256": "c43e655ea8e76420630526291c75359c7fd4114efb592b07f67c0d99ab51296f",
+      "checksum_passed": true,
+      "huggingface_download_performed": false,
+      "gpu_enabled": false,
+      "inference_tested": false
+    },
+    "joshbond123": {
+      "scope": "diffusion checkpoint only, not complete renderer",
+      "attached_persistent_dataset": true,
+      "size": 12741204960,
+      "sha256": "c43e655ea8e76420630526291c75359c7fd4114efb592b07f67c0d99ab51296f",
+      "checksum_passed": true,
+      "huggingface_download_performed": false,
+      "gpu_enabled": false,
+      "inference_tested": false
+    }
+  }
+}
