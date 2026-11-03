@@ -244,9 +244,13 @@ async function livePersist(reason = 'periodic', { whole = false, hold = false } 
 async function runStateManager(mode) {
   const run = async () => {
     if(process.env.GITHUB_AVD_ONLY==='true'){
-      if(mode==='restore'){log('Native-verified whole AVD already restored; legacy logical restore is disabled.');return;}
-      if(!adoptedRecoveryCheckpoint){adoptedRecoveryCheckpoint=true;log('Adopted existing verified GitHub checkpoint; no new backup is claimed.');return;}
-      const {stdout,stderr}=await execFileAsync('python3',['android-emulator/github_live_checkpoint.py'],{timeout:1800000,maxBuffer:16*1024*1024,env:{...process.env,EMULATOR_SESSION_ID:SESSION_ID}});
+      // Whole-AVD is authoritative. Restore already happened pre-boot in the workflow.
+      if(mode==='restore'){log('Native-verified whole AVD already restored pre-boot; skipping logical restore.');return;}
+      // ROOT-CAUSE FIX: never skip the first backup. Previous code "adopted" the
+      // old checkpoint and returned without publishing, so installs/login after
+      // promotion never became the GitHub current pointer.
+      const env={...process.env,EMULATOR_SESSION_ID:SESSION_ID,AVD_DIR:process.env.AVD_DIR||`${process.env.HOME}/.android/avd/vibely_pixel6_api34.avd`};
+      const {stdout,stderr}=await execFileAsync('python3',['android-emulator/github_live_checkpoint.py'],{timeout:1800000,maxBuffer:16*1024*1024,env});
       if(stdout)process.stdout.write(stdout);if(stderr)process.stderr.write(stderr);return;
     }
     const { stdout, stderr } = await execFileAsync('bash', [STATE_SCRIPT, mode], {
@@ -766,16 +770,48 @@ async function main() {
   } catch (e) {
     log('hide-root warning: ' + e.message);
   }
-  // Live persistence: full checkpoint immediately after promotion (login/apps after this are saved on the next cycles)
+  // Claim GitHub state ownership so this session can publish checkpoints (fixes fenced writer after rotation)
+  try {
+    const { stdout } = await execFileAsync('python3', ['android-emulator/github_state.py', 'claim', '--owner', SESSION_ID], {
+      timeout: 120000, env: { ...process.env, EMULATOR_SESSION_ID: SESSION_ID },
+    });
+    if (stdout) log('GitHub state claim: ' + String(stdout).trim());
+  } catch (e) {
+    log('GitHub state claim warning: ' + e.message);
+  }
+
+  // Immediate verified whole-AVD after promotion (must actually publish — no adopt-and-skip)
   await livePersist('post-promotion', { whole: true, hold: false }).catch((e) => log(`Initial persist note: ${e.message}`));
 
-  // Active duty loop: frequent live saves (not only at rotation), health, Blitz wake, 4h rotation
-  // Logical backup every 2 minutes; whole-AVD every 12 minutes (full userdata for restore)
-  const LIVE_LOGICAL_MS = 2 * 60 * 1000;
-  const LIVE_WHOLE_AVD_MS = 12 * 60 * 1000;
-  let lastBackupMs = 0; // force first logical save soon after promotion
-  let lastWholeAvdMs = Date.now(); // whole already done post-promotion
+  // PRIMARY persistence = change-triggered write-through (package/account/settings).
+  // Secondary safety net = infrequent whole-AVD only if something was missed.
+  const CHANGE_POLL_MS = 20 * 1000;
+  const SAFETY_WHOLE_MS = 30 * 60 * 1000; // safety only, not primary
+  let lastChangeFingerprint = '';
+  let lastWholeAvdMs = Date.now();
   let lastBlitzWakeMs = Date.now();
+  let changePersistInFlight = false;
+
+  async function fingerprintPhoneState() {
+    try {
+      const pkgs = (await adbShell('pm list packages -3', 20000)).stdout.trim().split(/\n+/).filter(Boolean).sort().join('|');
+      let accounts = '0';
+      try {
+        const acc = (await adbShell('dumpsys account', 25000)).stdout;
+        const m = acc.match(/Accounts:\s*(\d+)/);
+        accounts = m ? m[1] : '0';
+        const names = [...acc.matchAll(/Account \{name=([^,]+)/g)].map((x) => x[1]).sort().join(',');
+        if (names) accounts += ':' + names;
+      } catch (_) {}
+      let settings = '';
+      try {
+        settings = (await adbShell('settings list secure | head -80', 15000)).stdout.trim();
+      } catch (_) {}
+      return `a=${accounts}||p=${pkgs}||s=${settings.length}:${settings.slice(0, 400)}`;
+    } catch (e) {
+      return 'err:' + e.message;
+    }
+  }
 
   while (!retiring) {
     await sleep(15000);
@@ -839,17 +875,27 @@ async function main() {
       await wakeGatewayOnBlitz();
     }
 
-    // 3. Live logical backup every 2 minutes (accounts, apps metadata, settings)
-    if (Date.now() - lastBackupMs >= LIVE_LOGICAL_MS) {
-      lastBackupMs = Date.now();
-      await livePersist('live-2m', { whole: false }).catch((e) => log(`Live 2m persist warning: ${e.message}`));
+    // 3. PRIMARY: change-triggered write-through (install/uninstall/login/settings)
+    try {
+      const fp = await fingerprintPhoneState();
+      if (!lastChangeFingerprint) {
+        lastChangeFingerprint = fp;
+      } else if (fp !== lastChangeFingerprint && !changePersistInFlight && !wholeAvdSaveInFlight) {
+        log('Phone state change detected — immediate whole-AVD persist');
+        lastChangeFingerprint = fp;
+        changePersistInFlight = true;
+        livePersist('change-triggered', { whole: true, hold: false })
+          .catch((e) => log(`Change-triggered persist warning: ${e.message}`))
+          .finally(() => { changePersistInFlight = false; lastWholeAvdMs = Date.now(); });
+      }
+    } catch (e) {
+      log('Change fingerprint warning: ' + e.message);
     }
 
-    // 3b. Live whole-AVD every 12 minutes so installs + Google login survive rotation without waiting 4h
-    if (Date.now() - lastWholeAvdMs >= LIVE_WHOLE_AVD_MS && !wholeAvdSaveInFlight) {
+    // 3b. SAFETY NET only (not primary): whole-AVD if no change-triggered save for 30m
+    if (Date.now() - lastWholeAvdMs >= SAFETY_WHOLE_MS && !wholeAvdSaveInFlight && !changePersistInFlight) {
       lastWholeAvdMs = Date.now();
-      // fire-and-continue: do not block health loop for 10–20m; lock prevents overlap
-      livePersist('live-12m-whole', { whole: true, hold: false }).catch((e) => log(`Live 12m whole warning: ${e.message}`));
+      livePersist('safety-30m-whole', { whole: true, hold: false }).catch((e) => log(`Safety whole warning: ${e.message}`));
     }
 
     // 4. Trigger 4-hour replacement workflow when rotation target is reached
