@@ -99,10 +99,41 @@ class Store:
         return self.read()
 
     def owner(self, expected):
-        sha, state = self.read()
+        try:
+            sha, state = self.read()
+        except requests.HTTPError as e:
+            if e.response is not None and e.response.status_code == 404:
+                self.initialize(expected)
+                sha, state = self.read()
+            else:
+                raise
         if state['owner'] != expected:
             raise Conflict('Writer is fenced: this workflow does not own the Android phone')
         return sha, state
+
+    def claim_owner(self, expected):
+        """Become the sole write-owner of the GitHub-backed phone state.
+        Required after workflow rotation: previous SESSION_ID is gone, so
+        fencing would otherwise block every checkpoint publish forever.
+        """
+        try:
+            sha, state = self.read()
+        except requests.HTTPError as e:
+            if e.response is not None and e.response.status_code == 404:
+                return self.initialize(expected)
+            raise
+        if state.get('owner') == expected:
+            return sha, state
+        # Refuse to steal ownership only during an in-flight held handover.
+        pending = state.get('pending') or {}
+        if pending.get('source_held') and pending.get('source') and pending.get('source') != expected:
+            # Allow the designated candidate to claim.
+            if pending.get('candidate') != expected:
+                raise Conflict('Handover in progress; cannot claim owner')
+        state['owner'] = expected
+        state['pending'] = None
+        self.cas(sha, state)
+        return self.read()
 
     def upload_asset(self, release, name, content):
         url = release['upload_url'].split('{')[0]
@@ -124,7 +155,13 @@ class Store:
         return r.content
 
     def publish(self, archive, owner, metadata, part_bytes=256*1024*1024):
-        head, state = self.owner(owner)
+        try:
+            head, state = self.owner(owner)
+        except Conflict:
+            # Permanent fix: rotated workflow must claim write ownership or
+            # checkpoints never become current and login/apps vanish forever.
+            head, state = self.claim_owner(owner)
+            head, state = self.owner(owner)
         tag = 'android-checkpoint-' + str(state['generation'] + 1) + '-' + uuid.uuid4().hex
         release = self.api('POST', '/releases', json={'tag_name': tag, 'target_commitish': 'main', 'name': tag,
                            'body': 'AES-256-GCM authenticated whole-AVD checkpoint. No plaintext Android data.',
@@ -220,16 +257,26 @@ class Store:
 
 def main():
     p = argparse.ArgumentParser()
-    p.add_argument('action', choices=['init', 'status', 'publish', 'restore'])
-    p.add_argument('--owner', default=os.environ.get('GITHUB_RUN_ID', ''))
+    p.add_argument('action', choices=['init', 'status', 'publish', 'restore', 'claim'])
+    p.add_argument('--owner', default=os.environ.get('EMULATOR_SESSION_ID') or os.environ.get('GITHUB_RUN_ID', ''))
     p.add_argument('--archive'); p.add_argument('--metadata')
     a = p.parse_args(); store = Store()
     if a.action == 'init':
         store.initialize(a.owner)
+    elif a.action == 'claim':
+        sha, s = store.claim_owner(a.owner)
+        print(json.dumps({'claimed': True, 'owner': s.get('owner'), 'generation': s.get('generation'), 'has_current': bool(s.get('current'))}))
     elif a.action == 'status':
-        _, s = store.read(); print(json.dumps(s))
+        try:
+            _, s = store.read()
+        except requests.HTTPError as e:
+            if e.response is not None and e.response.status_code == 404:
+                store.initialize(a.owner); _, s = store.read()
+            else:
+                raise
+        print(json.dumps(s))
     elif a.action == 'publish':
-        m = json.loads(Path(a.metadata).read_text())
+        m = json.loads(a.metadata) if a.metadata and a.metadata.strip().startswith('{') else json.loads(Path(a.metadata).read_text())
         print(json.dumps(store.publish(a.archive, a.owner, m)))
     else:
         result = store.restore(a.archive)
