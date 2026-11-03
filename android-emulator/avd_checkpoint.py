@@ -15,11 +15,16 @@ import tempfile
 import time
 
 
+class ResumeFailed(RuntimeError):
+    """The guest did not come back after the checkpoint paused its vCPU."""
+    exit_code = 42
+
+
 def run(*args, timeout=120):
     try:
         return subprocess.run(args, check=True, capture_output=True, timeout=timeout).stdout
     except subprocess.CalledProcessError as e:
-        if args[0] in ('tar', 'zstd', 'cp'):
+        if args[0] in ('tar', 'zstd', 'cp', 'rsync'):
             raise RuntimeError('Host checkpoint operation failed: ' + e.stderr.decode(errors='replace')[-1800:]) from None
         raise
 
@@ -33,6 +38,19 @@ def console(*args):
     if 'KO:' in out or not re.search(r'\bOK\b', out):
         raise RuntimeError('Emulator rejected console operation: ' + ' '.join(args[:2]))
     return out
+
+
+def guest_responding(timeout=90):
+    """Poll adb until the guest answers again (resume verification)."""
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        try:
+            if adb('getprop sys.boot_completed').startswith('1'):
+                return True
+        except Exception:
+            pass
+        time.sleep(3)
+    return False
 
 
 def hashed(s):
@@ -189,7 +207,17 @@ def capture(avd, destination, hold=False):
             # mutate while tar reads it), so this stays a real copy.
             # RAM snapshots are no longer part of the format — dropping them from
             # the copy keeps the vCPU-pause window short and the archive small.
-            run('cp', '-a', '--reflink=auto', str(avd), str(stage), timeout=900)
+            # Copy only the state-bearing files; skipping snapshots/tmp/lock
+            # junk keeps the vCPU-pause window (the part the user feels as a
+            # freeze) as short as possible. Compression happens after the resume.
+            stage.mkdir(parents=True, exist_ok=True)
+            excluded = ('snapshots', 'tmpAdbCmds', 'modem_simulator', 'hardware-qemu.ini.lock',
+                        'multiinstance.lock', '*.lock')
+            if shutil.which('rsync'):
+                run('rsync', '-a', *[f'--exclude={e}' for e in excluded],
+                    str(avd) + '/', str(stage) + '/', timeout=900)
+            else:
+                run('cp', '-a', '--reflink=auto', str(avd), str(stage), timeout=900)
             shutil.rmtree(stage/'snapshots', ignore_errors=True)
             for p in list(stage.rglob('*')):
                 if p.name.endswith('.lock'):
@@ -207,7 +235,12 @@ def capture(avd, destination, hold=False):
         finally:
             if stopped and not hold:
                 console('avd', 'start')
-                print('[capture] guest resumed after %.1fs of vCPU pause' % (time.time() - pause_started))
+                pause_len = time.time() - pause_started
+                print('[capture] guest resumed after %.1fs of vCPU pause' % pause_len)
+                if not guest_responding(90):
+                    raise ResumeFailed(
+                        'guest did not answer adb %.1fs after resuming from the checkpoint pause '
+                        '(pause was %.0fs); the emulator must be relaunched' % (90, pause_len))
         Path(tmp, 'manifest.json').write_text(json.dumps(evidence, sort_keys=True))
         partial = destination.with_suffix(destination.suffix + '.partial')
         try:

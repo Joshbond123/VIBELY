@@ -35,6 +35,11 @@ on:
         required: false
         default: 'false'
         type: string
+      simulate_emulator_crash:
+        description: 'Seconds after promotion to deliberately kill the emulator (proves self-heal). 0 = off'
+        required: false
+        default: '0'
+        type: string
       install_test_package:
         description: 'Play Store package to install for a real in-session install test (blank = skip)'
         required: false
@@ -135,6 +140,9 @@ jobs:
       RAPID_TEST_CYCLES: ${{ inputs.rapid_test_cycles || '0' }}
       SIMULATE_BOOT_FAILURE: ${{ inputs.simulate_boot_failure || 'false' }}
       VIBELY_INSTALL_TEST_PACKAGE: ${{ inputs.install_test_package || '' }}
+      # The agent relaunches this AVD from its own disk when the emulator process dies.
+      VIBELY_AVD_NAME: vibely_pixel6_api34
+      VIBELY_SIMULATE_CRASH_AFTER_SEC: ${{ inputs.simulate_emulator_crash || '0' }}
       ANDROID_CHECKPOINT_IMAGE_FAMILY: google_apis_playstore
       ANDROID_STATE_BRANCH: android-state-v1
       # Whole-AVD is the sole authoritative persistence path (userdata + accounts).
@@ -227,6 +235,12 @@ jobs:
           pre-emulator-launch-script: ./android-emulator/pre-launch.sh
           script: ./android-emulator/run-session.sh 2>&1 | tee -a /tmp/vibely-agent.log
 
+      - name: Publish emulator self-heal log
+        if: always()
+        run: |
+          sudo -n dmesg 2>/dev/null | tail -200 > /tmp/host-dmesg.log || true
+          free -m > /tmp/host-memory.log || true
+
       - name: Publish session diagnostics artifact
         if: always()
         uses: actions/upload-artifact@v4
@@ -235,6 +249,9 @@ jobs:
           path: |
             /tmp/vibely_install_test.json
             /tmp/vibely-agent.log
+            /tmp/vibely-emulator.log
+            /tmp/host-dmesg.log
+            /tmp/host-memory.log
           if-no-files-found: warn
           retention-days: 14
 

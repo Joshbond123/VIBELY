@@ -54,8 +54,62 @@ let replacementRetries = 0;
 let stateOpLock = Promise.resolve();
 let reconnecting = false;
 
+// ---------------------------------------------------------------------------
+// Emulator supervision (self-heal). The emulator process can die at any time on a
+// cloud runner (host OOM kill, qemu/swiftshader crash, lost KVM). When qemu is
+// gone, no amount of `adb reconnect` brings the phone back: the old code retried
+// adb six times, burned ~10 minutes and then asked for a whole new runner, so the
+// user just saw a frozen/black phone. The AVD disk on this runner is still intact,
+// so the correct recovery is to relaunch the emulator from that same disk - which
+// restores the exact same phone (apps, accounts, data, settings) in ~60-90s.
+// ---------------------------------------------------------------------------
+const AVD_NAME = (process.env.VIBELY_AVD_NAME || process.env.AVD_NAME || 'vibely_pixel6_api34').trim();
+const AVD_HOME = process.env.ANDROID_AVD_HOME
+  || path.join(process.env.HOME || '/root', '.android', 'avd');
+const EMULATOR_BIN = [
+  process.env.ANDROID_SDK_ROOT,
+  process.env.ANDROID_HOME,
+  '/usr/local/lib/android/sdk',
+].filter(Boolean).map((r) => path.join(r, 'emulator', 'emulator'))
+  .find((p) => { try { return fs.existsSync(p); } catch { return false; } }) || 'emulator';
+const EMULATOR_RESTART_LOG = '/tmp/vibely-emulator.log';
+
+let emulatorRestartInFlight = false;
+let adbRecoveryInFlight = false;
+let consecutiveAdbFailures = 0;
+let lastChangeFingerprint = '';
+let pendingChangeFp = '';
+let lastAdbHealthyAt = Date.now();
+let lastDutyTickAt = Date.now();
+
 const pendingLogLines = [];
 let logFlushTimer = null;
+
+/**
+ * Ship buffered agent lines to the gateway. Lines are only removed once the POST
+ * succeeded: a gateway restart (which happens every ~100 minutes) used to swallow
+ * exactly the evidence needed to debug a failure. Retries on its own timer.
+ */
+async function flushAgentLog() {
+  if (!GATEWAY_URL || !GATEWAY_SECRET || !pendingLogLines.length) return;
+  const batch = pendingLogLines.splice(0, Math.min(pendingLogLines.length, 200));
+  try {
+    const res = await fetch(`${GATEWAY_URL}/api/internal/agent-log`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${GATEWAY_SECRET}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ session_id: SESSION_ID, lines: batch }),
+      signal: AbortSignal.timeout(15000),
+    });
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+  } catch (_) {
+    pendingLogLines.unshift(...batch);
+    while (pendingLogLines.length > 1200) pendingLogLines.shift();
+    if (!logFlushTimer) {
+      logFlushTimer = setTimeout(() => { logFlushTimer = null; void flushAgentLog(); }, 5000);
+      logFlushTimer.unref?.();
+    }
+  }
+}
 
 function log(msg) {
   console.log(`[${new Date().toISOString()}] [${SESSION_ID}] ${msg}`);
@@ -65,20 +119,7 @@ function log(msg) {
     pendingLogLines.push(`${new Date().toISOString()} ${msg}`);
     if (pendingLogLines.length > 400) pendingLogLines.shift();
     if (!logFlushTimer) {
-      logFlushTimer = setTimeout(async () => {
-        logFlushTimer = null;
-        if (!GATEWAY_URL || !GATEWAY_SECRET) return;
-        const batch = pendingLogLines.splice(0, pendingLogLines.length);
-        if (!batch.length) return;
-        try {
-          await fetch(`${GATEWAY_URL}/api/internal/agent-log`, {
-            method: 'POST',
-            headers: { Authorization: `Bearer ${GATEWAY_SECRET}`, 'Content-Type': 'application/json' },
-            body: JSON.stringify({ session_id: SESSION_ID, lines: batch }),
-            signal: AbortSignal.timeout(15000),
-          });
-        } catch { /* logging must never break the phone */ }
-      }, 3000);
+      logFlushTimer = setTimeout(() => { logFlushTimer = null; void flushAgentLog(); }, 3000);
       logFlushTimer.unref?.();
     }
   } catch {}
@@ -189,24 +230,211 @@ async function prepareDevicePermissions() {
   } catch (_) {}
 }
 
+/** Run a host shell command, never throwing; returns combined output. */
+async function hostSh(cmd, timeout = 20000) {
+  try {
+    const { stdout, stderr } = await execFileAsync('/bin/bash', ['-lc', cmd], {
+      timeout, killSignal: 'SIGKILL', maxBuffer: 8 * 1024 * 1024,
+    });
+    return `${stdout || ''}${stderr || ''}`;
+  } catch (e) {
+    return `${e.stdout || ''}${e.stderr || ''}`;
+  }
+}
+
+/** Is a qemu emulator process alive on this runner? */
+async function qemuPids() {
+  const out = await hostSh('pgrep -fa "qemu-system-x86_64" || true', 10000);
+  return out.split('\n').map((l) => l.trim()).filter((l) => l && !/^\d+\s*$/.test(l) && /qemu-system/.test(l));
+}
+
+/** Does adb currently expose a usable emulator transport? */
+async function deviceOnline() {
+  try {
+    const { stdout } = await execFileAsync('adb', ['devices'], { timeout: 8000, killSignal: 'SIGKILL' });
+    return /emulator-\d+\s+device\b/.test(stdout || '');
+  } catch { return false; }
+}
+
+/** Forensics for the next (and this) crash: host memory, OOM kills, emulator log. */
+async function captureEmulatorForensics(tag) {
+  try {
+    const report = {
+      tag,
+      at: new Date().toISOString(),
+      qemu_processes: (await qemuPids()).length,
+      free_mb: (await hostSh('free -m | head -3')).trim().slice(0, 600),
+      disk: (await hostSh('df -h / /tmp 2>/dev/null | tail -3')).trim().slice(0, 600),
+      top_rss: (await hostSh('ps -eo pid,rss,pcpu,etime,comm --sort=-rss | head -8')).trim().slice(0, 900),
+      oom_kills: (await hostSh("(sudo -n dmesg 2>/dev/null || dmesg 2>/dev/null) | grep -iE 'killed process|out of memory|oom-kill' | tail -6 || true")).trim().slice(0, 900),
+      emulator_log_tail: (await hostSh(`tail -c 1200 "${EMULATOR_RESTART_LOG}" 2>/dev/null || true`)).slice(-1200),
+    };
+    log('CRASH FORENSICS ' + JSON.stringify(report));
+  } catch (e) {
+    log('CRASH FORENSICS failed: ' + e.message);
+  }
+}
+
+/** Cheap adb-only recovery (no 90s wait-for-device that stalls the duty loop). */
+async function quickAdbRecovery() {
+  try { await execFileAsync('adb', ['kill-server'], { timeout: 12000, killSignal: 'SIGKILL' }); } catch (_) {}
+  await sleep(800);
+  try { await execFileAsync('adb', ['start-server'], { timeout: 20000, killSignal: 'SIGKILL' }); } catch (_) {}
+  await sleep(800);
+  for (let i = 0; i < 6; i++) {
+    if (await deviceOnline()) {
+      const boot = (await adbShell('getprop sys.boot_completed', 15000).catch(() => ({ stdout: '' }))).stdout.trim();
+      if (boot.startsWith('1')) return true;
+    }
+    await sleep(3000);
+  }
+  return false;
+}
+
+/** Recreate the scrcpy control + video channel for the (new) emulator instance. */
+async function startLive() {
+  liveDevice = await startLiveDevice((packet) => {
+    if (mediaWs?.readyState !== WebSocket.OPEN) return;
+    const flags = packet.readBigUInt64BE(1), isConfig = Boolean(flags & (1n << 63n)), isKey = Boolean(flags & (1n << 62n));
+    if (isConfig) { mediaWs.send(packet, { binary: true }); return; }
+    if (!shouldStreamFrames) { mediaNeedsKey = true; return; }
+    if (mediaWs.bufferedAmount > 128 * 1024) { mediaNeedsKey = true; return; }
+    if (mediaNeedsKey && !isKey) return;
+    if (isKey) mediaNeedsKey = false;
+    mediaWs.send(packet, { binary: true });
+  }, (profile) => {
+    if (wsClient?.readyState === WebSocket.OPEN) wsClient.send(JSON.stringify({ type: 'stream_profile', profile }));
+  });
+  return liveDevice;
+}
+
+/** The phone is back on its feet: re-apply the Play/permission/realism tuning. */
+async function afterBootTuning(where) {
+  await prepareDevicePermissions().catch(() => {});
+  for (const script of ['device-realism.sh', 'hide-root-emulator.sh']) {
+    try {
+      const { stdout, stderr } = await execFileAsync('bash', [path.join(SCRIPTS_DIR, script)], { timeout: 120000, maxBuffer: 4 * 1024 * 1024 });
+      if (stdout) log(`[${where}] ${script}: ${String(stdout).trim().slice(-600)}`);
+      if (stderr) log(`[${where}] ${script} note: ${String(stderr).trim().slice(-300)}`);
+    } catch (e) { log(`[${where}] ${script} warning: ${e.message}`); }
+  }
+  await tunePlayStoreForEmulator().catch((e) => log(`[${where}] Play tune: ${e.message}`));
+  await reconcileInstallQueue(where).catch((e) => log(`[${where}] Install reconcile: ${e.message}`));
+  await dismissPlayStoreBlockers(where).catch((e) => log(`[${where}] Play blockers: ${e.message}`));
+}
+
+/**
+ * Relaunch the emulator on THIS runner from the same AVD disk.
+ * Zero data loss: the data disk already holds every app, account, setting and
+ * download; this is exactly the disk the phone booted from.
+ */
+async function restartEmulatorLocally(reason = 'adb-lost') {
+  if (emulatorRestartInFlight) return false;
+  emulatorRestartInFlight = true;
+  try {
+    log(`EMULATOR SELF-HEAL: relaunching ${AVD_NAME} from its own disk (reason=${reason}; apps/accounts/data are preserved).`);
+    await captureEmulatorForensics(reason);
+
+    try { liveDevice?.release?.(); } catch (_) {}
+    liveDevice = undefined;
+
+    await hostSh('pkill -9 -f "qemu-system-x86_64" || true', 15000);
+    // Free the runner's memory of stale helpers so the relaunch cannot inherit an
+    // out-of-memory situation (the usual reason a cloud emulator disappears).
+    await hostSh('pkill -9 -f "scrcpy" || true; pkill -9 -f "adb exec-out" || true', 12000);
+    await sleep(1500);
+    await hostSh('adb kill-server || true', 12000);
+    await sleep(800);
+    await hostSh('adb start-server || true', 20000);
+    // Stale QEMU lock files make the relaunch fail with "AVD is already running".
+    await hostSh(`rm -rf "${AVD_HOME}/${AVD_NAME}.avd"/*.lock "${AVD_HOME}/${AVD_NAME}.avd"/hardware-qemu.ini.lock 2>/dev/null || true`, 12000);
+
+    const args = [
+      '-avd', AVD_NAME, '-port', '5554', '-no-window', '-no-audio', '-no-boot-anim',
+      '-no-snapshot-load', '-no-snapshot-save', '-gpu', 'swiftshader_indirect',
+      '-camera-back', 'emulated', '-camera-front', 'emulated',
+      '-dns-server', '8.8.8.8,1.1.1.1', '-netdelay', 'none', '-netspeed', 'full',
+      '-memory', '4096', '-cores', '4',
+    ];
+    let logFd;
+    try { logFd = fs.openSync(EMULATOR_RESTART_LOG, 'a'); } catch (_) { logFd = 'ignore'; }
+    if (typeof logFd === 'number') {
+      try { fs.writeSync(logFd, `\n===== local emulator relaunch ${new Date().toISOString()} reason=${reason} =====\n`); } catch (_) {}
+    }
+    const child = spawn(EMULATOR_BIN, args, {
+      detached: true,
+      stdio: ['ignore', logFd, logFd],
+      env: { ...process.env, ANDROID_AVD_HOME: AVD_HOME, ANDROID_SDK_ROOT: process.env.ANDROID_SDK_ROOT || '/usr/local/lib/android/sdk' },
+    });
+    child.unref();
+    log(`EMULATOR SELF-HEAL: spawned ${EMULATOR_BIN} pid=${child.pid} (log: ${EMULATOR_RESTART_LOG}); waiting for Android to boot...`);
+
+    const deadline = Date.now() + 7 * 60 * 1000;
+    let booted = false;
+    while (Date.now() < deadline) {
+      await sleep(5000);
+      if (!(await deviceOnline())) continue;
+      const boot = (await adbShell('getprop sys.boot_completed', 15000).catch(() => ({ stdout: '' }))).stdout.trim();
+      if (boot.startsWith('1')) { booted = true; break; }
+    }
+    if (!booted) {
+      log('EMULATOR SELF-HEAL FAILED: the emulator did not boot within 7 minutes.');
+      await captureEmulatorForensics('restart-failed');
+      await dispatchReplacementWorkflow().catch((e) => log('Replacement dispatch failed: ' + e.message));
+      return false;
+    }
+
+    log('EMULATOR SELF-HEAL: Android booted; re-attaching display, control and tuning.');
+    await sleep(2500);
+    await adbShell('svc power stayon true; input keyevent 224', 20000).catch(() => {});
+
+    try {
+      await startLive();
+      log('EMULATOR SELF-HEAL: scrcpy control + video re-attached.');
+    } catch (e) {
+      log('EMULATOR SELF-HEAL: scrcpy re-attach failed: ' + e.message);
+    }
+    await afterBootTuning('self-heal').catch((e) => log('self-heal tuning: ' + e.message));
+
+    consecutiveAdbFailures = 0;
+    lastAdbHealthyAt = Date.now();
+    lastChangeFingerprint = '';
+    pendingChangeFp = '';
+    if (wsClient && wsClient.readyState === WebSocket.OPEN) {
+      const di = await collectDeviceInfo().catch(() => ({}));
+      try {
+        wsClient.send(JSON.stringify({ type: 'heartbeat', sessionId: SESSION_ID, deviceInfo: { ...di, degraded: false, adbRecovered: true, emulatorRestarted: true } }));
+      } catch (_) {}
+    }
+    await deviceDoctor('post-self-heal').catch(() => {});
+    log('EMULATOR SELF-HEAL COMPLETE: the phone is live again with its data intact.');
+    return true;
+  } catch (e) {
+    log('EMULATOR SELF-HEAL error: ' + e.message);
+    return false;
+  } finally {
+    emulatorRestartInFlight = false;
+  }
+}
+
 async function recoverAdbConnection() {
   log('ADB recovery: full reconnect (fixes stuck screen when emulator-5554 vanishes)');
-  try { await execFileAsync('adb', ['reconnect'], { timeout: 15000 }); } catch (_) {}
-  try { await execFileAsync('adb', ['disconnect'], { timeout: 10000 }); } catch (_) {}
-  try { await execFileAsync('adb', ['kill-server'], { timeout: 15000 }); } catch (_) {}
+  try { await execFileAsync('adb', ['reconnect'], { timeout: 15000 , killSignal: 'SIGKILL' }); } catch (_) {}
+  try { await execFileAsync('adb', ['disconnect'], { timeout: 10000 , killSignal: 'SIGKILL' }); } catch (_) {}
+  try { await execFileAsync('adb', ['kill-server'], { timeout: 15000 , killSignal: 'SIGKILL' }); } catch (_) {}
   await sleep(1200);
-  try { await execFileAsync('adb', ['start-server'], { timeout: 20000 }); } catch (_) {}
+  try { await execFileAsync('adb', ['start-server'], { timeout: 20000 , killSignal: 'SIGKILL' }); } catch (_) {}
   await sleep(1500);
   // Emulator console ports commonly used on Actions runners
   for (const endpoint of ['127.0.0.1:5555', '127.0.0.1:5557', 'emulator-5554', '127.0.0.1:5554']) {
-    try { await execFileAsync('adb', ['connect', endpoint], { timeout: 8000 }); } catch (_) {}
+    try { await execFileAsync('adb', ['connect', endpoint], { timeout: 8000 , killSignal: 'SIGKILL' }); } catch (_) {}
   }
-  try { await execFileAsync('adb', ['reconnect', 'offline'], { timeout: 12000 }); } catch (_) {}
-  try { await execFileAsync('adb', ['wait-for-device'], { timeout: 90000 }); } catch (e) { log('wait-for-device: ' + e.message); }
+  try { await execFileAsync('adb', ['reconnect', 'offline'], { timeout: 12000 , killSignal: 'SIGKILL' }); } catch (_) {}
+  try { await execFileAsync('adb', ['wait-for-device'], { timeout: 90000 , killSignal: 'SIGKILL' }); } catch (e) { log('wait-for-device: ' + e.message); }
   // Never `adb unroot` here: on this Play image adbd is already unprivileged and
   // `adb unroot` restarts adbd, dropping the transport we are trying to restore.
   try {
-    const { stdout } = await execFileAsync('adb', ['devices', '-l'], { timeout: 10000 });
+    const { stdout } = await execFileAsync('adb', ['devices', '-l'], { timeout: 10000 , killSignal: 'SIGKILL' });
     log('ADB devices after recovery: ' + String(stdout).trim());
     const ok = /emulator-\d+\s+device|\d+\.\d+\.\d+\.\d+:\d+\s+device/.test(stdout || '');
     if (ok && liveDevice?.ensureHealthy) {
@@ -217,7 +445,7 @@ async function recoverAdbConnection() {
     }
     // Wake display so stream is not a frozen black/last frame
     try {
-      await execFileAsync('adb', ['shell', 'input keyevent 224; input keyevent 82; svc power stayon true'], { timeout: 15000 });
+      await execFileAsync('adb', ['shell', 'input keyevent 224; input keyevent 82; svc power stayon true'], { timeout: 15000 , killSignal: 'SIGKILL' });
     } catch (_) {}
     return ok;
   } catch (e) {
@@ -229,6 +457,7 @@ async function recoverAdbConnection() {
 async function adbShell(cmd, timeout = 30000) {
   const { stdout, stderr } = await execFileAsync('adb', ['shell', cmd], {
     timeout,
+    killSignal: 'SIGKILL', // adb ignores SIGTERM; without this a hung shell blocks forever
     maxBuffer: 16 * 1024 * 1024,
   });
   return { stdout: stdout || '', stderr: stderr || '' };
@@ -501,12 +730,21 @@ async function activeViewerCount() {
  */
 async function livePersist(reason = 'periodic', { whole = false, hold = false, force = false } = {}) {
   log(`Live persist start (${reason}, whole=${whole}, hold=${hold}, force=${force})`);
+  let captured = false;
   try {
-    await runStateManager('backup', { reason, hold, force, whole });
+    const out = await runStateManager('backup', { reason, hold, force, whole });
+    captured = out !== false;
   } catch (e) {
     log(`Live persist warning (${reason}): ${e.message}`);
   }
   log(`Live persist done (${reason})`);
+  // A checkpoint pauses the guest; if it did not come back, bring the phone back
+  // immediately instead of waiting for the supervisor to notice.
+  if (captured && process.env.GITHUB_AVD_ONLY === 'true' && !(await deviceOnline())) {
+    log('Post-capture check: guest is not answering adb - relaunching the emulator now.');
+    setTimeout(() => { restartEmulatorLocally('post-capture-guest-dead').catch(() => {}); }, 500);
+  }
+  return captured;
 }
 
 async function runStateManager(mode, opts = {}) {
@@ -518,20 +756,20 @@ async function runStateManager(mode, opts = {}) {
       const force = Boolean(opts.force) || hold;
       if (!force && Date.now() - lastWholeAvdAt < WHOLE_AVD_MIN_INTERVAL_MS) {
         log(`Whole-AVD capture skipped (rate limit: ${Math.round((Date.now()-lastWholeAvdAt)/60000)}m < ${WHOLE_AVD_MIN_INTERVAL_MS/60000}m since last; reason=${opts.reason||mode})`);
-        return;
+        return false;
       }
       if (!hold) {
         if (Date.now() < persistLeaseUntil) {
           log(`Whole-AVD capture deferred (persistence lease active for ${Math.round((persistLeaseUntil - Date.now()) / 1000)}s).`);
-          return;
+          return false;
         }
         const busy = await isGuestBusyForPersist();
-        if (busy) { log(`Whole-AVD capture deferred (guest busy: ${busy}); installs/downloads must not be frozen.`); return; }
+        if (busy) { log(`Whole-AVD capture deferred (guest busy: ${busy}); installs/downloads must not be frozen.`); return false; }
         // Do not freeze a phone somebody is actively watching/using.
         const viewers = await activeViewerCount();
-        if (viewers > 0) { log(`Whole-AVD capture deferred (${viewers} live viewer attached).`); return; }
+        if (viewers > 0) { log(`Whole-AVD capture deferred (${viewers} live viewer attached).`); return false; }
         const quietSec = Math.round((Date.now() - lastGuestChangeAt) / 1000);
-        if (quietSec < 180) { log(`Whole-AVD capture deferred (guest changed ${quietSec}s ago; need 180s of quiet).`); return; }
+        if (quietSec < 180) { log(`Whole-AVD capture deferred (guest changed ${quietSec}s ago; need 180s of quiet).`); return false; }
       }
       const started = Date.now();
       const env={...process.env,EMULATOR_SESSION_ID:SESSION_ID,CHECKPOINT_HOLD:hold?'true':'false',AVD_DIR:process.env.AVD_DIR||`${process.env.HOME}/.android/avd/vibely_pixel6_api34.avd`};
@@ -560,6 +798,7 @@ async function runStateManager(mode, opts = {}) {
 async function captureJpegFrame() {
   const { stdout } = await execFileAsync('adb', ['exec-out', 'screencap', '-p'], {
     encoding: 'buffer',
+    killSignal: 'SIGKILL',
     timeout: 12000,
     maxBuffer: 32 * 1024 * 1024,
   });
@@ -716,7 +955,7 @@ async function handleGatewayRpc(action, payload) {
       const tmpApk = `/tmp/install_${Date.now()}_${path.basename(payload.file_name || 'app.apk')}`;
       fs.writeFileSync(tmpApk, Buffer.from(payload.apk_base64, 'base64'));
       try {
-        const { stdout, stderr } = await execFileAsync('adb', ['install', '-r', '-g', tmpApk], { timeout: 110000 });
+        const { stdout, stderr } = await execFileAsync('adb', ['install', '-r', '-g', tmpApk], { timeout: 110000 , killSignal: 'SIGKILL' });
         const deviceInfo = await collectDeviceInfo().catch(() => ({}));
         return { ok: true, stdout, stderr, deviceInfo };
       } finally {
@@ -728,7 +967,7 @@ async function handleGatewayRpc(action, payload) {
       const tmpLocal = `/tmp/push_${Date.now()}.bin`;
       fs.writeFileSync(tmpLocal, Buffer.from(payload.content_base64 || '', 'base64'));
       try {
-        await execFileAsync('adb', ['push', tmpLocal, dest], { timeout: 45000 });
+        await execFileAsync('adb', ['push', tmpLocal, dest], { timeout: 45000 , killSignal: 'SIGKILL' });
         return { ok: true, remote_path: dest };
       } finally {
         try { fs.unlinkSync(tmpLocal); } catch {}
@@ -1089,6 +1328,66 @@ async function reconnectTunnel(deviceInfo) {
   }
 }
 
+/**
+ * Independent emulator supervisor.
+ *
+ * Runs on its own timer, outside the duty loop, so a dead emulator is detected and
+ * repaired even when the loop itself is stuck in a long await. This is the piece
+ * that guarantees the phone comes back instead of hanging until the 6h timeout.
+ */
+let supervisorStarted = false;
+let supervisorBackoffUntil = 0;
+let simulationDone = false;
+function startEmulatorSupervisor() {
+  if (supervisorStarted) return;
+  supervisorStarted = true;
+
+  const tick = async () => {
+    try {
+      if (emulatorRestartInFlight || adbRecoveryInFlight) return;
+      if (Date.now() < supervisorBackoffUntil) return;
+      const simAfter = Number(process.env.VIBELY_SIMULATE_CRASH_AFTER_SEC || 0);
+      if (simAfter > 0 && !simulationDone && promotedAtMs && (Date.now() - promotedAtMs) / 1000 >= simAfter) {
+        simulationDone = true;
+        log(`SIMULATION: killing the emulator process to prove self-heal (after ${Math.round((Date.now() - promotedAtMs) / 1000)}s of live service).`);
+        await hostSh('pkill -9 -f "qemu-system-x86_64" || true', 15000);
+        await sleep(3000);
+      }
+      if (await deviceOnline()) { lastAdbHealthyAt = Date.now(); return; }
+      const deadSec = Math.round((Date.now() - lastAdbHealthyAt) / 1000);
+      if (deadSec < 40) return;
+      log(`SUPERVISOR: emulator unreachable for ${deadSec}s (duty tick age ${Math.round((Date.now() - lastDutyTickAt) / 1000)}s) - starting self-heal.`);
+      adbRecoveryInFlight = true;
+      let healed = false;
+      try {
+        const qemu = await qemuPids();
+        if (qemu.length) {
+          const ok = await quickAdbRecovery();
+          if (ok) { healed = true; lastAdbHealthyAt = Date.now(); log('SUPERVISOR: adb transport recovered.'); return; }
+        }
+        healed = await restartEmulatorLocally(qemu.length ? 'supervisor-adb-dead' : 'supervisor-qemu-gone');
+      } finally {
+        adbRecoveryInFlight = false;
+        if (healed) { lastAdbHealthyAt = Date.now(); supervisorBackoffUntil = 0; }
+        else supervisorBackoffUntil = Date.now() + 5 * 60 * 1000;
+      }
+    } catch (e) {
+      log('SUPERVISOR error: ' + e.message);
+    }
+  };
+
+  const timer = setInterval(tick, 20000);
+  timer.unref?.();
+  log('Emulator supervisor started (20s interval; relaunches the same AVD if the phone dies).');
+}
+
+process.on('unhandledRejection', (err) => {
+  try { log('UNHANDLED REJECTION (kept alive): ' + (err?.message || String(err))); } catch (_) {}
+});
+process.on('uncaughtException', (err) => {
+  try { log('UNCAUGHT EXCEPTION (kept alive): ' + (err?.message || String(err))); } catch (_) {}
+});
+
 async function main() {
   if (!GATEWAY_URL || !GATEWAY_SECRET) {
     throw new Error('EMULATOR_GATEWAY_URL and EMULATOR_GATEWAY_SECRET must be set');
@@ -1100,18 +1399,8 @@ async function main() {
   // Pre-load persisted state onto this new emulator while isolated in standby
   await runStateManager('restore');
   const deviceInfo = await collectDeviceInfo();
-  liveDevice=await startLiveDevice(packet=>{
-    if(mediaWs?.readyState!==WebSocket.OPEN)return;
-    const flags=packet.readBigUInt64BE(1),isConfig=Boolean(flags&(1n<<63n)),isKey=Boolean(flags&(1n<<62n));
-    if(isConfig){mediaWs.send(packet,{binary:true});return;}
-    if(!shouldStreamFrames){mediaNeedsKey=true;return;}
-    if(mediaWs.bufferedAmount>128*1024){mediaNeedsKey=true;return;}
-    if(mediaNeedsKey&&!isKey)return;
-    if(isKey)mediaNeedsKey=false;
-    mediaWs.send(packet,{binary:true});
-  },profile=>{
-    if(wsClient?.readyState===WebSocket.OPEN)wsClient.send(JSON.stringify({type:'stream_profile',profile}));
-  });
+  await startLive();
+  startEmulatorSupervisor();
   deviceInfo.stream_profile=liveDevice.profile;
   deviceInfo.separate_video_channel=true;
   deviceInfo.stream_transport='scrcpy-h264';
@@ -1152,7 +1441,6 @@ async function main() {
   // Secondary safety net = infrequent whole-AVD only if something was missed.
   const CHANGE_POLL_MS = 20 * 1000;
   const SAFETY_WHOLE_MS = 60 * 60 * 1000; // safety net only; captures pause the guest
-  let lastChangeFingerprint = '';
   let lastWholeAvdMs = Date.now();
   let lastBlitzWakeMs = Date.now();
   let changePersistInFlight = false;
@@ -1160,7 +1448,6 @@ async function main() {
   let lastDoctorMs = Date.now();
   let lastPlayGateCheckMs = 0;
   let lastActiveSeenMs = Date.now();
-  let consecutiveAdbFailures = 0;
 
   async function fingerprintPhoneState() {
     try {
@@ -1191,31 +1478,51 @@ async function main() {
 
     // 1. Local ADB & system health check + heartbeat
     try {
-      const devices = await execFileAsync('adb', ['devices'], { timeout: 10000 }).then(r => r.stdout || '').catch(e => e.message);
+      lastDutyTickAt = Date.now();
+      const devices = await execFileAsync('adb', ['devices'], { timeout: 10000 , killSignal: 'SIGKILL' }).then(r => r.stdout || '').catch(e => e.message);
       if (!/emulator-\d+\s+device/.test(devices)) {
-        log('CRITICAL: adb has no emulator device — running recoverAdbConnection()');
-        const ok = await recoverAdbConnection();
-        if (wsClient && wsClient.readyState === WebSocket.OPEN) {
-          wsClient.send(JSON.stringify({ type: 'heartbeat', sessionId: SESSION_ID, deviceInfo: { degraded: !ok, adbRecovered: ok, adbDevices: devices } }));
-        }
         consecutiveAdbFailures += 1;
-        if (!ok) {
-          log(`ADB recovery failed this cycle (${consecutiveAdbFailures} consecutive); will retry next health check`);
+        log(`CRITICAL: adb has no emulator device (${consecutiveAdbFailures} consecutive)`);
+        if (wsClient && wsClient.readyState === WebSocket.OPEN) {
+          wsClient.send(JSON.stringify({ type: 'heartbeat', sessionId: SESSION_ID, deviceInfo: { degraded: true, adbRecovered: false, adbDevices: devices, selfHealing: true } }));
         }
-        if (consecutiveAdbFailures >= 6) {
-          // Never reboot or wipe: re-save state knowledge and let the workflow's
-          // supervisor hand the phone to a fresh successor with the same disk.
-          log('WATCHDOG: emulator ADB unreachable for 6 cycles; publishing checkpoint and requesting replacement.');
-          await livePersist('watchdog-adb-lost', { whole: false, hold: false, force: false }).catch(() => {});
-          await dispatchReplacementWorkflow();
+        // Recovery never blocks the loop: heartbeats, the log relay and every other
+        // duty must keep running while the phone is being brought back.
+        if (!adbRecoveryInFlight && !emulatorRestartInFlight) {
+          adbRecoveryInFlight = true;
+          (async () => {
+            const qemu = await qemuPids();
+            if (!qemu.length) {
+              // The emulator process itself is gone - only a relaunch can fix this.
+              log('No qemu process on this runner: adb recovery cannot help, relaunching the emulator.');
+              await restartEmulatorLocally('qemu-process-gone');
+              return;
+            }
+            const ok = await quickAdbRecovery();
+            if (ok) {
+              log('ADB quick recovery succeeded.');
+              consecutiveAdbFailures = 0;
+              lastAdbHealthyAt = Date.now();
+              return;
+            }
+            log('ADB quick recovery failed while qemu is alive (device offline): relaunching the emulator.');
+            await restartEmulatorLocally('adb-transport-dead');
+          })()
+            .catch((e) => log('Recovery error: ' + e.message))
+            .finally(() => { adbRecoveryInFlight = false; });
+        }
+        if (consecutiveAdbFailures >= 8 && !emulatorRestartInFlight) {
+          log('WATCHDOG: still no device after repeated self-heal - requesting a replacement runner.');
+          await dispatchReplacementWorkflow().catch(() => {});
           consecutiveAdbFailures = 0;
         }
       } else {
         consecutiveAdbFailures = 0;
+        lastAdbHealthyAt = Date.now();
         // Soft-clear stuck system permission dialogs only (never force-stop apps)
         try { await prepareDevicePermissions(); } catch (_) {}
 
-        // Keep display awake — frozen black/last-frame is often a sleeping surface
+        // Keep display awake - frozen black/last-frame is often a sleeping surface
         try {
           await adbShell('svc power stayon true; input keyevent 224', 12000);
         } catch (_) {}
@@ -1313,22 +1620,31 @@ async function main() {
         lastChangeFingerprint = fp;
         lastGuestChangeAt = Date.now();
       } else if (fp !== lastChangeFingerprint && !changePersistInFlight && !wholeAvdSaveInFlight) {
-        lastGuestChangeAt = Date.now();
+        // Only a *new* change restarts the quiet window; a retry of the same
+        // unpersisted change must not, or the 180s quiet gate could never open.
+        if (fp !== pendingChangeFp) {
+          pendingChangeFp = fp;
+          lastGuestChangeAt = Date.now();
+        }
         const busy = await isGuestBusyForPersist();
         if (busy) {
           log('State changed but Play/download busy (' + busy + ') — defer persist');
         } else {
-          const pendingFp = fp;
-          lastChangeFingerprint = fp;
           changePersistInFlight = true;
           (async () => {
             await sleep(90000);
             const busy2 = await isGuestBusyForPersist();
-            if (busy2) { log('Still busy after debounce (' + busy2 + ') — skip'); return; }
+            if (busy2) { log('Still busy after debounce (' + busy2 + ') — retry next cycle'); return; }
             const fp2 = await fingerprintPhoneState();
-            if (fp2 !== pendingFp) { log('Fingerprint still changing — wait next cycle'); lastChangeFingerprint = fp2; return; }
+            if (fp2 !== pendingChangeFp) { log('Fingerprint still changing — wait next cycle'); return; }
             log('Phone state stable — whole-AVD persist (rate limited; never mid-install)');
-            await livePersist('change-triggered', { whole: true, hold: false });
+            const captured = await livePersist('change-triggered', { whole: true, hold: false });
+            if (captured) {
+              lastChangeFingerprint = fp2;
+              pendingChangeFp = '';
+            } else {
+              log('Change not persisted yet — will retry on the next cycle.');
+            }
           })()
             .catch((e) => log(`Change-triggered persist warning: ${e.message}`))
             .finally(() => { changePersistInFlight = false; lastWholeAvdMs = Date.now(); });
@@ -1337,6 +1653,7 @@ async function main() {
     } catch (e) {
       log('Change fingerprint warning: ' + e.message);
     }
+
 
     // 3b. SAFETY NET only (not primary): whole-AVD if no change-triggered save for 30m
     if (Date.now() - lastWholeAvdMs >= SAFETY_WHOLE_MS && !wholeAvdSaveInFlight && !changePersistInFlight) {
