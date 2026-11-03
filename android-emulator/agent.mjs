@@ -261,6 +261,78 @@ async function isGuestBusyForPersist() {
   return null;
 }
 
+/**
+ * ROOT CAUSE — Google Play "Complete account setup" gate.
+ *
+ * On this device the store shows a sheet titled "Complete account setup —
+ * Add a payment option to complete your account" (Skip / Add card / Add PayPal)
+ * and REFUSES to start any download until it is dismissed. Every install from the
+ * website therefore sat at "Pending" and never completed — repeatedly, on every
+ * rotation, because the sheet reappears.
+ *
+ * Dismissing it is free and harmless: we tap "Skip" (no payment method, no
+ * purchase, no account change). The sheet is also dismissed proactively so a user
+ * who taps Install in the store UI gets a download instead of a dead button.
+ */
+async function uiDumpXml() {
+  try {
+    await adbShell('uiautomator dump /sdcard/vibely_ui.xml >/dev/null 2>&1', 25000);
+    return (await adbShell('cat /sdcard/vibely_ui.xml 2>/dev/null', 25000)).stdout || '';
+  } catch { return ''; }
+}
+
+function uiFind(xml, pattern) {
+  for (const node of xml.match(/<node[^>]*>/g) || []) {
+    const text = (node.match(/text="([^"]*)"/) || [])[1] || '';
+    const desc = (node.match(/content-desc="([^"]*)"/) || [])[1] || '';
+    if (!pattern.test(`${text} ${desc}`)) continue;
+    const b = node.match(/bounds="\[(\d+),(\d+)\]\[(\d+),(\d+)\]"/);
+    if (!b) continue;
+    const [x1, y1, x2, y2] = b.slice(1).map(Number);
+    return { x: Math.round((x1 + x2) / 2), y: Math.round((y1 + y2) / 2), label: (text || desc).slice(0, 60) };
+  }
+  return null;
+}
+
+async function dismissPlayStoreBlockers(where = 'periodic') {
+  const xml = await uiDumpXml();
+  if (!xml) return { ok: false, reason: 'no_ui_dump' };
+  const top = (await adbShell('dumpsys activity activities | grep -m1 topResumedActivity', 15000)).stdout || '';
+  const isStore = /com\.android\.vending|packageinstaller/i.test(top);
+
+  const gateSheet = /Complete account setup|Add a payment option|Review your account to continue/i.test(xml);
+  const skip = uiFind(xml, /^(Skip|Not now|No thanks|Maybe later|Do this later|Close sheet)$/i);
+  const ack = uiFind(xml, /^(Got it|OK|Allow|Continue|Accept|Done|Dismiss)$/i);
+  const signInWall = /Sign in to your Google Account|Sign in$/i.test(xml) && !/Install/i.test(xml);
+
+  const result = { where, gate_sheet: gateSheet, action: null, is_store: isStore };
+  if (signInWall) {
+    result.action = 'sign_in_required';
+    log('WARNING: Play Store is asking for a Google sign-in; an install cannot proceed until the account is signed in again.');
+    return result;
+  }
+  if (gateSheet && skip) {
+    await adbShell(`input tap ${skip.x} ${skip.y}`, 15000);
+    result.action = `dismissed_account_setup_gate(${skip.label})`;
+    log(`[play-blockers] ${where}: dismissed "Complete account setup" sheet via "${skip.label}" — Play can install again.`);
+    await sleep(2500);
+    return result;
+  }
+  if (gateSheet && ack) {
+    await adbShell(`input tap ${ack.x} ${ack.y}`, 15000);
+    result.action = `advanced_account_setup_gate(${ack.label})`;
+    log(`[play-blockers] ${where}: advanced account setup gate via "${ack.label}".`);
+    await sleep(2500);
+    return result;
+  }
+  if (ack && isStore) {
+    await adbShell(`input tap ${ack.x} ${ack.y}`, 15000);
+    result.action = `dismissed_dialog(${ack.label})`;
+    return result;
+  }
+  return result;
+}
+
 /** Real-device health/install-path diagnostics. Evidence first, never guesses. */
 async function deviceDoctor(reason = 'periodic') {
   const report = {};
@@ -798,6 +870,9 @@ async function onPromoted() {
   // Play Store download/install path (background, device-idle and storage friendly).
   await tunePlayStoreForEmulator().catch((e) => log('Play tune: ' + e.message));
   await reconcileInstallQueue('promote').catch((e) => log('Install reconcile: ' + e.message));
+  // Clear the "Complete account setup / Add a payment option" gate that silently
+  // blocks every Play download (the real cause of stuck installations).
+  await dismissPlayStoreBlockers('promote').catch((e) => log('Play blockers: ' + e.message));
   await deviceDoctor('post-promotion').catch((e) => log('Doctor: ' + e.message));
 
   // NOTE: no whole-AVD checkpoint here. The data disk this emulator booted from is
@@ -1076,6 +1151,7 @@ async function main() {
   let changePersistInFlight = false;
   let lastSelfHealMs = 0;
   let lastDoctorMs = Date.now();
+  let lastPlayGateCheckMs = 0;
   let lastActiveSeenMs = Date.now();
   let consecutiveAdbFailures = 0;
 
@@ -1197,6 +1273,18 @@ async function main() {
       } catch (e) {
         log('Self-heal warning: ' + e.message);
       }
+    }
+
+    // 1b2. Keep Google Play installable: the account-setup gate comes back after a
+    // restore/re-login, and while it is up every install silently never starts.
+    if (Date.now() - lastPlayGateCheckMs > 120000) {
+      lastPlayGateCheckMs = Date.now();
+      try {
+        const top = (await adbShell('dumpsys activity activities | grep -m1 topResumedActivity', 15000)).stdout || '';
+        if (/com\.android\.vending|packageinstaller/i.test(top)) {
+          await dismissPlayStoreBlockers('duty-loop');
+        }
+      } catch (_) {}
     }
 
     // 1c. Periodic evidence collection (cheap, non-destructive).

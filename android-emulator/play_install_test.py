@@ -177,17 +177,35 @@ def logcat(dev, lines: int = 400, tags: str | None = None) -> str:
     return sh(dev, f"logcat -d -t {lines}{tag_arg}", timeout=90)[-20000:]
 
 
-def dismiss_system_dialogs(dev) -> None:
-    """Close only system blockers on the install path (never user apps)."""
+def dismiss_system_dialogs(dev) -> dict:
+    """Clear the blockers that stop a Play install from ever starting.
+
+    The critical one is Google Play's "Complete account setup — Add a payment
+    option to complete your account" sheet: while it is up, the store accepts the
+    Install tap and then never downloads anything, which is exactly the
+    "installation stuck, never completes" symptom. We dismiss it with "Skip"
+    (no payment method is added and nothing is purchased).
+    """
     xml = ui_dump(dev)
+    out = {"gate_sheet": False, "dismissed": None, "sign_in_required": False}
     if not xml:
-        return
-    for pat in [r"^(Got it|OK|Allow|Continue|Not now|Dismiss|No thanks|Later)$"]:
+        return out
+    out["gate_sheet"] = bool(re.search(r"Complete account setup|Add a payment option|Review your account to continue", xml, re.I))
+    if re.search(r"Sign in to your Google Account", xml, re.I):
+        out["sign_in_required"] = True
+        EVIDENCE.setdefault("blockers", []).append(out)
+        return out
+    for pat in [r"^(Skip|Not now|No thanks|Maybe later|Do this later)$",
+                r"^(Got it|OK|Allow|Continue|Accept|Dismiss)$"]:
         pos = find_button(xml, [pat])
         if pos:
             dev.tap(*pos)
-            EVIDENCE.setdefault("dialogs_dismissed", []).append(pat)
-            time.sleep(1.5)
+            out["dismissed"] = pat
+            time.sleep(2.5)
+            EVIDENCE.setdefault("dialogs_dismissed", []).append({"pattern": pat, "gate_sheet": out["gate_sheet"]})
+            break
+    EVIDENCE.setdefault("blockers", []).append(out)
+    return out
 
 
 def open_store_listing(dev, pkg: str) -> str:
@@ -208,6 +226,7 @@ def wait_for_install(dev, pkg: str, timeout_s: int, poll_s: int = 5) -> dict:
     """Poll PackageManager until `pkg` has a real APK, collecting progress evidence."""
     deadline = time.time() + timeout_s
     timeline, last_dl = [], ""
+    gate_cleared_at = time.time()
     while time.time() < deadline:
         if pm_installed(dev, pkg):
             return {"installed": True, "waited_s": round(timeout_s - (deadline - time.time()), 1), "timeline": timeline[-20:]}
@@ -217,6 +236,19 @@ def wait_for_install(dev, pkg: str, timeout_s: int, poll_s: int = 5) -> dict:
         if entry["download"] != last_dl:
             timeline.append(entry)
             last_dl = entry["download"]
+        # If nothing is downloading after ~20s, a Play gate/dialog is eating the tap.
+        if not pct and time.time() - gate_cleared_at > 20:
+            gate_cleared_at = time.time()
+            gate = dismiss_system_dialogs(dev)
+            if gate.get("dismissed") or gate.get("gate_sheet"):
+                EVIDENCE.setdefault("install_blockers_cleared", []).append(gate)
+                timeline.append({"t": round(timeout_s - (deadline - time.time()), 1), "blocker": gate})
+                time.sleep(2)
+                # re-tap Install in case the gate swallowed the first tap
+                xml2 = ui_dump(dev)
+                pos2 = find_button(xml2, [r"^(Install|Update|Get)$"])
+                if pos2:
+                    dev.tap(*pos2)
         time.sleep(poll_s)
     return {"installed": False, "waited_s": timeout_s, "timeline": timeline[-20:]}
 
@@ -378,6 +410,12 @@ def main() -> int:
             if "Sign in" in xml and "Install" not in xml:
                 EVIDENCE["errors"].append("Play Store is asking to sign in")
                 return finish(args, 2)
+            if re.search(r"Complete account setup|Add a payment option", xml, re.I):
+                gate = dismiss_system_dialogs(dev)
+                EVIDENCE.setdefault("account_setup_gate_seen", []).append(gate)
+                if gate.get("dismissed"):
+                    time.sleep(2)
+                    continue
             pos = find_button(xml, [r"^Install$", r"^Install\b", r"^Update$"])
             EVIDENCE.setdefault("install_button_attempts", []).append({"attempt": attempt, "found": bool(pos), "dl_len": len(xml)})
             if pos:
