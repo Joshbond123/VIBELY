@@ -308,6 +308,46 @@ async function startLive() {
   return liveDevice;
 }
 
+/**
+ * Attach (or re-attach) the live display + touch channel, retrying until the guest
+ * is ready. Right after a boot the scrcpy server can fail to bind its abstract
+ * socket ("did not become ready"); a single attempt left the phone booted but with
+ * a frozen picture, so this always retries and clears a stale server between tries.
+ */
+let liveAttachInFlight = false;
+async function ensureLiveAttached(reason = 'watchdog') {
+  if (liveAttachInFlight) return false;
+  liveAttachInFlight = true;
+  try {
+    if (liveDevice?.ensureHealthy) {
+      try {
+        const h = await liveDevice.ensureHealthy();
+        if (h?.ok) { mediaNeedsKey = true; return true; }
+      } catch (_) {}
+    }
+    for (let attempt = 1; attempt <= 6; attempt++) {
+      try {
+        await hostSh('adb shell pkill -f genymobile.scrcpy 2>/dev/null || true', 12000);
+        await sleep(1500);
+        await startLive();
+        mediaNeedsKey = true;
+        if (wsClient && wsClient.readyState === WebSocket.OPEN && liveDevice?.profile) {
+          wsClient.send(JSON.stringify({ type: 'stream_profile', profile: liveDevice.profile }));
+        }
+        log(`Live display + touch channel attached (${reason}, attempt ${attempt}).`);
+        return true;
+      } catch (e) {
+        log(`Live display attach attempt ${attempt} failed (${reason}): ${e.message}`);
+        if (attempt < 6) await sleep(6000);
+      }
+    }
+    log('Live display attach FAILED after 6 attempts; the phone stays reachable via adb and will keep retrying.');
+    return false;
+  } finally {
+    liveAttachInFlight = false;
+  }
+}
+
 /** The phone is back on its feet: re-apply the Play/permission/realism tuning. */
 async function afterBootTuning(where) {
   await prepareDevicePermissions().catch(() => {});
@@ -388,11 +428,9 @@ async function restartEmulatorLocally(reason = 'adb-lost') {
     await sleep(2500);
     await adbShell('svc power stayon true; input keyevent 224', 20000).catch(() => {});
 
-    try {
-      await startLive();
-      log('EMULATOR SELF-HEAL: scrcpy control + video re-attached.');
-    } catch (e) {
-      log('EMULATOR SELF-HEAL: scrcpy re-attach failed: ' + e.message);
+    shouldStreamFrames = true;
+    if (await ensureLiveAttached('self-heal')) {
+      log('EMULATOR SELF-HEAL: live display + touch re-attached.');
     }
     await afterBootTuning('self-heal').catch((e) => log('self-heal tuning: ' + e.message));
 
@@ -1353,7 +1391,15 @@ function startEmulatorSupervisor() {
         await hostSh('pkill -9 -f "qemu-system-x86_64" || true', 15000);
         await sleep(3000);
       }
-      if (await deviceOnline()) { lastAdbHealthyAt = Date.now(); return; }
+      if (await deviceOnline()) {
+        lastAdbHealthyAt = Date.now();
+        // The OS is up: make sure the live picture/touch channel is up too.
+        if (!liveDevice && !liveAttachInFlight) {
+          const boot = (await adbShell('getprop sys.boot_completed', 15000).catch(() => ({ stdout: '' }))).stdout.trim();
+          if (boot.startsWith('1')) ensureLiveAttached('supervisor').catch(() => {});
+        }
+        return;
+      }
       const deadSec = Math.round((Date.now() - lastAdbHealthyAt) / 1000);
       if (deadSec < 40) return;
       log(`SUPERVISOR: emulator unreachable for ${deadSec}s (duty tick age ${Math.round((Date.now() - lastDutyTickAt) / 1000)}s) - starting self-heal.`);
@@ -1527,8 +1573,11 @@ async function main() {
           await adbShell('svc power stayon true; input keyevent 224', 12000);
         } catch (_) {}
 
-        // Revive scrcpy control/video if either channel died (root cause of "stuck screen")
-        if (liveDevice?.ensureHealthy) {
+        // Revive the live display/touch channel if it is missing or degraded
+        // (root cause of "stuck screen": picture frozen while the OS is fine).
+        if (!liveDevice) {
+          if (!liveAttachInFlight) ensureLiveAttached('duty-loop').catch(() => {});
+        } else if (liveDevice.ensureHealthy) {
           try {
             const h = await liveDevice.ensureHealthy();
             if (!h.ok) log('scrcpy ensureHealthy degraded: ' + JSON.stringify(h));
