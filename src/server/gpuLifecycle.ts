@@ -166,8 +166,8 @@ export async function gpuDashboard() {
         const [user,slug]=profile.kernel_ref.split('/');
         const r=await fetch(`https://www.kaggle.com/api/v1/kernels/status?userName=${user}&kernelSlug=${slug}`,{signal:AbortSignal.timeout(5000),headers:{Authorization:`Bearer ${process.env[profile.token_env]}`}});
         if(r.ok){const k:any=await r.json();if(['complete','completed','cancelacknowledged','canceled','cancelled','error','failed'].includes(String(k.status).toLowerCase())){
-          await query(`UPDATE gpu_sessions SET state='OFF',session_status=$2,telemetry=NULL,telemetry_at=NULL WHERE service_id=$1 AND worker_started_at=$3`,[row.service_id,String(k.status),row.worker_started_at]);
-          row.state='OFF';availability='Provider confirms session terminated';
+          const changed=await query<any>(`UPDATE gpu_sessions SET state='OFF',session_status=$2,telemetry=NULL,telemetry_at=NULL WHERE service_id=$1 AND worker_started_at=$3 RETURNING service_id`,[row.service_id,String(k.status),row.worker_started_at]);
+          row.state=changed.length?'OFF':'UNKNOWN';availability=changed.length?'Provider confirms session terminated':'Session changed during observation; refresh required';
         }}
       }catch{}
     }

@@ -71,3 +71,14 @@ The video GPU no longer waits for the independent music promise before it can be
 A test with the real previously generated (rejected) 26-second video passed full decoding, duration/hash checks, idempotent persistence, path validation and invalid-file rejection. This is **not** a new generated or visually accepted video, nor a live GPU-shutdown test.
 
 The exact 12,741,204,960-byte Wan Q5 diffusion artifact was downloaded and SHA256-verified in private **CPU-only** kernels for both video accounts. Initial dataset publication failed because Kaggle returns HTTP 403 for an absent private dataset. The source was corrected to use a create-only operation; recovery publication reuses the already verified saved artifact rather than downloading it again from Hugging Face. Publication status must be confirmed separately. The cache contains only the diffusion checkpoint, not a complete installed encoder/VAE/renderer stack.
+
+## Persistent diffusion checkpoint publication
+
+Both account-owned private datasets now report **ready**, version **1**, with the exact **12,741,204,960-byte** GGUF and artifact lock:
+
+- `temilolo/vibely-wan-animate2-distilled-q5-cache`
+- `joshbond123/vibely-wan-animate2-distilled-q5-cache`
+
+The corrected transport uses bounded byte ranges, retries only failed ranges, checks exact range lengths and verifies the entire SHA256 before publication. It refused a truncated transfer rather than accepting a partial checkpoint. Both datasets are private; no Scarlett reference or generation history was published.
+
+Fresh CPU sessions with internet **disabled** were submitted to attach and rehash those persistent datasets without Hugging Face downloads. Their final read-back results are recorded separately; submission alone is not acceptance. This does not claim GPU restart/switch testing or a complete installed text-encoder/VAE/inference stack.

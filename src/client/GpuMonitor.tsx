@@ -34,6 +34,7 @@ export function GpuMonitor(){
     {w?.error&&<p className="text-xs text-amber-300">{w.error}</p>}
    </article>;
   })}</div>
+  <p className="text-xs text-amber-200/80" data-testid="rotation-readiness">Automatic rotation is not active: model/worker provisioning and live switching validation are pending. The 30-minute policy does not interrupt running tasks.</p>
   {!data&&<p className="text-sm text-zinc-400">Reading actual worker state. Viewing this panel never activates a GPU.</p>}
  </section>;
 }

@@ -1,0 +1,46 @@
+{
+  "checked_at": "2026-11-03T22:26:03.383753+00:00",
+  "scope": "Pinned diffusion artifact only; NOT a complete renderer installation",
+  "sha256": "c43e655ea8e76420630526291c75359c7fd4114efb592b07f67c0d99ab51296f",
+  "gpu_inference_tested": false,
+  "datasets": [
+    {
+      "account": "temilolo",
+      "dataset": "temilolo/vibely-wan-animate2-distilled-q5-cache",
+      "status": "ready",
+      "is_private": true,
+      "version": 1,
+      "files": [
+        {
+          "name": "Wan-Animate-2-14B-TURBO-Q5_K_M.gguf",
+          "total_bytes": 12741204960,
+          "size": null
+        },
+        {
+          "name": "artifact-lock.json",
+          "total_bytes": 380,
+          "size": null
+        }
+      ]
+    },
+    {
+      "account": "joshbond123",
+      "dataset": "joshbond123/vibely-wan-animate2-distilled-q5-cache",
+      "status": "ready",
+      "is_private": true,
+      "version": 1,
+      "files": [
+        {
+          "name": "Wan-Animate-2-14B-TURBO-Q5_K_M.gguf",
+          "total_bytes": 12741204960,
+          "size": null
+        },
+        {
+          "name": "artifact-lock.json",
+          "total_bytes": 380,
+          "size": null
+        }
+      ]
+    }
+  ]
+}

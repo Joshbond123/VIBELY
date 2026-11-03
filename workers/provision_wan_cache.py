@@ -1,3 +1,4 @@
+from cache_transport import download_verified_ranges
 """CPU-only provisioning of the exact diffusion artifact; NOT a complete renderer install.
 Run in a private Kaggle CPU notebook. No GPU allocation, no music-model changes,
 no removal of existing caches, references, outputs or unrelated environments.
@@ -29,17 +30,9 @@ if not verify(p):
    break
 if not verify(p):
  if os.environ.get('ALLOW_MODEL_DOWNLOAD','1')!='1' and not os.environ.get('CACHE_SOURCE_URL'):raise RuntimeError('Verified attached cache missing; refusing unnecessary model re-download')
- part=p.with_suffix('.part');digest=hashlib.sha256();n=0
+ part=p.with_suffix('.part')
  source_url=os.environ.get('CACHE_SOURCE_URL') or f'https://huggingface.co/{REPO}/resolve/{REVISION}/{FILE}'
- with urllib.request.urlopen(source_url,timeout=120) as r,part.open('wb') as out:
-  while True:
-   data=r.read(8*1024*1024)
-   if not data:break
-   n+=len(data)
-   if n>SIZE:raise RuntimeError('Artifact larger than pinned size')
-   out.write(data);digest.update(data)
-  out.flush();os.fsync(out.fileno())
- if n!=SIZE or digest.hexdigest()!=SHA:raise RuntimeError('Artifact verification failed; not publishing')
+ download_verified_ranges(source_url,part,SIZE,SHA)
  part.replace(p)
 manifest={'scope':'diffusion artifact only; encoder/VAE/dependencies/runtime NOT installed','repository':REPO,'revision':REVISION,'file':FILE,'bytes':SIZE,'sha256':SHA,'verified':True}
 (root/'artifact-lock.json').write_text(json.dumps(manifest,indent=2))

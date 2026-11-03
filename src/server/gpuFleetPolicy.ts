@@ -2,10 +2,10 @@
 export const WEEKLY_SECONDS=30*3600;
 export const ROTATION_SECONDS=30*60;
 export const GPU_PROFILES=[
- {id:'video-primary',role:'video',priority:'primary',account:'temilolo',token_env:'KAGGLE_TEMILOLO_TOKEN',kernel_ref:null},
- {id:'video-backup',role:'video',priority:'backup',account:'joshbond123',token_env:'KAGGLE_JOSHBOND_TOKEN',kernel_ref:'joshbond123/vibely-minimax-h3-ref2va-server'},
- {id:'music-primary',role:'music',priority:'primary',account:'black797',token_env:'KAGGLE_BLACK797_TOKEN',kernel_ref:null},
- {id:'music-backup',role:'music',priority:'backup',account:'happink',token_env:'KAGGLE_HAPPINK_TOKEN',kernel_ref:'happink/vibely-music-gpu-worker'},
+ {id:'video-primary',role:'video',priority:'primary',account:'temilolo',token_env:'KAGGLE_TEMILOLO_TOKEN',kernel_ref:null,desired_engine:'wan_animate_2_distilled_14b',cache_dataset:'temilolo/vibely-wan-animate2-distilled-q5-cache'},
+ {id:'video-backup',role:'video',priority:'backup',account:'joshbond123',token_env:'KAGGLE_JOSHBOND_TOKEN',kernel_ref:'joshbond123/vibely-minimax-h3-ref2va-server',desired_engine:'wan_animate_2_distilled_14b',cache_dataset:'joshbond123/vibely-wan-animate2-distilled-q5-cache'},
+ {id:'music-primary',role:'music',priority:'primary',account:'black797',token_env:'KAGGLE_BLACK797_TOKEN',kernel_ref:null,desired_engine:'minimax_music_3',cache_dataset:null},
+ {id:'music-backup',role:'music',priority:'backup',account:'happink',token_env:'KAGGLE_HAPPINK_TOKEN',kernel_ref:'happink/vibely-music-gpu-worker',desired_engine:'minimax_music_3',cache_dataset:'happink/minimax-music-3-q4-0-gguf-cache'},
 ] as const;
 export interface RotationInput {
  activeSeconds:number; activeJobs:number; pendingReceipts:number; queuedJobs:number;
