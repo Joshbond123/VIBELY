@@ -11,6 +11,7 @@ ARCHIVE="/tmp/vibely-whole-avd-save-$$.tar.zst"
 export ANDROID_CHECKPOINT_IMAGE_FAMILY="${ANDROID_CHECKPOINT_IMAGE_FAMILY:-google_apis_playstore}"
 export ANDROID_STATE_BRANCH="${ANDROID_STATE_BRANCH:-android-state-v1}"
 export GITHUB_REPOSITORY="${GITHUB_REPOSITORY:-Joshbond123/VIBELY}"
+export AVD_DIR
 
 if [[ -z "${EMULATOR_STATE_KEY:-}" || -z "${GH_PAT:-}" ]]; then
   echo "[save-whole-avd] Missing secrets"; exit 1
@@ -19,13 +20,17 @@ if [[ ! -d "$AVD_DIR" ]]; then
   echo "[save-whole-avd] Missing AVD $AVD_DIR"; exit 1
 fi
 
+# Claim write ownership so rotated sessions can publish (root-cause fix)
+python3 android-emulator/github_state.py claim --owner "$OWNER" || true
+
 ARGS=(capture --avd "$AVD_DIR" --archive "$ARCHIVE")
 [[ "$HOLD" == "true" ]] && ARGS+=(--hold)
 
 echo "[save-whole-avd] Capturing..."
 python3 android-emulator/avd_checkpoint.py "${ARGS[@]}"
 META=$(jq -n --arg run "${GITHUB_RUN_ID:-}" --arg avd "$AVD_NAME" --arg fam "$ANDROID_CHECKPOINT_IMAGE_FAMILY" \
-  '{source_run:$run,avd:$avd,family:$fam,format:"whole-avd-v1"}')
+  --argjson held "$([ "$HOLD" = true ] && echo true || echo false)" \
+  '{source_run:$run,avd:$avd,family:$fam,format:"whole-avd-v1",source_held:$held}')
 echo "[save-whole-avd] Publishing (incomplete snapshots never become current)..."
 python3 android-emulator/github_state.py publish --archive "$ARCHIVE" --owner "$OWNER" --metadata "$META"
 rm -f "$ARCHIVE"
