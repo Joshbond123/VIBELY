@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+cd "$SCRIPT_DIR"
+
 AVD_HOME="${ANDROID_AVD_HOME:-$HOME/.android/avd}"
 AVD_NAME="${AVD_NAME:-vibely_pixel6_api34}"
 AVD_DIR="$AVD_HOME/${AVD_NAME}.avd"
@@ -12,6 +15,7 @@ export ANDROID_CHECKPOINT_IMAGE_FAMILY="${ANDROID_CHECKPOINT_IMAGE_FAMILY:-googl
 export ANDROID_STATE_BRANCH="${ANDROID_STATE_BRANCH:-android-state-v1}"
 export GITHUB_REPOSITORY="${GITHUB_REPOSITORY:-Joshbond123/VIBELY}"
 export AVD_DIR
+export PYTHONPATH="$SCRIPT_DIR${PYTHONPATH:+:$PYTHONPATH}"
 
 if [[ -z "${EMULATOR_STATE_KEY:-}" || -z "${GH_PAT:-}" ]]; then
   echo "[save-whole-avd] Missing secrets"; exit 1
@@ -20,18 +24,17 @@ if [[ ! -d "$AVD_DIR" ]]; then
   echo "[save-whole-avd] Missing AVD $AVD_DIR"; exit 1
 fi
 
-# Claim write ownership so rotated sessions can publish (root-cause fix)
-python3 github_state.py claim --owner "$OWNER" || true
+python3 "$SCRIPT_DIR/github_state.py" claim --owner "$OWNER" || true
 
 ARGS=(capture --avd "$AVD_DIR" --archive "$ARCHIVE")
 [[ "$HOLD" == "true" ]] && ARGS+=(--hold)
 
 echo "[save-whole-avd] Capturing..."
-python3 avd_checkpoint.py "${ARGS[@]}"
+python3 "$SCRIPT_DIR/avd_checkpoint.py" "${ARGS[@]}"
 META=$(jq -n --arg run "${GITHUB_RUN_ID:-}" --arg avd "$AVD_NAME" --arg fam "$ANDROID_CHECKPOINT_IMAGE_FAMILY" \
   --argjson held "$([ "$HOLD" = true ] && echo true || echo false)" \
   '{source_run:$run,avd:$avd,family:$fam,format:"whole-avd-v1",source_held:$held}')
 echo "[save-whole-avd] Publishing (incomplete snapshots never become current)..."
-python3 github_state.py publish --archive "$ARCHIVE" --owner "$OWNER" --metadata "$META"
+python3 "$SCRIPT_DIR/github_state.py" publish --archive "$ARCHIVE" --owner "$OWNER" --metadata "$META"
 rm -f "$ARCHIVE"
 echo "[save-whole-avd] Done"
