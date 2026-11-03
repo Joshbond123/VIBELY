@@ -127,9 +127,12 @@ def guest_install_busy():
         dl = adb('dumpsys download 2>/dev/null | head -100')
         if re.search(r'Status:\s*(190|192|193|194|195|196)', dl):
             return 'download_manager'
-        sessions = adb('pm list sessions -a 2>/dev/null | head -40')
-        if 'package:' in sessions and re.search(r'active=true|sealed=true|SESSION_', sessions):
+        sessions = adb('dumpsys package installer 2>/dev/null | grep -iE "session|active=" | head -30')
+        if re.search(r'active=true|sealed=true', sessions):
             return 'package_installer'
+        top = adb('dumpsys activity activities | grep -m1 topResumedActivity')
+        if re.search(r'com\.android\.vending|packageinstaller', top, re.I):
+            return 'play_store_foreground'
         return None
     except Exception:
         return None
@@ -208,7 +211,7 @@ def capture(avd, destination, hold=False):
         Path(tmp, 'manifest.json').write_text(json.dumps(evidence, sort_keys=True))
         partial = destination.with_suffix(destination.suffix + '.partial')
         try:
-            run('tar', '--sparse', '--zstd', '-cf', str(partial), '-C', tmp, 'avd', 'manifest.json', 'host-adb', timeout=900)
+            run('tar', '--sparse', '--use-compress-program=zstd -3 -T0', '-cf', str(partial), '-C', tmp, 'avd', 'manifest.json', 'host-adb', timeout=900)
             os.chmod(partial, 0o600)
             # Validate the entire compressed stream, not merely archive headers.
             run('zstd', '-t', str(partial), timeout=600)

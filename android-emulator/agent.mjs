@@ -247,12 +247,16 @@ async function isGuestBusyForPersist() {
     const dl = (await adbShell('dumpsys download 2>/dev/null | head -100', 15000)).stdout || '';
     if (/Status:\s*(190|192|193|194|195|196)/i.test(dl) || /STATUS_(RUNNING|PENDING|PAUSED)/i.test(dl)) return 'download_manager';
     // PackageInstaller sessions (Play Store commits installs through them).
-    const sessions = (await adbShell('pm list sessions -a 2>/dev/null | head -40', 15000)).stdout || '';
-    if (/\bactive=true\b|\bsealed=true\b|SESSION_/i.test(sessions) && /package:/i.test(sessions)) return 'package_installer_session';
+    const sessions = (await adbShell('dumpsys package installer 2>/dev/null | grep -iE "session|active=" | head -30', 15000)).stdout || '';
+    if (/\bactive=true\b|\bsealed=true\b/i.test(sessions)) return 'package_installer_session';
     const inst = (await adbShell('dumpsys package installer 2>/dev/null | grep -iE "sessionId|Session [0-9]|active|staged" | head -20', 15000)).stdout || '';
     if (/active=true|sealed=true|SessionId;i=0/i.test(inst) && !/No sessions/i.test(inst)) return 'package_installer';
     const act = (await adbShell('dumpsys activity activities 2>/dev/null | grep -iE "vending|PackageInstaller|Download" | head -25', 15000)).stdout || '';
     if (/DOWNLOADING|downloading|Installing|INSTALLING|Pending\.{0,3}$/i.test(act)) return 'play_or_installer_ui';
+    // A person browsing the store is about to install something; never freeze the
+    // guest out from under an open Play Store session.
+    const top = (await adbShell('dumpsys activity activities | grep -m1 topResumedActivity', 15000)).stdout || '';
+    if (/com\.android\.vending|com\.google\.android\.packageinstaller|packageinstaller/i.test(top)) return 'play_store_foreground';
   } catch (_) {}
   return null;
 }
@@ -297,7 +301,9 @@ async function reconcileInstallQueue(where = 'promote') {
     // Never touch the queue while anything is genuinely in flight.
     const inFlight = await isGuestBusyForPersist();
     if (inFlight) { log(`Install queue reconcile (${where}): guest busy (${inFlight}) — leaving the queue untouched.`); return { busy: inFlight }; }
-    const sessions = (await adbShell('pm list sessions -a 2>/dev/null', 25000)).stdout || '';
+    // `pm list sessions` is not available on every build; the package service dump
+    // always is.
+    const sessions = (await adbShell('dumpsys package installer 2>/dev/null | head -80', 25000)).stdout || '';
     const ids = [...sessions.matchAll(/Session \[(\d+)\]/g)].map((m) => m[1]);
     const stale = ids.filter((_, i) => /Session \[\d+\][\s\S]{0,200}?active=false/.test(sessions.split('Session [')[i + 1] || ''));
     for (const id of stale.slice(0, 20)) {
@@ -382,6 +388,24 @@ async function saveWholeAvd(hold = false) {
 }
 
 let lastWholeAvdAt = 0;
+let persistLeaseUntil = 0;
+let lastGuestChangeAt = Date.now();
+
+/** Suppress whole-AVD captures while a critical live operation runs (e.g. the
+ * Play Store install test), because a capture pauses the guest. */
+function withPersistLease(ms, fn) {
+  persistLeaseUntil = Math.max(persistLeaseUntil, Date.now() + ms);
+  return fn();
+}
+
+async function activeViewerCount() {
+  try {
+    const r = await fetch(`${GATEWAY_URL}/api/public/health`, { signal: AbortSignal.timeout(8000) });
+    if (!r.ok) return 0;
+    const j = await r.json();
+    return Number(j.viewers || 0) + Number(j.control_clients || 0);
+  } catch { return 0; }
+}
 
 /** Live persistence.
  *
@@ -418,8 +442,17 @@ async function runStateManager(mode, opts = {}) {
         return;
       }
       if (!hold) {
+        if (Date.now() < persistLeaseUntil) {
+          log(`Whole-AVD capture deferred (persistence lease active for ${Math.round((persistLeaseUntil - Date.now()) / 1000)}s).`);
+          return;
+        }
         const busy = await isGuestBusyForPersist();
         if (busy) { log(`Whole-AVD capture deferred (guest busy: ${busy}); installs/downloads must not be frozen.`); return; }
+        // Do not freeze a phone somebody is actively watching/using.
+        const viewers = await activeViewerCount();
+        if (viewers > 0) { log(`Whole-AVD capture deferred (${viewers} live viewer attached).`); return; }
+        const quietSec = Math.round((Date.now() - lastGuestChangeAt) / 1000);
+        if (quietSec < 180) { log(`Whole-AVD capture deferred (guest changed ${quietSec}s ago; need 180s of quiet).`); return; }
       }
       const started = Date.now();
       const env={...process.env,EMULATOR_SESSION_ID:SESSION_ID,CHECKPOINT_HOLD:hold?'true':'false',AVD_DIR:process.env.AVD_DIR||`${process.env.HOME}/.android/avd/vibely_pixel6_api34.avd`};
@@ -777,16 +810,18 @@ async function onPromoted() {
   if (INSTALL_TEST_PACKAGE && !installTestStarted) {
     installTestStarted = true;
     (async () => {
-      try {
-        log(`Running real Play Store install test for ${INSTALL_TEST_PACKAGE}...`);
-        const { stdout } = await execFileAsync('python3', [path.join(SCRIPTS_DIR, 'play_install_test.py'), '--package', INSTALL_TEST_PACKAGE, '--json', '/tmp/vibely_install_test.json'], {
-          timeout: 25 * 60 * 1000, maxBuffer: 16 * 1024 * 1024,
-        });
-        log('INSTALL TEST OUTPUT:\n' + String(stdout).slice(-6000));
-      } catch (e) {
-        log('INSTALL TEST FAILED: ' + e.message);
-        if (e.stdout) log('INSTALL TEST STDOUT:\n' + String(e.stdout).slice(-6000));
-      }
+      await withPersistLease(30 * 60 * 1000, async () => {
+        try {
+          log(`Running real Play Store install test for ${INSTALL_TEST_PACKAGE} (whole-AVD captures leased out for 30m)...`);
+          const { stdout } = await execFileAsync('python3', [path.join(SCRIPTS_DIR, 'play_install_test.py'), '--package', INSTALL_TEST_PACKAGE, '--json', '/tmp/vibely_install_test.json'], {
+            timeout: 25 * 60 * 1000, maxBuffer: 16 * 1024 * 1024,
+          });
+          log('INSTALL TEST OUTPUT:\n' + String(stdout).slice(-6000));
+        } catch (e) {
+          log('INSTALL TEST FAILED: ' + e.message);
+          if (e.stdout) log('INSTALL TEST STDOUT:\n' + String(e.stdout).slice(-6000));
+        }
+      });
       await reconcileInstallQueue('post-install-test').catch(() => {});
       await livePersist('post-install-test', { whole: true, hold: false, force: true }).catch((e) => log(`Post-test persist: ${e.message}`));
     })().catch((e) => log('Install test top-level: ' + e.message));
@@ -1181,7 +1216,9 @@ async function main() {
       const fp = await fingerprintPhoneState();
       if (!lastChangeFingerprint) {
         lastChangeFingerprint = fp;
+        lastGuestChangeAt = Date.now();
       } else if (fp !== lastChangeFingerprint && !changePersistInFlight && !wholeAvdSaveInFlight) {
+        lastGuestChangeAt = Date.now();
         const busy = await isGuestBusyForPersist();
         if (busy) {
           log('State changed but Play/download busy (' + busy + ') — defer persist');
