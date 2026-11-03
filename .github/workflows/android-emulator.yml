@@ -131,6 +131,9 @@ jobs:
       SIMULATE_BOOT_FAILURE: ${{ inputs.simulate_boot_failure || 'false' }}
       ANDROID_CHECKPOINT_IMAGE_FAMILY: google_apis_playstore
       ANDROID_STATE_BRANCH: android-state-v1
+      # Whole-AVD is the sole authoritative persistence path (userdata + accounts).
+      GITHUB_AVD_ONLY: 'true'
+      AVD_DIR: /home/runner/.android/avd/vibely_pixel6_api34.avd
 
     steps:
       - name: Checkout VIBELY repository
