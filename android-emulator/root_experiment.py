@@ -289,6 +289,9 @@ def phase_root() -> bool:
     for src, out in ((os.path.join(payload, "magisk"), "magisk.xz"),
                      (os.path.join(payload, "init-ld"), "init-ld.xz")):
         run([magiskboot, "compress=xz", src, out], cwd=rd_work)
+    # cpio ops resolve source files relative to the working directory
+    shutil.copy(os.path.join(payload, "magiskinit"), os.path.join(rd_work, "magiskinit"))
+    os.chmod(os.path.join(rd_work, "magiskinit"), 0o755)
 
     ops = [magiskboot, "cpio", raw,
            "add 0750 init magiskinit",
@@ -358,7 +361,11 @@ def phase_identity() -> bool:
     sh("su -c 'magisk --sqlite \"UPDATE settings SET value=1 WHERE key=\\'denylist\\'\"' || true")
     for pkg in ("com.android.vending", "com.google.android.gms", "com.zhiliaoapp.musically",
                 "com.duckduckgo.mobile.android"):
-        sh(f"su -c 'magisk --denylist add {pkg}' || true")
+        out = sh(f"su -c 'magisk --denylist add {pkg} {pkg}' || true")
+        print(f"[denylist] {pkg}: {out[:120]}", flush=True)
+    print("[denylist] enable:", sh("su -c 'magisk --denylist enable' || true")[:120], flush=True)
+    print("[zygisk] state:", sh("su -c 'magisk --sqlite \"SELECT * FROM settings\"' || true")[:300],
+          flush=True)
     # Reboot so post-fs-data runs.
     adb("reboot", timeout=60)
     time.sleep(20)
