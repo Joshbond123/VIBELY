@@ -220,7 +220,11 @@ def extract(archive, avd):
             raise RuntimeError('Checkpoint lacks original authorized ADB host identity')
         android_home = Path(os.environ.get('ANDROID_USER_HOME', str(Path.home()/'.android')))
         android_home.mkdir(parents=True, exist_ok=True)
-        subprocess.run(['adb', 'kill-server'], capture_output=True, timeout=20)
+        # adb may not be on PATH yet during pre-emulator restore step
+        if shutil.which('adb'):
+            subprocess.run(['adb', 'kill-server'], capture_output=True, timeout=20)
+        else:
+            print('[extract] adb not on PATH yet; restoring host keys without kill-server')
         for name in ('adbkey', 'adbkey.pub'):
             shutil.copyfile(host_keys/name, android_home/name)
             os.chmod(android_home/name, 0o600)
