@@ -231,14 +231,58 @@ def open_store_listing(dev, pkg: str) -> str:
     return sh(dev, "dumpsys activity activities | grep -m1 ResumedActivity").strip()
 
 
+def store_search(dev, query: str, expect: str) -> dict:
+    """Drive a real Play Store search and prove the results page rendered it.
+
+    `market://search?q=` makes the store run the query itself; we then read the
+    rendered hierarchy, so a PASS means the store searched, not that a URL opened.
+    """
+    started = time.time()
+    sh(dev, f"am start -a android.intent.action.VIEW -d 'market://search?q={query}' -p com.android.vending", timeout=60)
+    xml, seen = "", False
+    for _ in range(8):
+        time.sleep(4)
+        resumed = sh(dev, "dumpsys activity activities | grep -m1 ResumedActivity").strip()
+        xml = ui_dump(dev)
+        if re.search(rf"({expect})", xml, re.I):
+            seen = True
+            break
+    return {
+        "query": query,
+        "found_result": seen,
+        "resumed": sh(dev, "dumpsys activity activities | grep -m1 ResumedActivity").strip(),
+        "ui_len": len(xml),
+        "latency_s": round(time.time() - started, 1),
+    }
+
+
 def wait_for_install(dev, pkg: str, timeout_s: int, poll_s: int = 5) -> dict:
     """Poll PackageManager until `pkg` has a real APK, collecting progress evidence."""
     deadline = time.time() + timeout_s
     timeline, last_dl = [], ""
     gate_cleared_at = time.time()
+    # Responsiveness probe: a big install must not make the phone stop answering.
+    # Every poll times a trivial adb round-trip; slow/timeout samples are the
+    # objective form of "the emulator looked frozen during the TikTok install".
+    probes = []
     while time.time() < deadline:
+        t0 = time.time()
+        try:
+            sh(dev, "true", timeout=45)
+            probes.append(round(time.time() - t0, 1))
+        except Exception:
+            probes.append(round(time.time() - t0, 1))
+            probes[-1] = -probes[-1]  # negative marks a timed-out probe
         if pm_installed(dev, pkg):
-            return {"installed": True, "waited_s": round(timeout_s - (deadline - time.time()), 1), "timeline": timeline[-20:]}
+            good = [p for p in probes if p > 0]
+            return {"installed": True, "waited_s": round(timeout_s - (deadline - time.time()), 1),
+                    "timeline": timeline[-20:],
+                    "responsiveness": {
+                        "probes": len(probes),
+                        "timeouts": len([p for p in probes if p < 0]),
+                        "max_latency_s": max(good) if good else None,
+                        "median_latency_s": sorted(good)[len(good) // 2] if good else None,
+                    }}
         dl = sh(dev, 'dumpsys download 2>/dev/null | grep -E "Status:|Uri:" | head -6').strip()
         pct = re.findall(r"(\d+)%", sh(dev, "dumpsys activity activities | grep -iE 'vending' | head -5"))
         entry = {"t": round(timeout_s - (deadline - time.time()), 1), "download": dl.replace("\n", " | ")[:220], "pct": pct[:2]}
@@ -259,7 +303,9 @@ def wait_for_install(dev, pkg: str, timeout_s: int, poll_s: int = 5) -> dict:
                 if pos2:
                     dev.tap(*pos2)
         time.sleep(poll_s)
-    return {"installed": False, "waited_s": timeout_s, "timeline": timeline[-20:]}
+    return {"installed": False, "waited_s": timeout_s, "timeline": timeline[-20:],
+            "responsiveness": {"probes": len(probes), "timeouts": len([p for p in probes if p < 0]),
+                               "max_latency_s": max([p for p in probes if p > 0], default=None)}}
 
 
 def launch_app(dev, pkg: str) -> dict:
@@ -403,6 +449,13 @@ def main() -> int:
         if not pre["google_account"]:
             EVIDENCE["errors"].append("no Google account on the device: Play Store cannot install anything (sign-in is required)")
             return finish(args, 2)
+
+        # ---- phase: the store opens and can search ----------------------------
+        search = store_search(dev, pre.get("app_label") or pkg.split(".")[-1], pkg.split(".")[-1])
+        EVIDENCE["phases"]["store_search"] = search
+        print("[search]", json.dumps(search))
+        if not search["found_result"]:
+            EVIDENCE["errors"].append("Play Store search returned no matching result")
 
         # ---- phase: open the store listing -------------------------------------
         resumed = open_store_listing(dev, pkg)

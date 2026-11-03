@@ -1094,8 +1094,13 @@ async function handleGatewayRpc(action, payload) {
       }
     }
     case 'flush_final_state': {
-      await runStateManager('backup');
-      return { ok: true, backed_up_at: new Date().toISOString() };
+      // An EXPLICIT checkpoint (before a restart/rotation, or from the UI) must be
+      // authoritative. It used to fall into the periodic path, where a single live
+      // viewer or a quiet-window check silently skipped it and the caller was told
+      // "ok" anyway -- that is exactly how the TikTok install and everything after
+      // 18:00 never reached the state branch.
+      const captured = await livePersist('explicit-checkpoint', { whole: true, hold: true, force: true });
+      return { ok: captured !== false, captured: captured !== false, backed_up_at: new Date().toISOString() };
     }
     case 'apply_delta_state': {
       await runStateManager('restore');

@@ -36,6 +36,25 @@ adb shell settings put global development_settings_enabled 0 || true
 adb shell settings put global stay_on_while_plugged_in 3 || true
 adb shell svc power stayon true || true
 
+# --- Play download/install survivability (documented cmd surfaces) ---
+# A 179MB Play download runs in the store's own service. Doze/background
+# restrictions must not suspend it mid-transfer: that is a real "install hangs"
+# cause on an idle emulator screen. These are the documented `deviceidle`/`appops`
+# allowlist calls, i.e. exactly what a user's battery-optimisation exemption does.
+log "Play/GMS background allowances (doze + appops)"
+for _p in com.android.vending com.google.android.gms com.google.android.gsf; do
+  adb shell cmd deviceidle whitelist +"$_p" >/dev/null 2>&1 || true
+  adb shell cmd appops set "$_p" RUN_IN_BACKGROUND allow >/dev/null 2>&1 || true
+  adb shell cmd appops set "$_p" RUN_ANY_IN_BACKGROUND allow >/dev/null 2>&1 || true
+done
+adb shell cmd appops set com.android.vending WAKE_LOCK allow >/dev/null 2>&1 || true
+adb shell settings put global cached_apps_freezer disabled >/dev/null 2>&1 || true
+
+# --- Report the effective emulator tuning (evidence, not decoration) ---
+log "timeout multiplier: $(adb shell getprop ro.hw_timeout_multiplier | tr -d '\r')"
+log "install dexopt filter: $(adb shell getprop pm.dexopt.install | tr -d '\r')"
+log "ram: $(adb shell cat /proc/meminfo | grep MemTotal | tr -s ' ')"
+
 # --- Writable / soft props (best-effort; ro.* often blocked on Play images) ---
 log "Writable property attempts"
 for kv in \
