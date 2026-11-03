@@ -149,6 +149,17 @@ async function runMigrations(client: pg.PoolClient): Promise<void> {
       last_shutdown_at TIMESTAMPTZ, session_status TEXT, error TEXT, telemetry JSONB, telemetry_at TIMESTAMPTZ
     );
     INSERT INTO gpu_sessions(service_id) VALUES('minimax_h3_ref2va'),('minimax_music_3') ON CONFLICT DO NOTHING;
+    CREATE TABLE IF NOT EXISTS gpu_usage_observations (
+      account TEXT NOT NULL,service_id TEXT NOT NULL,worker_started_at DOUBLE PRECISION NOT NULL,
+      first_seen TIMESTAMPTZ NOT NULL,last_seen TIMESTAMPTZ NOT NULL,gpu_names JSONB NOT NULL,
+      PRIMARY KEY(account,service_id,worker_started_at),CHECK(last_seen>=first_seen)
+    );
+    CREATE INDEX IF NOT EXISTS gpu_usage_observations_recent ON gpu_usage_observations(last_seen);
+    CREATE TABLE IF NOT EXISTS gpu_usage_intervals (
+      account TEXT NOT NULL,service_id TEXT NOT NULL,worker_started_at DOUBLE PRECISION NOT NULL,
+      start_at TIMESTAMPTZ NOT NULL,end_at TIMESTAMPTZ NOT NULL,
+      PRIMARY KEY(account,service_id,worker_started_at,start_at,end_at),CHECK(end_at>start_at)
+    );
     CREATE TABLE IF NOT EXISTS gpu_leases(service_id TEXT NOT NULL,job_id TEXT NOT NULL,created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),PRIMARY KEY(service_id,job_id));
     CREATE TABLE IF NOT EXISTS gpu_output_receipts(service_id TEXT NOT NULL,remote_job_id TEXT NOT NULL,endpoint_url TEXT NOT NULL,api_key TEXT NOT NULL,receipt JSONB NOT NULL,created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),delivered_at TIMESTAMPTZ,attempts INTEGER NOT NULL DEFAULT 0,last_error TEXT,PRIMARY KEY(service_id,remote_job_id));
     CREATE TABLE IF NOT EXISTS gpu_events(id BIGSERIAL PRIMARY KEY,service_id TEXT NOT NULL,event TEXT NOT NULL,detail JSONB NOT NULL DEFAULT '{}',created_at TIMESTAMPTZ NOT NULL DEFAULT NOW());

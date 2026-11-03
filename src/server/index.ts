@@ -1,3 +1,4 @@
+import {gpuFleetDashboard} from './gpuUsage.js';
 import {FRONTIER_VIDEO_CANDIDATE,LEGACY_VIDEO_ENGINE,validateRequestedVideoEngine,redactStartupError} from './videoEnginePolicy.js';
 import crypto from 'crypto';
 import { gpuDashboard, acceptGpuHeartbeat } from './gpuLifecycle.js';
@@ -131,7 +132,7 @@ app.get('/api/overview', async (_req, res) => {
 
 // Read-only telemetry never allocates or starts GPUs.
 app.get('/api/gpu', async (_req,res)=>{
-  try {res.json({ok:true,workers:await gpuDashboard()});}
+  try {const workers=await gpuDashboard();res.setHeader('Cache-Control','no-store');res.json({ok:true,workers,...await gpuFleetDashboard(workers)});}
   catch(e:any){res.status(500).json({ok:false,error:e.message});}
 });
 app.get('/api/video-engine/readiness',async(_req,res)=>{

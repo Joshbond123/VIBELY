@@ -1,3 +1,6 @@
+import {recordGpuObservation} from './gpuUsage.js';
+import {GPU_PROFILES} from './gpuFleetPolicy.js';
+import {providerQuota} from './kaggleQuota.js';
 import crypto from 'crypto';
 import { pool, query } from './db.js';
 
@@ -8,6 +11,10 @@ export async function gpuEvent(service:string,event:string,detail:any={}) {
 }
 
 async function dispatchWorker(service:string) {
+  const profile=GPU_PROFILES.find(p=>p.account===(service==='minimax_h3_ref2va'?'joshbond123':'happink'))!;
+  const quota=await providerQuota(profile);
+  if(!quota.quota_verified)throw new Error('GPU activation blocked: provider quota could not be verified');
+  if(quota.remaining_seconds<=0)throw new Error(`GPU activation blocked: ${profile.account} weekly provider quota exhausted; resets ${quota.refresh_at}. No cross-account quota fallback.`);
   if(!process.env.GH_PAT) throw new Error('GPU auto-start unavailable: GitHub Actions credential is not configured');
   const res=await fetch('https://api.github.com/repos/Joshbond123/VIBELY/actions/workflows/gpu-workers.yml/dispatches',{method:'POST',signal:AbortSignal.timeout(20000),headers:{Authorization:`Bearer ${process.env.GH_PAT}`,Accept:'application/vnd.github+json','Content-Type':'application/json','User-Agent':'VIBELY-GPU-lifecycle'},body:JSON.stringify({ref:'main',inputs:{worker:service==='minimax_h3_ref2va'?'video':'music'}})});
   if(!res.ok) throw new Error(`GPU startup dispatch failed: GitHub HTTP ${res.status}`);
@@ -38,10 +45,12 @@ export async function acquireGpu(service:string,jobId:string) {
 
 export async function releaseGpuLease(service:string,jobId:string) {
   await query('DELETE FROM gpu_leases WHERE service_id=$1 AND job_id=$2',[service,jobId]);
+  await gpuLifecycleTick();
 }
 
 export async function releaseGpuJob(jobId:string) {
   await query('DELETE FROM gpu_leases WHERE job_id=$1',[jobId]);
+  await gpuLifecycleTick();
 }
 
 export async function acceptGpuHeartbeat(service:string,version:string,started:number,ready:boolean) {
@@ -137,7 +146,7 @@ export async function gpuLifecycleTick() {
 }
 
 export async function gpuDashboard() {
-  const rows=await query<any>(`SELECT s.*,m.endpoint_url,m.api_key,m.gpu_name,m.extra_meta,(SELECT count(*)::int FROM gpu_leases l WHERE l.service_id=s.service_id) AS leased_jobs FROM gpu_sessions s LEFT JOIN model_endpoints m USING(service_id) ORDER BY s.service_id`);
+  const rows=await query<any>(`SELECT s.*,m.username,m.endpoint_url,m.api_key,m.gpu_name,m.extra_meta,(SELECT count(*)::int FROM gpu_leases l WHERE l.service_id=s.service_id) AS leased_jobs FROM gpu_sessions s LEFT JOIN model_endpoints m USING(service_id) ORDER BY s.service_id`);
   return await Promise.all(rows.map(async(row)=>{
     let live:any=null;let availability='Unknown';
     let legacyActive=false;
@@ -147,10 +156,21 @@ export async function gpuDashboard() {
     if(['ON','INITIALIZING'].includes(row.state) && row.endpoint_url) {
       try {
         const r=await fetch(row.endpoint_url+'/v1/telemetry',{signal:AbortSignal.timeout(4000),headers:{Authorization:`Bearer ${row.api_key}`}});
-        if(r.ok){live=await r.json();availability='Available';await query('UPDATE gpu_sessions SET telemetry=$2::jsonb,telemetry_at=NOW() WHERE service_id=$1',[row.service_id,JSON.stringify(live)]);}
+        if(r.ok){live=await r.json();if(!Array.isArray(live?.gpus)||!live.gpus.length||!Number.isFinite(Number(live.measured_at))||Math.abs(Date.now()/1000-Number(live.measured_at))>60)throw Error('Invalid or stale device telemetry');availability='Available';await recordGpuObservation(row.service_id,String(row.username || '').toLowerCase(),live);await query('UPDATE gpu_sessions SET telemetry=$2::jsonb,telemetry_at=NOW() WHERE service_id=$1',[row.service_id,JSON.stringify(live)]);}
         else availability='Unavailable';
-      }catch{availability='Unavailable';}
+      }catch{live=null;availability='Unavailable';}
     } else if(row.state==='OFF') availability='Not allocated; Kaggle availability checked at startup';
-    return {service_id:row.service_id,status:legacyActive?'ON':row.state==='ON'?'ON':row.state==='INITIALIZING'?'STARTING':row.state,availability:legacyActive?'Available (legacy unmanaged)':availability,gpu_name:live?.gpus?.map((g:any)=>g.name).join(', ') || null,telemetry:live,active_jobs:live?.active_jobs ?? null,queued_or_leased_jobs:row.leased_jobs,current_task:live?.current_tasks || [],session_duration_sec:row.started_at && row.state!=='OFF'?Math.max(0,Math.floor((Date.now()-new Date(row.started_at).getTime())/1000)):null,last_shutdown:row.last_shutdown_at,error:legacyActive?'Legacy worker is still active and does not implement safe shutdown. One-time Kaggle session cleanup is required; this is not OFF.':row.error,telemetry_is_live:Boolean(live),session_status:row.session_status};
+    if(!live && ['ON','INITIALIZING','STOPPING','ERROR'].includes(row.state)) {
+      const profile=GPU_PROFILES.find(p=>p.account===String(row.username || '').toLowerCase());
+      if(profile?.kernel_ref && process.env[profile.token_env])try {
+        const [user,slug]=profile.kernel_ref.split('/');
+        const r=await fetch(`https://www.kaggle.com/api/v1/kernels/status?userName=${user}&kernelSlug=${slug}`,{signal:AbortSignal.timeout(5000),headers:{Authorization:`Bearer ${process.env[profile.token_env]}`}});
+        if(r.ok){const k:any=await r.json();if(['complete','completed','cancelacknowledged','canceled','cancelled','error','failed'].includes(String(k.status).toLowerCase())){
+          await query(`UPDATE gpu_sessions SET state='OFF',session_status=$2,telemetry=NULL,telemetry_at=NULL WHERE service_id=$1 AND worker_started_at=$3`,[row.service_id,String(k.status),row.worker_started_at]);
+          row.state='OFF';availability='Provider confirms session terminated';
+        }}
+      }catch{}
+    }
+    return {service_id:row.service_id,account:row.username?.toLowerCase() || null,status:legacyActive?'ON':row.state==='ON'?(live?'ON':'UNKNOWN'):row.state==='INITIALIZING'?'STARTING':row.state,availability:legacyActive?'Available (legacy unmanaged)':availability,gpu_name:live?.gpus?.map((g:any)=>g.name).join(', ') || null,telemetry:live,active_jobs:live?.active_jobs ?? null,queued_or_leased_jobs:row.leased_jobs,current_task:live?.current_tasks || [],session_duration_sec:row.started_at && row.state!=='OFF'?Math.max(0,Math.floor((Date.now()-new Date(row.started_at).getTime())/1000)):null,last_shutdown:row.last_shutdown_at,error:legacyActive?'Legacy worker is still active and does not implement safe shutdown. One-time Kaggle session cleanup is required; this is not OFF.':row.error,telemetry_is_live:Boolean(live),session_status:row.session_status};
   }));
 }

@@ -1,25 +1,39 @@
 import React,{useEffect,useState} from 'react';
+const hours=(s:any)=>typeof s==='number'?(s/3600).toFixed(2)+' h':'Not verified';
 export function GpuMonitor(){
- const [workers,setWorkers]=useState<any[]>([]);const [error,setError]=useState('');
+ const [data,setData]=useState<any>(null),[error,setError]=useState(''),[selected,setSelected]=useState('video-primary');
  useEffect(()=>{
-  let alive=true;let controller:AbortController|undefined;
+  let alive=true,timer:ReturnType<typeof setTimeout>;const controller=new AbortController();
   async function refresh(){
-   controller?.abort();controller=new AbortController();
-   try{const r=await fetch('/api/gpu',{signal:controller.signal});if(!r.ok)throw new Error(`Telemetry HTTP ${r.status}`);const d=await r.json();if(alive){setWorkers(d.workers || []);setError('');}}
-   catch(e:any){if(alive && e.name!=='AbortError'){setError('Live telemetry unavailable');setWorkers(old=>old.map(w=>({...w,telemetry:null,telemetry_is_live:false})));}}
+   try{const r=await fetch('/api/gpu',{signal:controller.signal,cache:'no-store'});if(!r.ok)throw Error();const d=await r.json();if(alive){setData(d);setError('');}}
+   catch(e:any){if(alive&&e.name!=='AbortError')setError('Live status unavailable — last measurements are stale.');}
+   finally{if(alive)timer=setTimeout(refresh,5000);}
   }
-  refresh();const timer=setInterval(refresh,6000);return()=>{alive=false;clearInterval(timer);controller?.abort();};
+  refresh();return()=>{alive=false;clearTimeout(timer);controller.abort();};
  },[]);
- const value=(n:any,unit='')=>typeof n==='number'?`${n}${unit}`:'Unavailable';
- return <section className="rounded-2xl border border-zinc-800 bg-zinc-900/70 p-5 space-y-4" data-testid="gpu-monitor">
-  <div><h2 className="font-bold">GPU lifecycle &amp; live monitoring</h2><p className="text-xs text-zinc-400">Kaggle allocates accelerators on demand. Idle browsing and caption analysis never start a GPU. Cold-start time and quota depend on Kaggle.</p></div>
-  {error && <p className="text-sm text-amber-300">{error} — previous measurements are not shown as live.</p>}
-  <div className="grid md:grid-cols-2 gap-4">{workers.map(w=><article key={w.service_id} className="border border-zinc-700 rounded-xl p-4 space-y-3">
-   <div className="flex justify-between"><strong>{w.service_id==='minimax_h3_ref2va'?'Video GPU':'Music GPU'}</strong><span className={w.status==='ON'?'text-emerald-400':'text-zinc-300'}>{w.status}</span></div>
-   <p className="text-sm">{w.gpu_name || 'GPU not allocated'}{w.status==='OFF' && w.gpu_name?' (last detected)':''}</p>
-   <dl className="text-xs grid grid-cols-2 gap-2"><dt>Availability</dt><dd>{w.availability}</dd><dt>Active GPU jobs</dt><dd>{w.active_jobs ?? 'Not measured'} · {w.queued_or_leased_jobs} pending leases</dd><dt>Current task</dt><dd>{w.status==='OFF'?'Inactive':w.current_task?.join(', ') || 'Waiting for worker'}</dd><dt>Session duration</dt><dd>{w.session_duration_sec==null?(w.status==='OFF'?'Inactive':'Not measured'):`${w.session_duration_sec}s`}</dd><dt>Last shutdown</dt><dd>{w.last_shutdown?new Date(w.last_shutdown).toLocaleString():'Not recorded'}</dd><dt>Measurement</dt><dd>{w.telemetry_is_live?new Date(w.telemetry.measured_at*1000).toLocaleTimeString():w.status==='OFF'?'GPU OFF — no live measurements':'No live measurement'}</dd></dl>
-   {w.telemetry_is_live && w.telemetry.gpus?.map((g:any)=><div key={g.index} className="text-xs border-t border-zinc-800 pt-2 space-y-1"><p>GPU {g.index}: {g.name}</p><p>Utilization: {value(g.utilization_percent,'%')} · VRAM: {value(g.memory_used_mib)} / {value(g.memory_total_mib,' MiB')}</p><p>Temperature: {value(g.temperature_c,' °C')}</p></div>)}
-   {w.error && <p className="text-xs text-amber-300">{w.error}</p>}
-  </article>)}</div>
+ const cards=data?.fleet || [];
+ const quota=cards.find((p:any)=>p.id===selected)?.weekly;
+ const verified=!error&&quota?.quota_verified;
+ const remainingPercent=verified?Math.max(0,Math.min(100,100*quota.provider_remaining_seconds/quota.provider_total_seconds)):0;
+ return <section className="rounded-2xl border border-zinc-800 bg-zinc-900/70 p-5 space-y-5" data-testid="gpu-monitor" aria-label="GPU fleet and weekly allocation">
+  <header className="flex flex-wrap justify-between gap-3"><div><h2 className="font-bold text-lg">GPU fleet &amp; weekly allocation</h2><p className="text-xs text-zinc-400 mt-1">Live device measurements · refreshes every 5 seconds · safe shutdown after persisted output</p></div><span className={error?'text-amber-300 text-xs':'text-emerald-400 text-xs'}>{error?'Telemetry stale':data?'Monitoring connected':'Connecting to telemetry'}</span></header>
+  <div className="rounded-xl border border-zinc-700 p-4 space-y-3"><div className="flex flex-wrap justify-between gap-2"><strong className="text-sm">Weekly GPU hours remaining</strong><select aria-label="GPU account for weekly quota" className="bg-zinc-800 rounded px-2 py-1 text-xs" value={selected} onChange={e=>setSelected(e.target.value)}>{cards.map((p:any)=><option key={p.id} value={p.id}>{p.role} {p.priority} · {p.account}</option>)}</select></div>
+   <div className="h-3 rounded-full bg-zinc-800 overflow-hidden" role="progressbar" aria-label={verified?'Provider weekly hours remaining':'Remaining weekly hours unverified'} aria-valuemin={0} aria-valuemax={verified?quota.provider_total_seconds/3600:30} aria-valuenow={verified?quota.provider_remaining_seconds/3600:undefined}><div className={'h-full transition-all '+(verified?'bg-emerald-400':'bg-amber-500/20')} style={{width:verified?remainingPercent+'%':'100%'}} /></div>
+   <div className="grid grid-cols-3 gap-3 text-sm"><div><p className="text-zinc-400 text-xs">Provider total</p><strong>{hours(verified?quota.provider_total_seconds:null)}</strong></div><div><p className="text-zinc-400 text-xs">Provider used</p><strong>{hours(verified?quota.provider_used_seconds:null)}</strong></div><div><p className="text-zinc-400 text-xs">Remaining, unreserved</p><strong className={verified?'text-emerald-300':'text-amber-300'}>{hours(verified?quota.provider_remaining_seconds:null)}</strong></div></div>
+   <p className="text-xs text-zinc-400">{verified?`Reserved: ${hours(quota.reserved_seconds)} · Resets ${new Date(quota.refresh_at).toLocaleString()} · Quota checked ${new Date(quota.verified_at).toLocaleTimeString()}`:'Provider quota not verified. The bar is unknown, not a full balance.'}</p>
+   <p className="text-xs text-amber-200/80">Provider balances are per account, not pooled. Quota refreshes every 60 seconds; allocated idle time can consume quota. Accounts must not be rotated to bypass provider limits.</p>
+  </div>
+  {error&&<p role="alert" className="text-sm text-amber-300">{error}</p>}
+  <div className="grid md:grid-cols-2 gap-4">{cards.map((p:any)=>{
+   const w=p.worker;const live=!error&&p.telemetry_is_live;const status=error?'UNKNOWN':p.status;
+   return <article key={p.id} className="border border-zinc-700 rounded-xl p-4 space-y-3">
+    <div className="flex items-center justify-between gap-2"><strong className="capitalize">{p.role} · {p.priority}</strong><span className={'rounded-full px-2 py-1 text-xs '+(status==='ON'&&live?'bg-emerald-500/15 text-emerald-300':'bg-zinc-800 text-zinc-300')}>{status==='ON'&&!live?'ON — telemetry unavailable':status.replaceAll('_',' ')}</span></div>
+    <p className="text-xs text-zinc-400">Account: {p.account}</p><h3 className="font-semibold">{live?p.gpu_name || 'Hardware not reported':status==='OFF'?'GPU OFF · not allocated':'GPU hardware not verified'}</h3>
+    <dl className="text-xs grid grid-cols-2 gap-2"><dt>Provider total / used</dt><dd>{hours(!error?p.weekly.provider_total_seconds:null)} / {hours(!error?p.weekly.provider_used_seconds:null)}</dd><dt>Observed usage</dt><dd>{hours(p.weekly.observed_seconds)}</dd><dt>Actual remaining</dt><dd className="text-amber-300">{hours(!error&&p.weekly.quota_verified?p.weekly.provider_remaining_seconds:null)}</dd><dt>Current task</dt><dd>{live?w.current_task?.join(', ') || 'Idle':p.provisioning}</dd><dt>Session duration</dt><dd>{live&&w.session_duration_sec!=null?Math.floor(w.session_duration_sec/60)+' min':'Not measured'}</dd><dt>Rotation target</dt><dd>30 active minutes · safe task boundary</dd><dt>Last confirmed shutdown</dt><dd>{w?.last_shutdown?new Date(w.last_shutdown).toLocaleString():'Not recorded'}</dd></dl>
+    {live&&w.telemetry?.gpus?.map((g:any)=><div key={g.index} className="text-xs border-t border-zinc-800 pt-2"><p>Device {g.index}: {g.name}</p><p>Utilization {g.utilization_percent ?? '?'}% · VRAM {g.memory_used_mib ?? '?'} / {g.memory_total_mib ?? '?'} MiB</p></div>)}
+    {w?.error&&<p className="text-xs text-amber-300">{w.error}</p>}
+   </article>;
+  })}</div>
+  {!data&&<p className="text-sm text-zinc-400">Reading actual worker state. Viewing this panel never activates a GPU.</p>}
  </section>;
 }
