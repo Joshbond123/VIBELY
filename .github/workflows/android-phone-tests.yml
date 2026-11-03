@@ -16,7 +16,7 @@ on:
       packages:
         description: 'Comma separated Play packages to install (first not-installed wins)'
         required: false
-        default: 'org.billthefarmer.notes,com.simplemobiletools.calculator'
+        default: 'org.wikipedia,com.duckduckgo.mobile.android'
         type: string
       rotate_after_install:
         description: 'Rotate the emulator workflow and verify persistence'
@@ -51,7 +51,7 @@ jobs:
     timeout-minutes: 180
     env:
       GATEWAY: ${{ inputs.gateway_url || 'https://android.aivideo.blitz.cloud' }}
-      PACKAGES: ${{ inputs.packages || 'org.billthefarmer.notes,com.simplemobiletools.calculator' }}
+      PACKAGES: ${{ inputs.packages || 'org.wikipedia,com.duckduckgo.mobile.android' }}
       ROTATE: ${{ inputs.rotate_after_install || 'true' }}
       WAIT_MINUTES: ${{ inputs.wait_minutes || '40' }}
       GH_TOKEN_FOR_DISPATCH: ${{ secrets.GH_PAT || secrets.GITHUB_TOKEN }}
@@ -91,9 +91,14 @@ jobs:
         continue-on-error: true
         run: |
           PKG=$(echo "${PACKAGES}" | cut -d, -f1 | xargs)
+          set +e
           python3 android-emulator/play_install_test.py --gateway "${GATEWAY}" --package "$PKG" \
-            --timeout 900 --json /tmp/install_test_1.json | tee /tmp/install_test_1.log
-          echo "exit=$?" >> "$GITHUB_OUTPUT"
+            --timeout 900 --json /tmp/install_test_1.json > /tmp/install_test_1.log 2>&1
+          RC=$?
+          set -e
+          cat /tmp/install_test_1.log
+          echo "exit=${RC}" >> "$GITHUB_OUTPUT"
+          [[ "$RC" == "0" ]]
 
       - name: Real Play Store install test (package 2)
         id: install2
@@ -101,8 +106,13 @@ jobs:
         run: |
           PKG=$(echo "${PACKAGES}" | cut -d, -f2 | xargs)
           if [[ -z "$PKG" ]]; then echo "No second package configured"; exit 0; fi
+          set +e
           python3 android-emulator/play_install_test.py --gateway "${GATEWAY}" --package "$PKG" \
-            --timeout 900 --json /tmp/install_test_2.json | tee /tmp/install_test_2.log
+            --timeout 900 --json /tmp/install_test_2.json > /tmp/install_test_2.log 2>&1
+          RC=$?
+          set -e
+          cat /tmp/install_test_2.log
+          [[ "$RC" == "0" ]]
 
       - name: Capture phone screenshot as evidence
         if: always()
@@ -152,6 +162,20 @@ jobs:
               --json "${f%.json}_after_rotation.json" | tee "${f%.json}_verify.log" || echo "::warning::persistence verification reported a failure for $f"
           done
 
+      - name: Post-rotation install of a new app (installs keep working after rotation)
+        if: ${{ env.ROTATE == 'true' && steps.rotate.outputs.new_session != '' }}
+        continue-on-error: true
+        run: |
+          PKG=$(echo "${PACKAGES}" | cut -d, -f2 | xargs)
+          [[ -z "$PKG" ]] && PKG=com.spotify.music
+          set +e
+          python3 android-emulator/play_install_test.py --gateway "${GATEWAY}" --package "$PKG" \
+            --timeout 900 --json /tmp/install_test_after_rotation.json > /tmp/install_test_after_rotation.log 2>&1
+          RC=$?
+          set -e
+          cat /tmp/install_test_after_rotation.log
+          [[ "$RC" == "0" ]]
+
       - name: Post-rotation device state
         if: always()
         run: |
@@ -186,4 +210,9 @@ jobs:
             done
             echo ""
             echo "Rotation new session: ${{ steps.rotate.outputs.new_session }}"
+            for f in /tmp/install_test_after_rotation.json; do
+              [[ -f "$f" ]] || continue
+              jq -r '"post-rotation install: \(.package) -> \(.result) (installed=\(.phases.install.installed // "n/a"))"' "$f" >> "$GITHUB_STEP_SUMMARY"
+            done
+            jq -r '"rotation_count: \(.rotation_count // "n/a")  previous_session: \(.rotation_history[0][0].previous_session_id // "n/a")"' /tmp/status_after.json >> "$GITHUB_STEP_SUMMARY" 2>/dev/null || true
           } >> "$GITHUB_STEP_SUMMARY"
