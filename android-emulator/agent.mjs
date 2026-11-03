@@ -1,3 +1,43 @@
+  /**
+   * A STABLE fingerprint of user-visible phone state.
+   *
+   * The old version hashed `settings list secure | head -80`, whose first 80 keys
+   * include values Android rewrites on its own (notification churn, accessibility
+   * bookkeeping, adb timestamps). The fingerprint therefore changed on almost every
+   * poll, every debounce ended in "Fingerprint still changing", and a real install
+   * or permission grant was never checkpointed. That is why changes could vanish at
+   * the next rotation.
+   *
+   * Only genuinely meaningful, deterministic state is included here.
+   */
+  const STABLE_SECURE_KEYS = [
+    'user_setup_complete', 'device_provisioned', 'adb_enabled', 'ui_night_mode',
+    'accessibility_enabled', 'enabled_notification_listeners', 'default_input_method',
+  ];
+  async function fingerprintPhoneState() {
+    try {
+      const pkgs = (await adbShell('pm list packages -3', 20000)).stdout.trim().split(/\n+/).filter(Boolean).sort().join('|');
+      let accounts = '0';
+      try {
+        const acc = (await adbShell('dumpsys account', 25000)).stdout;
+        const m = acc.match(/Accounts:\s*(\d+)/);
+        accounts = m ? m[1] : '0';
+        const names = [...acc.matchAll(/Account \{name=([^,]+)/g)].map((x) => x[1]).sort().join(',');
+        if (names) accounts += ':' + names;
+      } catch (_) {}
+      const settingsParts = [];
+      for (const key of STABLE_SECURE_KEYS) {
+        try {
+          const v = (await adbShell(`settings get secure ${key}`, 12000)).stdout.trim();
+          settingsParts.push(`${key}=${v}`);
+        } catch (_) {}
+      }
+      return `a=${accounts}||p=${pkgs}||s=${settingsParts.join(';')}`;
+    } catch (e) {
+      return 'err:' + e.message;
+    }
+  }
+
 import {startLiveDevice} from './live-device.mjs';
 import { spawn, execFile } from 'child_process';
 import { promisify } from 'util';
@@ -85,6 +125,7 @@ let pendingChangeFp = '';
 let lastAdbHealthyAt = Date.now();
 let lastDutyTickAt = Date.now();
 let lastEncodedPacketAt = 0;
+let pendingChangeSince = Date.now();
 let lastLiveInputAt = 0;
 
 const pendingLogLines = [];
@@ -1723,6 +1764,7 @@ async function main() {
         // unpersisted change must not, or the 180s quiet gate could never open.
         if (fp !== pendingChangeFp) {
           pendingChangeFp = fp;
+          pendingChangeSince = Date.now();
           lastGuestChangeAt = Date.now();
         }
         const busy = await isGuestBusyForPersist();
@@ -1735,7 +1777,12 @@ async function main() {
             const busy2 = await isGuestBusyForPersist();
             if (busy2) { log('Still busy after debounce (' + busy2 + ') — retry next cycle'); return; }
             const fp2 = await fingerprintPhoneState();
-            if (fp2 !== pendingChangeFp) { log('Fingerprint still changing — wait next cycle'); return; }
+            const pendingAge = Date.now() - pendingChangeSince;
+            if (fp2 !== pendingChangeFp && pendingAge < 10 * 60 * 1000) {
+              log('Fingerprint still changing — wait next cycle');
+              return;
+            }
+            if (fp2 !== pendingChangeFp) log('Fingerprint keeps moving but the change is 10+ minutes old — capturing what is on disk now.');
             log('Phone state stable — whole-AVD persist (rate limited; never mid-install)');
             const captured = await livePersist('change-triggered', { whole: true, hold: false });
             if (captured) {
