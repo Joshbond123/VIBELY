@@ -536,10 +536,11 @@ async function isGuestBusyForPersist() {
     if (/active=true|sealed=true|SessionId;i=0/i.test(inst) && !/No sessions/i.test(inst)) return 'package_installer';
     const act = (await adbShell('dumpsys activity activities 2>/dev/null | grep -iE "vending|PackageInstaller|Download" | head -25', 15000)).stdout || '';
     if (/DOWNLOADING|downloading|Installing|INSTALLING|Pending\.{0,3}$/i.test(act)) return 'play_or_installer_ui';
-    // A person browsing the store is about to install something; never freeze the
-    // guest out from under an open Play Store session.
-    const top = (await adbShell('dumpsys activity activities | grep -m1 topResumedActivity', 15000)).stdout || '';
-    if (/com\.android\.vending|com\.google\.android\.packageinstaller|packageinstaller/i.test(top)) return 'play_store_foreground';
+    // NOTE: an idle Play Store home/listing screen is NOT a reason to skip a
+    // capture. Blocking on it meant a session that ended on the store never
+    // persisted anything and lost every install at the next rotation. Only real
+    // transfer/install activity (checked above) defers a capture; the pause for a
+    // capture is a few seconds and the resume is verified.
   } catch (_) {}
   return null;
 }

@@ -148,9 +148,8 @@ def guest_install_busy():
         sessions = adb('dumpsys package installer 2>/dev/null | grep -iE "session|active=" | head -30')
         if re.search(r'active=true|sealed=true', sessions):
             return 'package_installer'
-        top = adb('dumpsys activity activities | grep -m1 topResumedActivity')
-        if re.search(r'com\.android\.vending|packageinstaller', top, re.I):
-            return 'play_store_foreground'
+        # An idle Play Store screen is not a reason to skip a checkpoint; only an
+        # actual download/install session defers it (checked above).
         return None
     except Exception:
         return None
