@@ -297,6 +297,16 @@ app.post('/api/videos/:id/social-metadata', async (req,res) => {
   } catch(e:any) {res.status(502).json({ok:false,error:e.message});}
 });
 
+// Recoverable visual-only asset; never mislabel it as completed final production.
+app.get('/api/videos/:id/visual-master',async(req,res)=>{
+  try {
+    const [row]=await query<any>(`SELECT r.receipt FROM gpu_output_receipts r JOIN video_generations v ON v.id=r.receipt->>'generation_id'
+      WHERE v.id=$1 AND v.deleted_at IS NULL AND r.receipt->>'artifact_role'='visual_master' LIMIT 1`,[req.params.id]);
+    if(!row){res.status(404).json({ok:false,error:'No persisted visual master'});return;}
+    res.json({ok:true,status:'visual_only_not_final',visual_master:row.receipt,url:'/media/videos/'+encodeURIComponent(row.receipt.file)});
+  }catch{res.status(500).json({ok:false,error:'Unable to read visual master'});}
+});
+
 app.delete('/api/videos/:id', async (req, res) => {
   try {
     const rows = await query<any>(`SELECT * FROM video_generations WHERE id = $1`, [req.params.id]);
@@ -306,7 +316,7 @@ app.delete('/api/videos/:id', async (req, res) => {
       return;
     }
     const videosDir = path.join(DATA_DIR, 'videos');
-    for (const fn of [row.video_file_name, row.thumbnail_file_name]) {
+    for (const fn of [row.video_file_name, row.thumbnail_file_name, `${row.id}_visual.mp4`]) {
       if (fn) {
         const fp = path.join(videosDir, path.basename(fn));
         if (fs.existsSync(fp)) {

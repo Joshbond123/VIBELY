@@ -149,7 +149,7 @@ export async function runAutomaticVideoDeletionSweep(dataDir: string): Promise<{
 
   for (const row of expiredRows) {
     const videosDir = path.join(dataDir, 'videos');
-    for (const fn of [row.video_file_name, row.thumbnail_file_name]) {
+    for (const fn of [row.video_file_name, row.thumbnail_file_name, `${row.id}_visual.mp4`]) {
       if (fn) {
         const fp = path.join(videosDir, path.basename(fn));
         if (fs.existsSync(fp)) {

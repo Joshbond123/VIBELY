@@ -1,3 +1,4 @@
+import {persistVisualMaster} from './visualMaster.js';
 import {assertActualVideoDuration} from './videoDuration.js';
 import crypto from 'crypto';
 import fs from 'fs';
@@ -622,6 +623,14 @@ async function executeAndFinalizeH3Video(opts: {
   await gpuEvent('minimax_h3_ref2va','SAVING',{job_id:genId});
   fs.writeFileSync(videoFilePath, Buffer.from(await mp4Resp.arrayBuffer()),{flush:true});
 
+  // Persist and decode an immutable visual master before waiting on the other GPU.
+  // The receipt is durably written before delivery; a failed delivery is retried,
+  // and the worker refuses shutdown until the receipt actually arrives.
+  const [visualPolicy]=await query<any>('SELECT min_duration_sec FROM video_generations WHERE id=$1',[genId]);
+  const visualReceipt=await persistVisualMaster(videoFilePath,videosDir,genId,Number(visualPolicy?.min_duration_sec || 20));
+  await acknowledgeGpuOutput('minimax_h3_ref2va',remoteVidJobId,visualReceipt);
+  await releaseGpuLease('minimax_h3_ref2va',genId);
+
   if (opts.musicPromise) {
     await updateVideoStage(genId,'rendering_final','Visual render complete; joining original music and validating output',95);
     const music=await opts.musicPromise;
@@ -717,7 +726,7 @@ async function executeAndFinalizeH3Video(opts: {
   if(!playback.ok) throw new Error(`Saved video is not publicly accessible: ${playback.status}`);
   const remotePrefix=Buffer.from(await playback.arrayBuffer()).subarray(0,4096);
   if(!remotePrefix.equals(fs.readFileSync(videoFilePath).subarray(0,4096))) throw new Error('Persistent playback bytes mismatch');
-  await acknowledgeGpuOutput('minimax_h3_ref2va',remoteVidJobId,{sha256:crypto.createHash('sha256').update(fs.readFileSync(videoFilePath)).digest('hex'),bytes:fs.statSync(videoFilePath).size,playable:true,file:videoFileName});
+  // Visual master was already acknowledged; do not contact a safely stopped GPU after CPU muxing.
   await releaseGpuJob(genId);
   await generateSocialMetadata(genId, dataDir).catch((e) => console.error('[Post-render captions]', genId, e.message));
 

@@ -63,3 +63,11 @@ The exhausted video-backup account cannot be used to validate both video install
 - No GPU was allocated by these quota or dashboard checks.
 
 Live deployment/UI verification is recorded in the shared workspace's final verification evidence. A successful build is not GPU or model acceptance.
+
+## Follow-up implementation
+
+The video GPU no longer waits for the independent music promise before it can be released. The backend now fully decodes, checks duration, atomically preserves and fsyncs an immutable visual master, records its durable receipt, and releases the video lease before waiting for music. Worker receipt delivery still gates shutdown. A visual-only recovery endpoint distinguishes that asset from a final production. Existing explicit deletion and retention policies also remove its paired master.
+
+A test with the real previously generated (rejected) 26-second video passed full decoding, duration/hash checks, idempotent persistence, path validation and invalid-file rejection. This is **not** a new generated or visually accepted video, nor a live GPU-shutdown test.
+
+The exact 12,741,204,960-byte Wan Q5 diffusion artifact was downloaded and SHA256-verified in private **CPU-only** kernels for both video accounts. Initial dataset publication failed because Kaggle returns HTTP 403 for an absent private dataset. The source was corrected to use a create-only operation; recovery publication reuses the already verified saved artifact rather than downloading it again from Hugging Face. Publication status must be confirmed separately. The cache contains only the diffusion checkpoint, not a complete installed encoder/VAE/renderer stack.
