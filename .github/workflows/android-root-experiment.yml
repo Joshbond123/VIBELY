@@ -67,6 +67,8 @@ jobs:
           sdkmanager --list_installed | head -20
 
       - name: Run root + disguise experiment
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -o pipefail
           python3 android-emulator/root_experiment.py 2>&1 | tee /tmp/root-experiment.log

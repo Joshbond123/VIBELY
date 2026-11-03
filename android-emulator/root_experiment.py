@@ -152,23 +152,63 @@ def launch_package(pkg: str) -> bool:
 
 
 # ---------------------------------------------------------------- phases
+
+def fetch_magisk(dest: str) -> None:
+    """Magisk publishes versioned asset names (Magisk-v28.x.apk), so resolve the
+    real URL from the releases API instead of guessing a fixed filename."""
+    api = "https://api.github.com/repos/topjohnwu/Magisk/releases/latest"
+    headers = {"User-Agent": "vibely-ci"}
+    token = os.environ.get("GITHUB_TOKEN")
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    try:
+        req = urllib.request.Request(api, headers=headers)
+        with urllib.request.urlopen(req, timeout=60) as r:
+            rel = json.loads(r.read().decode())
+        assets = [a for a in rel.get("assets", []) if a["name"].endswith(".apk")]
+        print(f"[magisk] release {rel.get('tag_name')} assets={[a['name'] for a in assets]}", flush=True)
+        for a in assets:
+            url = a["browser_download_url"]
+            run(["curl", "-sSL", "-o", dest, url], timeout=900)
+            if os.path.getsize(dest) > 5_000_000:
+                return
+    except Exception as exc:  # noqa: BLE001
+        print(f"[magisk] API resolve failed: {exc}", flush=True)
+    for url in ("https://github.com/topjohnwu/Magisk/releases/download/v28.1/Magisk-v28.1.apk",
+                "https://github.com/topjohnwu/Magisk/releases/download/v27.0/Magisk-v27.0.apk"):
+        run(["curl", "-sSL", "-o", dest, url], timeout=900)
+        if os.path.exists(dest) and os.path.getsize(dest) > 5_000_000:
+            return
+
+
 def phase_prepare() -> bool:
     os.makedirs(WORK, exist_ok=True)
     run([SDKMANAGER, "--install", SYSIMG, "platform-tools", "emulator"], timeout=1800)
     shutil.copy(os.path.join(IMG_DIR, "ramdisk.img"), os.path.join(WORK, "ramdisk-orig.img"))
     record("system image present", os.path.exists(os.path.join(IMG_DIR, "ramdisk.img")), IMG_DIR)
     run([AVDMANAGER, "delete", "avd", "-n", AVD], timeout=120)
-    p = run(f'echo no | "{AVDMANAGER}" create avd -n {AVD} -k "{SYSIMG}" -d pixel_6 --force', timeout=300)
-    record("AVD created", os.path.isdir(os.path.expanduser(f"~/.android/avd/{AVD}.avd")),
-           p.stderr[-300:])
+    os.makedirs(os.path.expanduser("~/.android/avd"), exist_ok=True)
+    attempts = [
+        f'echo no | "{AVDMANAGER}" create avd -n {AVD} -k "{SYSIMG}" -d pixel_6 --force',
+        f'echo no | "{AVDMANAGER}" create avd -n {AVD} -k "{SYSIMG}" --force',
+    ]
+    detail = ""
+    for cmd in attempts:
+        p = run(cmd, timeout=300)
+        detail = f"rc={p.returncode} out={p.stdout[-200:]} err={p.stderr[-300:]}".strip()
+        print("[avd]", detail, flush=True)
+        if os.path.isdir(os.path.expanduser(f"~/.android/avd/{AVD}.avd")):
+            break
+    record("AVD created", os.path.isdir(os.path.expanduser(f"~/.android/avd/{AVD}.avd")), detail)
     # rootAVD + Magisk
     if not os.path.isdir(os.path.join(WORK, "rootAVD")):
         run(f"git clone --depth 1 https://gitlab.com/newbit/rootAVD.git {WORK}/rootAVD", timeout=600)
-    run("curl -sSL -o /tmp/Magisk.apk "
-        "https://github.com/topjohnwu/Magisk/releases/latest/download/Magisk.apk", timeout=600)
     magisk = "/tmp/Magisk.apk"
-    ok = os.path.getsize(magisk) > 5_000_000
-    record("Magisk APK downloaded", ok, f"{os.path.getsize(magisk)} bytes")
+    if not (os.path.exists(magisk) and os.path.getsize(magisk) > 5_000_000):
+        fetch_magisk(magisk)
+    ok = os.path.exists(magisk) and os.path.getsize(magisk) > 5_000_000
+    record("Magisk APK downloaded", ok,
+           f"{(os.path.getsize(magisk) if os.path.exists(magisk) else 0)} bytes")
     shutil.copy(magisk, os.path.join(WORK, "rootAVD", "Magisk.zip"))
     run(f"chmod +x {WORK}/rootAVD/rootAVD.sh")
     return ok
