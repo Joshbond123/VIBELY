@@ -160,9 +160,10 @@ async function recoverAdbConnection() {
   try { await execFileAsync('adb', ['start-server'], { timeout: 20000 }); } catch (_) {}
   await sleep(1500);
   // Emulator console ports commonly used on Actions runners
-  for (const endpoint of ['127.0.0.1:5555', '127.0.0.1:5557', 'emulator-5554']) {
+  for (const endpoint of ['127.0.0.1:5555', '127.0.0.1:5557', 'emulator-5554', '127.0.0.1:5554']) {
     try { await execFileAsync('adb', ['connect', endpoint], { timeout: 8000 }); } catch (_) {}
   }
+  try { await execFileAsync('adb', ['reconnect', 'offline'], { timeout: 12000 }); } catch (_) {}
   try { await execFileAsync('adb', ['wait-for-device'], { timeout: 90000 }); } catch (e) { log('wait-for-device: ' + e.message); }
   // Prefer device state; do not leave adb as root (looks rooted + can desync serial)
   try { await execFileAsync('adb', ['unroot'], { timeout: 10000 }); } catch (_) {}
@@ -196,6 +197,43 @@ async function adbShell(cmd, timeout = 30000) {
   return { stdout: stdout || '', stderr: stderr || '' };
 }
 
+/** Detect Play/DownloadManager activity. Capture uses `avd stop` and freezes installs. */
+async function isGuestBusyForPersist() {
+  try {
+    const dl = (await adbShell('dumpsys download 2>/dev/null | head -100', 15000)).stdout || '';
+    if (/Status:\s*(190|192)|STATUS_RUNNING|STATUS_PENDING/i.test(dl)) return 'download_manager';
+    const act = (await adbShell('dumpsys activity activities 2>/dev/null | grep -iE "vending|PackageInstaller|Download" | head -25', 15000)).stdout || '';
+    if (/DOWNLOADING|downloading|Installing|INSTALLING/i.test(act)) return 'play_or_installer_ui';
+  } catch (_) {}
+  return null;
+}
+
+async function tunePlayStoreForEmulator() {
+  const cmds = [
+    'svc power stayon true',
+    'settings put global stay_on_while_plugged_in 7',
+    'settings put system screen_off_timeout 2147483647',
+    'settings put global package_verifier_enable 0',
+    'settings put global verifier_verify_adb_installs 0',
+    'cmd connectivity airplane-mode disable',
+    'svc wifi enable',
+    'cmd appops set com.android.vending RUN_IN_BACKGROUND allow',
+    'cmd appops set com.android.vending RUN_ANY_IN_BACKGROUND allow',
+    'cmd appops set com.google.android.gms RUN_IN_BACKGROUND allow',
+    'cmd appops set com.google.android.gms RUN_ANY_IN_BACKGROUND allow',
+    'cmd appops set com.android.providers.downloads RUN_IN_BACKGROUND allow',
+    'dumpsys deviceidle whitelist +com.android.vending',
+    'dumpsys deviceidle whitelist +com.google.android.gms',
+    'dumpsys deviceidle whitelist +com.android.providers.downloads',
+    'dumpsys deviceidle whitelist +com.google.android.gsf',
+    'cmd deviceidle disable',
+  ];
+  for (const c of cmds) {
+    try { await adbShell(c, 12000); } catch (_) {}
+  }
+  log('Play Store install-path tuning applied (accounts/data preserved)');
+}
+
 let adoptedRecoveryCheckpoint=false;
 
 // Serialize whole-AVD checkpoints so live saves never overlap/corrupt each other
@@ -205,6 +243,13 @@ async function saveWholeAvd(hold = false) {
     log('Whole-AVD checkpoint already in progress; waiting for it to finish...');
     try { await wholeAvdSaveInFlight; } catch (_) {}
     if (!hold) return; // skip non-hold duplicate; hold (rotation) always runs after
+  }
+  if (!hold) {
+    const busy = await isGuestBusyForPersist();
+    if (busy) {
+      log('Deferring whole-AVD capture — guest busy: ' + busy);
+      return;
+    }
   }
   const run = async () => {
     try {
@@ -781,7 +826,12 @@ async function main() {
   }
 
   // Immediate verified whole-AVD after promotion (must actually publish — no adopt-and-skip)
-  await livePersist('post-promotion', { whole: true, hold: false }).catch((e) => log(`Initial persist note: ${e.message}`));
+  await tunePlayStoreForEmulator().catch((e) => log('Play tune: ' + e.message));
+  {
+    const busy = await isGuestBusyForPersist();
+    if (busy) log('Skipping immediate post-promotion whole-AVD; guest busy: ' + busy);
+    else await livePersist('post-promotion', { whole: true, hold: false }).catch((e) => log(`Initial persist note: ${e.message}`));
+  }
 
   // PRIMARY persistence = change-triggered write-through (package/account/settings).
   // Secondary safety net = infrequent whole-AVD only if something was missed.
@@ -881,12 +931,25 @@ async function main() {
       if (!lastChangeFingerprint) {
         lastChangeFingerprint = fp;
       } else if (fp !== lastChangeFingerprint && !changePersistInFlight && !wholeAvdSaveInFlight) {
-        log('Phone state change detected — immediate whole-AVD persist');
-        lastChangeFingerprint = fp;
-        changePersistInFlight = true;
-        livePersist('change-triggered', { whole: true, hold: false })
-          .catch((e) => log(`Change-triggered persist warning: ${e.message}`))
-          .finally(() => { changePersistInFlight = false; lastWholeAvdMs = Date.now(); });
+        const busy = await isGuestBusyForPersist();
+        if (busy) {
+          log('State changed but Play/download busy (' + busy + ') — defer persist');
+        } else {
+          const pendingFp = fp;
+          lastChangeFingerprint = fp;
+          changePersistInFlight = true;
+          (async () => {
+            await sleep(90000);
+            const busy2 = await isGuestBusyForPersist();
+            if (busy2) { log('Still busy after debounce (' + busy2 + ') — skip'); return; }
+            const fp2 = await fingerprintPhoneState();
+            if (fp2 !== pendingFp) { log('Fingerprint still changing — wait next cycle'); lastChangeFingerprint = fp2; return; }
+            log('Phone state stable — whole-AVD persist');
+            await livePersist('change-triggered', { whole: true, hold: false });
+          })()
+            .catch((e) => log(`Change-triggered persist warning: ${e.message}`))
+            .finally(() => { changePersistInFlight = false; lastWholeAvdMs = Date.now(); });
+        }
       }
     } catch (e) {
       log('Change fingerprint warning: ' + e.message);
