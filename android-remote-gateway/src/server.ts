@@ -802,7 +802,7 @@ app.post('/api/internal/recovery/rpc', requireGatewayAuth, async (req: Request, 
   if(!session || session.ws.readyState!==WebSocket.OPEN){res.status(503).json({ok:false,error:'Specified recovery session is disconnected'});return;}
   const command=String(req.body?.command || '');
   if(!command || command.length>4096){res.status(400).json({ok:false,error:'Invalid recovery command'});return;}
-  try{const out=await callAgentRpc(session,'adb_shell',{command},45000);res.json({ok:true,session_id:id,...out});}
+  try{const out=await callAgentRpc(session,'adb_shell',{command},120000);res.json({ok:true,session_id:id,...out});}
   catch(err:any){res.status(502).json({ok:false,error:err?.message || 'Recovery RPC failed'});}
 });
 
@@ -818,7 +818,7 @@ app.post('/api/adb/shell', requireUserAuth, async (req: Request, res: Response) 
     return;
   }
   try {
-    const out = await callAgentRpc(active, 'adb_shell', { command }, 45000);
+    const out = await callAgentRpc(active, 'adb_shell', { command }, 120000);
     res.json({ ok: true, session_id: active.sessionId, ...out });
   } catch (err: any) {
     res.status(500).json({ ok: false, error: err?.message || String(err) });

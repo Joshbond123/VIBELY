@@ -73,6 +73,8 @@ const EMERGENCY_EMPTY_ONLY = String(process.env.EMULATOR_EMPTY_GATEWAY_ONLY || '
 // Short enough that a fresh install/download is durable within ~10 minutes, long
 // enough that the (short) vCPU pause happens rarely. Every capture is still gated
 // on no viewer, no download/install and 2 minutes of quiet.
+// A live viewer may delay a capture but never indefinitely (bounds state loss).
+const VIEWER_CAPTURE_GRACE_MS = 12 * 60 * 1000;
 const WHOLE_AVD_MIN_INTERVAL_MS = Math.max(5, Number(process.env.WHOLE_AVD_MIN_INTERVAL_MIN || 10)) * 60 * 1000;
 const INSTALL_TEST_PACKAGE = (process.env.VIBELY_INSTALL_TEST_PACKAGE || '').trim();
 // A run only boots when the workflow coordination decided it should, so a booted
@@ -451,7 +453,12 @@ async function restartEmulatorLocally(reason = 'adb-lost') {
       '-no-snapshot-load', '-no-snapshot-save', '-gpu', 'swiftshader_indirect',
       '-camera-back', 'emulated', '-camera-front', 'emulated',
       '-dns-server', '8.8.8.8,1.1.1.1', '-netdelay', 'none', '-netspeed', 'full',
-      '-memory', '4096', '-cores', '4',
+      '-memory', '6144', '-cores', '4',
+      // Same boot properties as the workflow launch, so a self-healed emulator keeps
+      // the slow-device timeout scaling and the verify-only install filter.
+      '-prop', 'ro.hw_timeout_multiplier=10',
+      '-prop', 'pm.dexopt.install=verify',
+      '-prop', 'ro.product.model=Pixel_6',
     ];
     let logFd;
     try { logFd = fs.openSync(EMULATOR_RESTART_LOG, 'a'); } catch (_) { logFd = 'ignore'; }
@@ -575,6 +582,14 @@ async function isGuestBusyForPersist() {
     if (/\bactive=true\b|\bsealed=true\b/i.test(sessions)) return 'package_installer_session';
     const inst = (await adbShell('dumpsys package installer 2>/dev/null | grep -iE "sessionId|Session [0-9]|active|staged" | head -20', 15000)).stdout || '';
     if (/active=true|sealed=true|SessionId;i=0/i.test(inst) && !/No sessions/i.test(inst)) return 'package_installer';
+    // Google Play downloads its APKs itself (no DownloadManager entry, and the
+    // installer session only appears at commit time), so a 179MB TikTok transfer
+    // looked "idle" and a whole-AVD capture could pause it. Ask the two places
+    // Play does report progress: its download notification and its service list.
+    const notif = (await adbShell('dumpsys notification --noredact 2>/dev/null | grep -iE "android\\.(title|text)=.*(download|install)" | head -20', 15000)).stdout || '';
+    if (/download|install/i.test(notif)) return 'play_transfer_notification';
+    const svc = (await adbShell('dumpsys activity services com.android.vending 2>/dev/null | grep -iE "Download|Install" | head -20', 15000)).stdout || '';
+    if (/download|install/i.test(svc)) return 'play_download_service';
     const act = (await adbShell('dumpsys activity activities 2>/dev/null | grep -iE "vending|PackageInstaller|Download" | head -25', 15000)).stdout || '';
     if (/DOWNLOADING|downloading|Installing|INSTALLING|Pending\.{0,3}$/i.test(act)) return 'play_or_installer_ui';
     // NOTE: an idle Play Store home/listing screen is NOT a reason to skip a
@@ -861,9 +876,18 @@ async function runStateManager(mode, opts = {}) {
         }
         const busy = await isGuestBusyForPersist();
         if (busy) { log(`Whole-AVD capture deferred (guest busy: ${busy}); installs/downloads must not be frozen.`); return false; }
-        // Do not freeze a phone somebody is actively watching/using.
+        // Do not freeze a phone somebody is actively watching/using -- but a viewer
+        // must not block the authoritative capture indefinitely: that is how the
+        // TikTok install and every change after 18:00 were lost from the state
+        // generation. Once a change has been unpersisted past the grace window we
+        // capture anyway (seconds of viewer stutter beats losing installed apps).
         const viewers = await activeViewerCount();
-        if (viewers > 0) { log(`Whole-AVD capture deferred (${viewers} live viewer attached).`); return false; }
+        const pendingMs = pendingChangeSince ? Date.now() - pendingChangeSince : 0;
+        if (viewers > 0 && pendingMs < VIEWER_CAPTURE_GRACE_MS) {
+          log(`Whole-AVD capture deferred (${viewers} live viewer attached; change pending ${Math.round(pendingMs/1000)}s, forcing at ${Math.round(VIEWER_CAPTURE_GRACE_MS/1000)}s).`);
+          return false;
+        }
+        if (viewers > 0) log(`Whole-AVD capture proceeding despite ${viewers} viewer(s): change unpersisted ${Math.round(pendingMs/60000)}min (grace ${Math.round(VIEWER_CAPTURE_GRACE_MS/60000)}min).`);
         const quietSec = Math.round((Date.now() - lastGuestChangeAt) / 1000);
         if (quietSec < 120) { log(`Whole-AVD capture deferred (guest changed ${quietSec}s ago; need 120s of quiet).`); return false; }
       }
@@ -1735,8 +1759,13 @@ async function main() {
       lastPlayGateCheckMs = Date.now();
       try {
         const top = (await adbShell('dumpsys activity activities | grep -m1 topResumedActivity', 15000)).stdout || '';
-        if (/com\.android\.vending|packageinstaller/i.test(top)) {
+        // uiautomator dump() is a heavy accessibility traversal; running it while a
+        // 179MB install is expanding is exactly what made the guest look frozen.
+        const busyNow = await isGuestBusyForPersist();
+        if (/com\.android\.vending|packageinstaller/i.test(top) && !busyNow) {
           await dismissPlayStoreBlockers('duty-loop');
+        } else if (busyNow) {
+          log(`Play gate check skipped (guest busy: ${busyNow}).`);
         }
       } catch (_) {}
     }
