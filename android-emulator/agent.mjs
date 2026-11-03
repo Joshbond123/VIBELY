@@ -849,11 +849,23 @@ async function livePersist(reason = 'periodic', { whole = false, hold = false, f
     log(`Live persist warning (${reason}): ${e.message}`);
   }
   log(`Live persist done (${reason})`);
-  // A checkpoint pauses the guest; if it did not come back, bring the phone back
-  // immediately instead of waiting for the supervisor to notice.
-  if (captured && process.env.GITHUB_AVD_ONLY === 'true' && !(await deviceOnline())) {
-    log('Post-capture check: guest is not answering adb - relaunching the emulator now.');
-    setTimeout(() => { restartEmulatorLocally('post-capture-guest-dead').catch(() => {}); }, 500);
+  // A checkpoint pauses the vCPU while several GB are copied, so the guest needs a
+  // moment to answer adb again. A single failed probe used to relaunch (=pkill)
+  // the emulator immediately, which killed healthy sessions right after a capture.
+  // Require a sustained outage before taking that drastic step.
+  if (captured && process.env.GITHUB_AVD_ONLY === 'true') {
+    let up = false;
+    for (let i = 0; i < 6 && !up; i++) {
+      if (i) await sleep(15000);
+      up = await deviceOnline();
+      if (!up) log(`Post-capture check ${i + 1}/6: adb not answering yet (guest resuming after the capture).`);
+    }
+    if (!up) {
+      log('Post-capture check: guest did not come back after 90s - relaunching the emulator.');
+      setTimeout(() => { restartEmulatorLocally('post-capture-guest-dead').catch(() => {}); }, 500);
+    } else {
+      log('Post-capture check: guest answering adb again.');
+    }
   }
   return captured;
 }
