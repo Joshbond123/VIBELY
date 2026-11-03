@@ -465,9 +465,16 @@ let lastGuestChangeAt = Date.now();
 
 /** Suppress whole-AVD captures while a critical live operation runs (e.g. the
  * Play Store install test), because a capture pauses the guest. */
-function withPersistLease(ms, fn) {
+async function withPersistLease(ms, fn) {
+  const prev = persistLeaseUntil;
   persistLeaseUntil = Math.max(persistLeaseUntil, Date.now() + ms);
-  return fn();
+  try {
+    return await fn();
+  } finally {
+    // Release immediately when the critical section ends so the change it made
+    // (e.g. a finished Play install) is persisted without waiting for the full lease.
+    persistLeaseUntil = prev;
+  }
 }
 
 async function activeViewerCount() {
