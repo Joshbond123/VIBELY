@@ -121,6 +121,13 @@ def patch(src: str) -> bool:
             return False
         shutil.copy(s, os.path.join(payload, tool))
         os.chmod(os.path.join(payload, tool), 0o755)
+    # unzip puts stub.apk under assets/, boot_patch.sh expects it in the CWD
+    stub = os.path.join(payload, "assets", "stub.apk")
+    if os.path.exists(stub):
+        shutil.copy(stub, os.path.join(payload, "stub.apk"))
+    else:
+        log(f"ERROR: stub.apk missing from APK payload ({os.listdir(payload)})")
+        return False
 
     magiskboot = os.path.join(payload, "magiskboot")
     raw = os.path.join(rd, "ramdisk.cpio")
@@ -149,7 +156,10 @@ def patch(src: str) -> bool:
     # is never placed on PATH (avdroot documents this exact failure mode).
     for tool, out in (("magisk", "magisk.xz"), ("init-ld", "init-ld.xz"),
                       ("stub.apk", "stub.xz")):
-        run([magiskboot, "compress=xz", os.path.join(payload, tool), out], cwd=rd)
+        c = run([magiskboot, "compress=xz", os.path.join(payload, tool), out], cwd=rd)
+        if not os.path.exists(os.path.join(rd, out)):
+            log(f"ERROR: could not build {out} (rc={c.returncode}) {c.stdout[-200:]}{c.stderr[-200:]}")
+            return False
     shutil.copy(os.path.join(payload, "magiskinit"), os.path.join(rd, "magiskinit"))
     os.chmod(os.path.join(rd, "magiskinit"), 0o755)
 
