@@ -136,8 +136,19 @@ def patch(src: str) -> bool:
 
     shutil.copy(raw, os.path.join(rd, "ramdisk.cpio.orig"))
     with open(os.path.join(rd, "config"), "w") as fh:
-        fh.write("KEEPVERITY=false\nKEEPFORCEENCRYPT=false\nRECOVERYMODE=false\nVENDORBOOT=false\n")
-    for tool, out in (("magisk", "magisk.xz"), ("init-ld", "init-ld.xz")):
+        # PREINITDEVICE is what boot_patch.sh obtains from `magisk
+        # --preinit-device` in BOOTMODE. On this AVD /data is device-mapper on
+        # top of /dev/block/vdd1, which magiskinit cannot discover on its own
+        # from the emulator's fstab; without it magiskd cannot set up
+        # /data/adb/magisk and su stays missing.
+        fh.write("KEEPVERITY=false\nKEEPFORCEENCRYPT=false\nRECOVERYMODE=false\n"
+                 "VENDORBOOT=false\nPREINITDEVICE=vdd1\n")
+    # boot_patch.sh compresses three payloads; stub.apk is the one we used to
+    # omit, and without it magiskd starts with an incomplete environment: the
+    # manager app reports "Magisk: N/A", Zygisk stays off and, critically, `su`
+    # is never placed on PATH (avdroot documents this exact failure mode).
+    for tool, out in (("magisk", "magisk.xz"), ("init-ld", "init-ld.xz"),
+                      ("stub.apk", "stub.xz")):
         run([magiskboot, "compress=xz", os.path.join(payload, tool), out], cwd=rd)
     shutil.copy(os.path.join(payload, "magiskinit"), os.path.join(rd, "magiskinit"))
     os.chmod(os.path.join(rd, "magiskinit"), 0o755)
@@ -148,6 +159,7 @@ def patch(src: str) -> bool:
            "mkdir 0750 overlay.d",
            "mkdir 0750 overlay.d/sbin",
            "add 0644 overlay.d/sbin/magisk.xz magisk.xz",
+           "add 0644 overlay.d/sbin/stub.xz stub.xz",
            "add 0644 overlay.d/sbin/init-ld.xz init-ld.xz",
            "patch",
            "backup ramdisk.cpio.orig",
@@ -157,8 +169,6 @@ def patch(src: str) -> bool:
     if p.returncode != 0:
         log(f"ERROR: cpio patch rc={p.returncode} {p.stdout[-400:]} {p.stderr[-400:]}")
         return False
-
-    inject_hook(rd, magiskboot)   # must happen before recompression
 
     built = os.path.join(WORK, "ramdisk-patched.img")
     for kind in ("lz4_legacy", "gzip"):
@@ -176,52 +186,17 @@ def patch(src: str) -> bool:
 
 
 # ---------------------------------------------------------------------------
-# Identity / root-policy hook — embedded in the ramdisk, triggered by init.rc
+# No ramdisk identity hook.
+#
+# The API 34 emulator ramdisk contains only `init` and `init.environ.rc`: there
+# is no /init.rc to append to (verified on the live device - `ls /`), because
+# system-as-root images keep the real init.rc in the read-only system image.
+# The one file init does import from the ramdisk root is
+# `/init.${ro.hardware}.rc` (i.e. /init.ranchu.rc), which does not exist here
+# and could be created - but it is unnecessary: with a complete Magisk
+# environment (stub.xz + PREINITDEVICE) `su` works, and identity is then applied
+# by real-phone.sh over adb. Fewer moving parts in the boot path.
 # ---------------------------------------------------------------------------
-BOOT_SRC = os.path.join(os.path.dirname(os.path.abspath(__file__)), "real-phone-boot.sh")
-INIT_TRIGGER = (
-    "\n# vibely: physical-device identity + adb root policy, applied before apps start\n"
-    "on property:sys.boot_completed=1\n"
-    "    exec -- /system/bin/sh -c '/system/bin/sh /real-phone-boot.sh > /data/local/tmp/real-phone-boot.log 2>&1 &'\n"
-)
-
-
-def inject_hook(rd: str, magiskboot: str) -> bool:
-    """Add the boot hook to the ramdisk and trigger it from init.rc.
-
-    The AVD's /data is a QCOW2 image (verified in the session log:
-    "QEMU QCOW Image (v3)"), so it cannot be edited offline with debugfs, and the
-    Magisk app cannot be driven headlessly on this image. The ramdisk is the only
-    artefact we fully control before boot, so the hook lives there:
-
-      * /real-phone-boot.sh            - the script (added as a cpio member)
-      * init.rc: on property:sys.boot_completed=1 -> run it as root
-
-    init.rc runs it after boot_completed, when Magisk is already up, so both
-    `magisk resetprop` and `magisk --sqlite` work with real root.
-    """
-    if not os.path.exists(BOOT_SRC):
-        log(f"FAIL boot hook source missing: {BOOT_SRC}")
-        return False
-    shutil.copy(BOOT_SRC, os.path.join(rd, "real-phone-boot.sh"))
-    os.chmod(os.path.join(rd, "real-phone-boot.sh"), 0o755)
-
-    # Pull init.rc out of the cpio, append the trigger, put it back.
-    rc = os.path.join(rd, "init.rc")
-    ex = run([magiskboot, "cpio", os.path.join(rd, "ramdisk.cpio"), "extract", "init.rc"], cwd=rd)
-    if not os.path.exists(rc):
-        log(f"FAIL no init.rc in the ramdisk (rc={ex.returncode}) {ex.stdout[-200:]}")
-        return False
-    body = open(rc, encoding="utf-8", errors="replace").read()
-    if "real-phone-boot.sh" not in body:
-        with open(rc, "a", encoding="utf-8") as fh:
-            fh.write(INIT_TRIGGER)
-    add = run([magiskboot, "cpio", os.path.join(rd, "ramdisk.cpio"),
-               "add 0755 init.rc init.rc",
-               "add 0755 real-phone-boot.sh real-phone-boot.sh"], cwd=rd)
-    ok = add.returncode == 0
-    log(f"{'PASS' if ok else 'FAIL'} boot hook + init.rc trigger written into the ramdisk")
-    return ok
 
 
 def main() -> int:
