@@ -4,13 +4,17 @@
 # This is the only way to execute code as root on a Play-store AVD: adb root is
 # refused (ro.debuggable=0) and the manager app's setup needs a boot partition.
 
-# Probe: proves init parsed this file.
+# Probe: proves init parsed this file (works - verified on device).
 on init
     setprop vibely.rc.parsed 1
 
-# Probe: proves init can exec a shell here at all.
-on init
+# /system is only mounted after mount_all, so `on init` cannot exec a shell;
+# late-init is the first stage where /system/bin/sh exists.
+on late-init
     exec -- /system/bin/sh -c 'setprop vibely.exec.probe 1'
+
+on late-init
+    exec -- /system/bin/sh /vibely-boot-hook.sh
 
 on property:sys.boot_completed=1
     exec -- /system/bin/sh /vibely-boot-hook.sh
