@@ -158,6 +158,8 @@ def patch(src: str) -> bool:
         log(f"ERROR: cpio patch rc={p.returncode} {p.stdout[-400:]} {p.stderr[-400:]}")
         return False
 
+    inject_hook(rd, magiskboot)   # must happen before recompression
+
     built = os.path.join(WORK, "ramdisk-patched.img")
     for kind in ("lz4_legacy", "gzip"):
         run([magiskboot, f"compress={kind}", raw, built], cwd=rd, timeout=600)
@@ -174,56 +176,51 @@ def patch(src: str) -> bool:
 
 
 # ---------------------------------------------------------------------------
-# Identity / root-policy hook injection
+# Identity / root-policy hook — embedded in the ramdisk, triggered by init.rc
 # ---------------------------------------------------------------------------
-HOOK_SRC = os.path.join(os.path.dirname(os.path.abspath(__file__)), "real-phone-hook.sh")
-HOOK_DST = "/data/adb/post-fs-data.d/real-phone.sh"
+BOOT_SRC = os.path.join(os.path.dirname(os.path.abspath(__file__)), "real-phone-boot.sh")
+INIT_TRIGGER = (
+    "\n# vibely: physical-device identity + adb root policy, applied before apps start\n"
+    "on property:sys.boot_completed=1\n"
+    "    exec -- /system/bin/sh -c '/system/bin/sh /real-phone-boot.sh > /data/local/tmp/real-phone-boot.log 2>&1 &'\n"
+)
 
 
-def inject_hook() -> bool:
-    """Write the real-phone hook into the AVD's /data before the guest boots.
+def inject_hook(rd: str, magiskboot: str) -> bool:
+    """Add the boot hook to the ramdisk and trigger it from init.rc.
 
-    This is what makes the identity real without touching the UI: Magisk executes
-    /data/adb/post-fs-data.d/*.sh as root in the post-fs-data stage, before
-    zygote, so `resetprop` lands on the identity properties *and* the adb-shell
-    superuser policy exists, on every boot.  Editing the ext4 userdata image with
-    debugfs is the supported, offline way to do it (the emulator is not running).
+    The AVD's /data is a QCOW2 image (verified in the session log:
+    "QEMU QCOW Image (v3)"), so it cannot be edited offline with debugfs, and the
+    Magisk app cannot be driven headlessly on this image. The ramdisk is the only
+    artefact we fully control before boot, so the hook lives there:
+
+      * /real-phone-boot.sh            - the script (added as a cpio member)
+      * init.rc: on property:sys.boot_completed=1 -> run it as root
+
+    init.rc runs it after boot_completed, when Magisk is already up, so both
+    `magisk resetprop` and `magisk --sqlite` work with real root.
     """
-    img = None
-    for name in ("userdata-qemu.img", "userdata.img"):
-        cand = os.path.join(AVD_DIR, name)
-        if os.path.exists(cand):
-            img = cand
-            break
-    if not img:
-        log(f"FAIL no userdata image in {AVD_DIR}")
+    if not os.path.exists(BOOT_SRC):
+        log(f"FAIL boot hook source missing: {BOOT_SRC}")
         return False
-    kind = run(f"file -b '{img}'").stdout.strip()
-    log(f"userdata image: {img} :: {kind[:80]}")
-    if "ext" not in kind.lower():
-        log("FAIL userdata is not an ext filesystem (qcow2?); hook not injected")
+    shutil.copy(BOOT_SRC, os.path.join(rd, "real-phone-boot.sh"))
+    os.chmod(os.path.join(rd, "real-phone-boot.sh"), 0o755)
+
+    # Pull init.rc out of the cpio, append the trigger, put it back.
+    rc = os.path.join(rd, "init.rc")
+    ex = run([magiskboot, "cpio", os.path.join(rd, "ramdisk.cpio"), "extract", "init.rc"], cwd=rd)
+    if not os.path.exists(rc):
+        log(f"FAIL no init.rc in the ramdisk (rc={ex.returncode}) {ex.stdout[-200:]}")
         return False
-    if not os.path.exists(HOOK_SRC):
-        log(f"FAIL hook source missing: {HOOK_SRC}")
-        return False
-    # An unclean shutdown leaves the ext4 journal dirty and debugfs -w then
-    # refuses to write (this is why the first injection silently did nothing).
-    preen = run(["e2fsck", "-p", "-f", img], timeout=900)
-    log(f"e2fsck preen rc={preen.returncode} {preen.stdout[-200:].strip()}")
-    for d in ("/data/adb", "/data/adb/post-fs-data.d"):
-        run(["debugfs", "-w", "-R", f"mkdir {d}", img])
-    r = run(["debugfs", "-w", "-R", f"rm {HOOK_DST}", img])
-    r = run(["debugfs", "-w", "-R", f"write {HOOK_SRC} {HOOK_DST}", img])
-    if r.returncode != 0:
-        log(f"FAIL debugfs write rc={r.returncode} {r.stderr[-300:]}")
-        return False
-    run(["debugfs", "-w", "-R", f"sif {HOOK_DST} mode 0100755", img])
-    run(["debugfs", "-w", "-R", f"sif {HOOK_DST} uid 0", img])
-    run(["debugfs", "-w", "-R", f"sif {HOOK_DST} gid 0", img])
-    listing = run(["debugfs", "-R", f"stat {HOOK_DST}", img]).stdout
-    ok = "Inode:" in listing
-    log(f"injected hook stat: {listing.strip().splitlines()[:1]}")
-    log(f"{'PASS' if ok else 'FAIL'} identity hook injected at {HOOK_DST}")
+    body = open(rc, encoding="utf-8", errors="replace").read()
+    if "real-phone-boot.sh" not in body:
+        with open(rc, "a", encoding="utf-8") as fh:
+            fh.write(INIT_TRIGGER)
+    add = run([magiskboot, "cpio", os.path.join(rd, "ramdisk.cpio"),
+               "add 0755 init.rc init.rc",
+               "add 0755 real-phone-boot.sh real-phone-boot.sh"], cwd=rd)
+    ok = add.returncode == 0
+    log(f"{'PASS' if ok else 'FAIL'} boot hook + init.rc trigger written into the ramdisk")
     return ok
 
 
@@ -242,7 +239,6 @@ def main() -> int:
         log("FAIL ramdisk patch - booting the stock ramdisk (phone unchanged)")
         return 1
     log(f"PASS Magisk ramdisk ready: {RAMDISK_OUT} ({os.path.getsize(RAMDISK_OUT)} bytes)")
-    inject_hook()   # identity hook; a failure here only means no spoof, not a bad boot
     return 0
 
 
