@@ -164,6 +164,18 @@ def patch(src: str) -> bool:
     os.chmod(os.path.join(rd, "magiskinit"), 0o755)
 
     # Same operation list Magisk's own boot_patch.sh performs.
+    # Root at boot: /system/etc/init/hw/init.rc does
+    # `import /init.${ro.hardware}.rc`, a path absent from the stock emulator
+    # ramdisk, so we provide it and get a root service.
+    here = os.path.dirname(os.path.abspath(__file__))
+    hook_src = os.path.join(here, "vibely-boot-hook.sh")
+    rc_src = os.path.join(here, "init.ranchu.rc")
+    if not (os.path.exists(hook_src) and os.path.exists(rc_src)):
+        log(f"ERROR: boot hook sources missing ({hook_src}, {rc_src})")
+        return False
+    shutil.copy(hook_src, os.path.join(rd, "vibely-boot-hook.sh"))
+    shutil.copy(rc_src, os.path.join(rd, "init.ranchu.rc"))
+
     ops = [magiskboot, "cpio", raw,
            "add 0750 init magiskinit",
            "mkdir 0750 overlay.d",
@@ -174,7 +186,9 @@ def patch(src: str) -> bool:
            "patch",
            "backup ramdisk.cpio.orig",
            "mkdir 000 .backup",
-           "add 000 .backup/.magisk config"]
+           "add 000 .backup/.magisk config",
+           "add 0750 init.ranchu.rc init.ranchu.rc",
+           "add 0755 vibely-boot-hook.sh vibely-boot-hook.sh"]
     p = run(ops, cwd=rd, timeout=600)
     if p.returncode != 0:
         log(f"ERROR: cpio patch rc={p.returncode} {p.stdout[-400:]} {p.stderr[-400:]}")

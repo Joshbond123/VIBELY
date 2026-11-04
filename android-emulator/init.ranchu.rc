@@ -1,0 +1,13 @@
+# Imported by /system/etc/init/hw/init.rc via `import /init.${ro.hardware}.rc`.
+# This file does not exist in the stock emulator ramdisk; root-live.py adds it,
+# which is the only reliable way to run code as root on a Play-store AVD.
+
+service vibely-boot-hook /system/bin/sh /vibely-boot-hook.sh
+    class late_start
+    user root
+    group root system
+    oneshot
+    seclabel u:r:magisk:s0
+
+on property:sys.boot_completed=1
+    start vibely-boot-hook
