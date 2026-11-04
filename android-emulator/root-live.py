@@ -194,6 +194,10 @@ def inject_hook() -> bool:
     if not os.path.exists(HOOK_SRC):
         log(f"FAIL hook source missing: {HOOK_SRC}")
         return False
+    # An unclean shutdown leaves the ext4 journal dirty and debugfs -w then
+    # refuses to write (this is why the first injection silently did nothing).
+    preen = run(["e2fsck", "-p", "-f", img], timeout=900)
+    log(f"e2fsck preen rc={preen.returncode} {preen.stdout[-200:].strip()}")
     for d in ("/data/adb", "/data/adb/post-fs-data.d"):
         run(["debugfs", "-w", "-R", f"mkdir {d}", img])
     r = run(["debugfs", "-w", "-R", f"rm {HOOK_DST}", img])
@@ -206,6 +210,7 @@ def inject_hook() -> bool:
     run(["debugfs", "-w", "-R", f"sif {HOOK_DST} gid 0", img])
     listing = run(["debugfs", "-R", f"stat {HOOK_DST}", img]).stdout
     ok = "Inode:" in listing
+    log(f"injected hook stat: {listing.strip().splitlines()[:1]}")
     log(f"{'PASS' if ok else 'FAIL'} identity hook injected at {HOOK_DST}")
     return ok
 

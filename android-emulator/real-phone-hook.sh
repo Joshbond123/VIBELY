@@ -67,3 +67,4 @@ rm -rf /data/tombstones/* /data/anr/* /data/system/dropbox/* /data/local/tmp/* 2
   echo "qemu=$(getprop ro.kernel.qemu)"
   df /data | tail -1
 } > /data/local/tmp/real-phone.log 2>/dev/null
+cp /data/local/tmp/real-phone.log /sdcard/Download/real-phone.log 2>/dev/null
