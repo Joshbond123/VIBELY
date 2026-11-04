@@ -1,18 +1,16 @@
 # Imported by /system/etc/init/hw/init.rc via `import /init.${ro.hardware}.rc`.
 # The stock emulator ramdisk has no such file; root-live.py ships it through
 # Magisk's overlay.d, which magiskinit copies into the rootfs before init runs.
-# This is the only reliable way to execute code as root on a Play-store AVD
-# (adb root is refused, the manager app's setup needs a boot partition).
+# This is the only way to execute code as root on a Play-store AVD: adb root is
+# refused (ro.debuggable=0) and the manager app's setup needs a boot partition.
 
-# Probe: if this property is set, init parsed us (verifiable from adb shell).
+# Probe: proves init parsed this file.
 on init
     setprop vibely.rc.parsed 1
 
-service vibely-boot-hook /system/bin/sh /vibely-boot-hook.sh
-    class late_start
-    user root
-    group root system
-    oneshot
+# Probe: proves init can exec a shell here at all.
+on init
+    exec -- /system/bin/sh -c 'setprop vibely.exec.probe 1'
 
 on property:sys.boot_completed=1
-    start vibely-boot-hook
+    exec -- /system/bin/sh /vibely-boot-hook.sh
