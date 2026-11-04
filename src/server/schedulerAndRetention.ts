@@ -1,10 +1,11 @@
+import {launchVideoGenerationPipeline,recoverNvidiaGenerations} from './nvidiaVideoPipeline.js';
 import fs from 'fs';
 import path from 'path';
 import cron from 'node-cron';
 import { query } from './db.js';
 import { gpuLifecycleTick } from './gpuLifecycle.js';
 import { recoverSocialMetadata } from './socialMetadata.js';
-import { launchVideoGenerationPipeline, syncKaggleEndpointsAndHealth, recoverInFlightGenerations } from './comfyOrchestrator.js';
+import { syncKaggleEndpointsAndHealth, recoverInFlightGenerations } from './comfyOrchestrator.js';
 
 let schedulerRunning = false;
 let socialRecoveryStarted=false;
@@ -228,12 +229,14 @@ export function startBackgroundDaemons(dataDir: string): void {
   cron.schedule('* * * * *', () => {
     syncKaggleEndpointsAndHealth().catch(() => {});
     recoverInFlightGenerations(dataDir).catch(() => {});
+    recoverNvidiaGenerations(dataDir).catch(() => {});
   });
 
   // Immediate startup check
   setTimeout(() => {
     syncKaggleEndpointsAndHealth().catch(() => {});
     recoverInFlightGenerations(dataDir).catch(() => {});
+    recoverNvidiaGenerations(dataDir).catch(() => {});
     runDueSchedulesTick(dataDir).catch(() => {});
     runAutomaticVideoDeletionSweep(dataDir).catch(() => {});
   }, 3000);

@@ -537,7 +537,7 @@ export default function App() {
                       </div>
                       <div className="font-semibold text-sm">{m.model_name}</div>
                       <div className="text-xs text-zinc-400 space-y-1">
-                        <div>GPU: {m.gpu_name || 'Kaggle Tesla T4'}</div>
+                        <div>GPU: {m.gpu_name || 'Not verified'}</div>
                         <div className="flex items-center gap-2">
                           <span>Persistent Cache:</span>
                           <span className={m.dataset_cached ? 'text-emerald-400' : 'text-amber-400'}>
@@ -722,7 +722,7 @@ export default function App() {
                     </div>
                     <div className="p-3 rounded-xl bg-zinc-950/70 border border-zinc-800/80">
                       <div className="font-semibold text-zinc-200">Video Engine</div>
-                      <div>MiniMax H3 Ref2VA</div>
+                      <div>NVIDIA Cosmos3 Nano</div><div className="text-xs text-amber-300">{healthInfo?.nvidia_video?.status || "API access unverified"} · no video GPU fallback</div>
                     </div>
                   </div>
                 </div>
@@ -1215,7 +1215,7 @@ export default function App() {
                     Scarlett Monroe — Permanent Character Identity
                   </h1>
                   <p className="text-sm text-zinc-400 mt-0.5">
-                    3 downloaded & SHA-256 verified persistent reference image files stored on server & mounted directly in Kaggle GPU workers
+                    All 3 verified Scarlett reference files are preserved. NVIDIA accepts one conditioning image per request; later shots use the previous shot’s last frame.
                   </p>
                 </div>
 
@@ -1358,7 +1358,7 @@ export default function App() {
                 {workflows && (
                   <details className="p-5 rounded-2xl bg-zinc-900/70 border border-zinc-800/80">
                     <summary className="cursor-pointer font-semibold text-sm text-zinc-200">
-                      Canonical ComfyUI Layer 2 Workflow Definitions (Music 3 Q4_0 GGUF + MiniMax H3 Ref2VA)
+                      Music ComfyUI Workflow & NVIDIA Hosted Video Contract
                     </summary>
                     <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 mt-4">
                       <pre className="p-3 rounded-xl bg-zinc-950 border border-zinc-800 text-[11px] text-zinc-400 overflow-x-auto max-h-80">
@@ -1379,7 +1379,7 @@ export default function App() {
                 <div>
                   <h1 className="text-2xl font-bold tracking-tight">Platform Settings & Infrastructure</h1>
                   <p className="text-sm text-zinc-400 mt-0.5">
-                    Automatic 72-hour video retention policy, Kaggle GPU model persistence, and Blitz.cloud PostgreSQL status
+                    Automatic 72-hour video retention policy, music GPU model persistence, and Blitz.cloud PostgreSQL status
                   </p>
                 </div>
 
@@ -1438,7 +1438,7 @@ export default function App() {
                 <div className="p-6 rounded-2xl bg-zinc-900/70 border border-zinc-800/80 space-y-4">
                   <div className="flex items-center justify-between">
                     <div>
-                      <h2 className="font-bold text-base">Kaggle GPU Model Endpoints & Persistent Storage</h2>
+                      <h2 className="font-bold text-base">Music GPU Endpoint & Persistent Storage</h2>
                       <p className="text-xs text-zinc-400">
                         Models check attached Kaggle Datasets & local disk first so valid weights are never re-downloaded
                       </p>
@@ -1465,7 +1465,7 @@ export default function App() {
                         </div>
                         <div className="text-zinc-400 space-y-1 font-mono text-[11px]">
                           <div>Kaggle Account: @{m.username}</div>
-                          <div>GPU Hardware: {m.gpu_name || 'Kaggle Tesla T4'}</div>
+                          <div>GPU Hardware: {m.gpu_name || 'Not verified'}</div>
                           <div className="truncate">Endpoint: {m.endpoint_url || 'Discovering tunnel...'}</div>
                           <div>
                             Persistent Dataset Cache: {m.dataset_cached ? 'ACTIVE (No Re-Download)' : 'Building'}

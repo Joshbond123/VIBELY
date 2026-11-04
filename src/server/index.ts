@@ -1,5 +1,7 @@
+import {nvidiaVideoStatus} from './nvidiaVideoProvider.js';
+import {launchVideoGenerationPipeline} from './nvidiaVideoPipeline.js';
 import {gpuFleetDashboard} from './gpuUsage.js';
-import {FRONTIER_VIDEO_CANDIDATE,LEGACY_VIDEO_ENGINE,validateRequestedVideoEngine,redactStartupError} from './videoEnginePolicy.js';
+import {NVIDIA_VIDEO_SPEC,validateRequestedVideoEngine,redactStartupError} from './videoEnginePolicy.js';
 import crypto from 'crypto';
 import { gpuDashboard, acceptGpuHeartbeat } from './gpuLifecycle.js';
 import { generateSocialMetadata } from './socialMetadata.js';
@@ -17,7 +19,6 @@ import {
   selectWeightedSeries,
 } from './scarlettIdentity.js';
 import {
-  launchVideoGenerationPipeline,
   probeWorkerHealth,
   startStandaloneMusicTask,
   syncKaggleEndpointsAndHealth,
@@ -60,6 +61,7 @@ app.get('/api/health', async (_req, res) => {
       app: 'VIBELY',
       timestamp: new Date().toISOString(),
       database: { connected: dbConnected, error: dbError || null },
+      nvidia_video: {...NVIDIA_VIDEO_SPEC,...(dbConnected?await nvidiaVideoStatus():{status:"database_unavailable"})},
       nvidia_reasoning: {
         configured: Boolean(process.env.NVIDIA_API_KEY),
         primary_model: 'nvidia/nemotron-3.5-super-vl-120b-a12b',
@@ -67,7 +69,7 @@ app.get('/api/health', async (_req, res) => {
       },
       comfyui_orchestration: {
         framework: 'ComfyUI + molbal/ComfyUI-GGUF',
-        workflows: ['minimax_music3_q4_0_gguf.json', 'minimax_h3_ref2va_multiscene.json'],
+        workflows: ['minimax_music3_q4_0_gguf.json'],
       },
       character_references: {
         character: 'Scarlett Monroe',
@@ -136,13 +138,12 @@ app.get('/api/gpu', async (_req,res)=>{
   catch(e:any){res.status(500).json({ok:false,error:e.message});}
 });
 app.get('/api/video-engine/readiness',async(_req,res)=>{
-  res.json({ok:true,current_engine:LEGACY_VIDEO_ENGINE,current_engine_role:'configured legacy engine; query /api/gpu for actual availability',candidate:FRONTIER_VIDEO_CANDIDATE,
-    acceptance_requirement:'New video generated through deployed VIBELY; real timing and per-GPU telemetry; frame-by-frame visual acceptance. No sample or mock substitution.'});
+  try{res.json({ok:true,current_engine:NVIDIA_VIDEO_SPEC.id,provider:NVIDIA_VIDEO_SPEC,availability:await nvidiaVideoStatus(),fallback:null});}catch{res.status(503).json({ok:false,error:'Video provider status temporarily unavailable'});}
 });
 app.post('/api/gpu/startup-failed',async(req,res)=>{
   if(!process.env.VIBELY_MODEL_REGISTRY_SECRET || req.header('X-Registry-Secret')!==process.env.VIBELY_MODEL_REGISTRY_SECRET){res.status(401).json({ok:false});return;}
   const service=String(req.body.service_id || '');const started=Number(req.body.attempt_started_at);
-  if(!['minimax_h3_ref2va','minimax_music_3'].includes(service) || !Number.isFinite(started) || Math.abs(Date.now()/1000-started)>1800){res.status(400).json({ok:false,error:'Invalid or expired startup failure'});return;}
+  if(!['minimax_music_3'].includes(service) || !Number.isFinite(started) || Math.abs(Date.now()/1000-started)>1800){res.status(400).json({ok:false,error:'Invalid or expired startup failure'});return;}
   const error=redactStartupError(req.body.error);
   const rows=await query<any>(`UPDATE gpu_sessions SET state='ERROR',error=$2,telemetry=NULL,telemetry_at=NULL
     WHERE service_id=$1 AND state IN ('STARTING','INITIALIZING') AND requested_at<=to_timestamp($3)
@@ -163,6 +164,7 @@ app.get('/api/gpu/leases',async(req,res)=>{
 
 // Model Endpoint Heartbeat Registration (called by Kaggle GPU workers)
 app.post('/api/models/register', async (req, res) => {
+  if(req.body?.service!=='minimax_music_3'){res.status(410).json({ok:false,error:'Only the existing music GPU may register. Video is NVIDIA hosted only.'});return;}
   try {
     const secret = req.header('X-Registry-Secret') || '';
     const expected = process.env.VIBELY_MODEL_REGISTRY_SECRET || '';
@@ -542,9 +544,7 @@ app.get('/api/history', async (_req, res) => {
     const musicWorkflow = JSON.parse(
       fs.readFileSync(path.join(REPO_ROOT, 'comfyui_workflows', 'minimax_music3_q4_0_gguf.json'), 'utf8')
     );
-    const videoWorkflow = JSON.parse(
-      fs.readFileSync(path.join(REPO_ROOT, 'comfyui_workflows', 'minimax_h3_ref2va_multiscene.json'), 'utf8')
-    );
+    const videoWorkflow = NVIDIA_VIDEO_SPEC;
     res.json({
       ok: true,
       history: rows.map(formatVideoRow),

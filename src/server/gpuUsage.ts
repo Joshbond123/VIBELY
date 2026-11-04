@@ -44,6 +44,6 @@ export async function gpuFleetDashboard(workers:any[]){
    credential_configured:Boolean(process.env[profile.token_env])};
  }));
  return {fleet,allocation:{total_seconds:WEEKLY_SECONDS,observed_seconds:fleet.reduce((n,p)=>n+p.weekly.observed_seconds,0),remaining_seconds:null,
-  provider_quota_verified:fleet.every(p=>p.weekly.quota_verified),rotation_seconds:1800,rotation_enabled:false,rotation_mode:'disabled pending worker/model provisioning and live switching validation',
+  provider_quota_verified:fleet.every(p=>p.weekly.quota_verified),
   reason:'Provider balances are verified per account, not pooled. Application-observed time is a separate incomplete ledger, not an exact fleet-wide provider balance.'}};
 }

@@ -148,7 +148,7 @@ async function runMigrations(client: pg.PoolClient): Promise<void> {
       started_at TIMESTAMPTZ, worker_started_at DOUBLE PRECISION NOT NULL DEFAULT 0,
       last_shutdown_at TIMESTAMPTZ, session_status TEXT, error TEXT, telemetry JSONB, telemetry_at TIMESTAMPTZ
     );
-    INSERT INTO gpu_sessions(service_id) VALUES('minimax_h3_ref2va'),('minimax_music_3') ON CONFLICT DO NOTHING;
+    INSERT INTO gpu_sessions(service_id) VALUES('minimax_music_3') ON CONFLICT DO NOTHING;
     CREATE TABLE IF NOT EXISTS gpu_usage_observations (
       account TEXT NOT NULL,service_id TEXT NOT NULL,worker_started_at DOUBLE PRECISION NOT NULL,
       first_seen TIMESTAMPTZ NOT NULL,last_seen TIMESTAMPTZ NOT NULL,gpu_names JSONB NOT NULL,
@@ -164,6 +164,12 @@ async function runMigrations(client: pg.PoolClient): Promise<void> {
     CREATE TABLE IF NOT EXISTS gpu_output_receipts(service_id TEXT NOT NULL,remote_job_id TEXT NOT NULL,endpoint_url TEXT NOT NULL,api_key TEXT NOT NULL,receipt JSONB NOT NULL,created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),delivered_at TIMESTAMPTZ,attempts INTEGER NOT NULL DEFAULT 0,last_error TEXT,PRIMARY KEY(service_id,remote_job_id));
     CREATE TABLE IF NOT EXISTS gpu_events(id BIGSERIAL PRIMARY KEY,service_id TEXT NOT NULL,event TEXT NOT NULL,detail JSONB NOT NULL DEFAULT '{}',created_at TIMESTAMPTZ NOT NULL DEFAULT NOW());
 
+    CREATE TABLE IF NOT EXISTS nvidia_video_segments (
+      generation_id TEXT NOT NULL,segment_index INTEGER NOT NULL,status TEXT NOT NULL,
+      request_id TEXT,attempts INTEGER NOT NULL DEFAULT 0,original_file TEXT,output_file TEXT,
+      error TEXT,submitted_at TIMESTAMPTZ,updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      PRIMARY KEY(generation_id,segment_index)
+    );
     CREATE TABLE IF NOT EXISTS automation_schedules (
       id TEXT PRIMARY KEY,
       name TEXT NOT NULL,
@@ -198,16 +204,19 @@ async function runMigrations(client: pg.PoolClient): Promise<void> {
     ON CONFLICT (key) DO NOTHING;
   `);
 
-  // Seed the two persistent Kaggle GPU model endpoint rows
+  // Video rendering is exclusively NVIDIA-hosted. Historical receipts and outputs are preserved.
+  await client.query("DELETE FROM gpu_leases WHERE service_id='minimax_h3_ref2va'");
+  await client.query("DELETE FROM gpu_sessions WHERE service_id='minimax_h3_ref2va'");
+  await client.query("DELETE FROM model_endpoints WHERE service_id='minimax_h3_ref2va'");
+  // Keep the existing music endpoint and credentials unchanged.
   await client.query(
     `
     INSERT INTO model_endpoints (service_id, username, model_name, api_key, status)
     VALUES
-      ('minimax_music_3', 'happink', 'MiniMax Music 3 Q4_0 GGUF', $1, 'booting'),
-      ('minimax_h3_ref2va', 'Joshbond123', 'MiniMax H3 Ref2VA', $2, 'booting')
+      ('minimax_music_3', 'happink', 'MiniMax Music 3 Q4_0 GGUF', $1, 'booting')
     ON CONFLICT (service_id) DO NOTHING;
   `,
-    [process.env.MINIMAX_MUSIC3_API_KEY || '', process.env.MINIMAX_H3_API_KEY || '']
+    [process.env.MINIMAX_MUSIC3_API_KEY || '']
   );
 }
 

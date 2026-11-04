@@ -5,8 +5,8 @@ on:
       worker:
         description: Worker to replace (ensure old jobs finished first)
         type: choice
-        options: [all, video, music, probe]
-        default: all
+        options: [music]
+        default: music
 permissions:
   contents: read
 concurrency:
@@ -25,9 +25,7 @@ jobs:
       - name: Deploy private Kaggle kernels
         run: python workers/deploy.py "${{ inputs.worker }}"
         env:
-          KAGGLE_JOSHBOND_TOKEN: ${{ secrets.KAGGLE_JOSHBOND_TOKEN }}
           KAGGLE_HAPPINK_TOKEN: ${{ secrets.KAGGLE_HAPPINK_TOKEN }}
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
-          MINIMAX_H3_API_KEY: ${{ secrets.MINIMAX_H3_API_KEY }}
           MINIMAX_MUSIC3_API_KEY: ${{ secrets.MINIMAX_MUSIC3_API_KEY }}
           VIBELY_MODEL_REGISTRY_SECRET: ${{ secrets.VIBELY_MODEL_REGISTRY_SECRET }}

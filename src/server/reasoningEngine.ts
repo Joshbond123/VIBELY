@@ -167,7 +167,7 @@ export async function generateFullVideoProductionPlan(options?: {
     ? SCARLETT_CONTENT_SERIES.find((s) => s.id === options.forceSeriesId) || selectWeightedSeries()
     : selectWeightedSeries();
 
-  // 26s uses the H3 17n+5 frame grid efficiently without changing inference quality.
+  // 26s uses the four-shot NVIDIA hosted timeline without arbitrary time-stretching.
   const targetTotal = Math.min(40, Math.max(25, options?.targetDurationSec ?? 26));
   const includeTwerk = selectedSeries.allowTwerkAccent && crypto.randomInt(0, 100) < 38;
   const history = await getRecentHistorySummary(20);
@@ -182,13 +182,13 @@ export async function generateFullVideoProductionPlan(options?: {
 
   while (attempts < 3) {
     attempts++;
-    const systemPrompt = `You are VIBELY Layer-1 Creative Director & AI Cinematographer coordinating ComfyUI, MiniMax Music 3 Q4_0 GGUF, and MiniMax H3 Ref2VA.
+    const systemPrompt = `You are VIBELY Layer-1 Creative Director & AI Cinematographer coordinating ComfyUI, MiniMax Music 3 Q4_0 GGUF, and NVIDIA Cosmos3 Nano hosted video.
 You MUST obey Scarlett Monroe's Permanent Identity Directive strictly:
 ${SCARLETT_PERMANENT_IDENTITY_PROMPT}
 
 CRITICAL PRODUCTION RULES:
-1. Total video duration MUST equal ${targetTotal} seconds (between 25 and 40 seconds), split across EXACTLY 3 connected, continuous scenes whose durations sum to ${targetTotal} seconds (e.g. 3 scenes of ${(targetTotal / 3).toFixed(1)}s each).
-2. Every scene MUST follow seamlessly from the previous scene: Scene N's entry_pose MUST match Scene (N-1)'s exit_pose, maintaining exact facial identity, platinum-blonde hair, icy-blue eyes, hourglass body proportions, lighting, and location${selectedSeries.outfitTransition ? ' (except at the planned beat-matched outfit transition from stylish casual wear into a glamorous figure-hugging bodycon dress in Scene 2)' : ' and exact outfit continuity across all 3 scenes'}.
+1. Total video duration MUST equal ${targetTotal} seconds (between 25 and 40 seconds), split across EXACTLY 4 connected, continuous scenes whose durations sum to ${targetTotal} seconds (e.g. 4 scenes of ${(targetTotal / 4).toFixed(1)}s each).
+2. Every scene MUST follow seamlessly from the previous scene: Scene N's entry_pose MUST match Scene (N-1)'s exit_pose, maintaining exact facial identity, platinum-blonde hair, icy-blue eyes, hourglass body proportions, lighting, and location${selectedSeries.outfitTransition ? ' (except at the planned beat-matched outfit transition from stylish casual wear into a glamorous figure-hugging bodycon dress in Scene 2)' : ' and exact outfit continuity across all 4 scenes'}.
 3. Music MUST be an original, non-copyrighted AMAPIANO + AFROBEATS FUSION song (${suggestedBpm} BPM, ${suggestedKey}) featuring catchy female vocals, infectious Amapiano log drums, crisp Afrobeats percussion, deep punchy bass, and all 6 required sections: [Intro], [Verse] with distinctive vocal hook, [Chorus] catchy & repetitive, [Instrumental] dance-friendly break, [Bridge]/[Drop] energetic musical drop, and [Outro] satisfying ending.
 4. For gym_challenge choose ONE simple continuous exercise progression (standing setup -> controlled squats -> standing recovery), at normal speed, with fixed focal length and constant camera distance. Frame the complete head, hands and both shoes, with headroom and floor margin. Keep the pelvis at horizontal center throughout. Default to one locked-off front three-quarter full-body camera for the continuous performance. Use side or other angles only at a motivated, planned cut; do not orbit or move the camera merely to change angles. No moving to a different bench, no push-ins, no pans that move Scarlett off-center, no abrupt scale changes. Keep lighting and outfit descriptions identical in every scene. Avoid exaggerated anatomy and bounce language: reproduce the reference proportions without amplification.
 5. Dance sequences must coordinate head, shoulders, arms, spine, waist, hips, knees, ankles and feet. Use a memorable short repeatable dance hook, clear planted-foot weight transfers, controlled transitions and normal-speed movement. Keep hands, head and shoes in frame with visible floor contact. Soft-tissue motion is a restrained secondary response to acceleration, gravity and garment support, never independent exaggerated oscillation. Preserve reference identity and proportions. Default to a stationary camera. These are production instructions, not a claim of guaranteed physical realism.
@@ -211,7 +211,7 @@ Inspiration seed (adapt creatively into a completely fresh setting): Tempo ${sug
 Return JSON with this exact structure:
 {
   "title": "Short catchy video title",
-  "workflow_variant": "${selectedSeries.outfitTransition ? 'comfyui_h3_ref2va_outfit_transition' : 'comfyui_h3_ref2va_continuous_choreo'}",
+  "workflow_variant": "${selectedSeries.outfitTransition ? 'nvidia_cosmos3_nano_image2video' : 'nvidia_cosmos3_nano_image2video'}",
   "video_concept": "2-3 sentences describing the unified storyline and visual hook",
   "script": "Complete spoken/performed beat-by-beat narrative & action script across the ${targetTotal}s timeline",
   "location": "Detailed ultra-photorealistic environment description",
@@ -219,7 +219,7 @@ Return JSON with this exact structure:
   "lighting_cinematography": "Detailed natural/cinematic lighting, shadows, lens, and camera style",
   "expressions_poses": "Detailed natural facial expressions, eye contact, smiles, and signature poses",
   "choreography_summary": "Detailed biomechanical dance/fitness movement plan with natural weight transfer and realistic secondary motion",
-  "camera_summary": "Master camera movement progression across all 3 scenes",
+  "camera_summary": "Master camera movement progression across all 4 scenes",
   "scenes": [
     {
       "scene_number": 1,
@@ -257,7 +257,7 @@ Return JSON with this exact structure:
     }
   }
 }
-Ensure "scenes" has ALL 3 connected scenes (scene_number 1, 2, 3) covering 0s to ${targetTotal}s with zero gaps!`;
+Ensure "scenes" has ALL 4 connected scenes (scene_number 1, 2, 3, 4) covering 0s to ${targetTotal}s with zero gaps!`;
 
     const { parsed, modelUsed } = await callNvidiaReasoningJSON(
       systemPrompt,
@@ -273,7 +273,7 @@ Ensure "scenes" has ALL 3 connected scenes (scene_number 1, 2, 3) covering 0s to
     const candidatePlan: FullProductionPlan = {
       reasoning_model_used: modelUsed,
       selected_series: selectedSeries,
-      workflow_variant: parsed.workflow_variant || 'comfyui_h3_ref2va_continuous_choreo',
+      workflow_variant: parsed.workflow_variant || 'nvidia_cosmos3_nano_image2video',
       include_twerk_variation: includeTwerk,
       title: String(parsed.title || `${selectedSeries.name} — Scarlett Original`),
       video_concept: String(parsed.video_concept || ''),
@@ -400,7 +400,7 @@ Return JSON:
 }
 
 function normalizeSceneTimeline(rawScenes: any[], targetTotalSec: number, root: any): SceneProductionSpec[] {
-  const count = 3;
+  const count = 4;
   const frameCounts=planVideoFrames(targetTotalSec,count);
   const out: SceneProductionSpec[] = [];
   let cursor = 0;

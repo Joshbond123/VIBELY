@@ -2,7 +2,7 @@
   "name": "vibely-ai-platform",
   "version": "1.0.0",
   "private": true,
-  "description": "VIBELY — Autonomous Two-Layer AI Influencer Video & Original Music Generation Platform (NVIDIA Reasoning + ComfyUI + MiniMax Music 3 Q4_0 GGUF + MiniMax H3 Ref2VA)",
+  "description": "VIBELY — Autonomous Two-Layer AI Influencer Video & Original Music Generation Platform (NVIDIA Reasoning + ComfyUI + MiniMax Music 3 Q4_0 GGUF + NVIDIA Cosmos3 Nano hosted API)",
   "type": "module",
   "scripts": {
     "dev:server": "tsx watch src/server/index.ts",
