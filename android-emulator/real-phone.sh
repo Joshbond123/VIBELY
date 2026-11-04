@@ -62,7 +62,8 @@ done
 
 if [[ -z "$SU" ]]; then
   log "reported model: $(adb shell getprop ro.product.model | tr -d '\r') | hardware: $(adb shell getprop ro.hardware | tr -d '\r')"
-  log "VERIFY model=$(adb shell getprop ro.product.model | tr -d '\r') qemu=$(adb shell getprop ro.kernel.qemu | tr -d '\r') su=absent"
+  log "boot hook files: $(adb shell 'ls -l /init.ranchu.rc /vibely-boot-hook.sh 2>&1 | tr "\n" ";"' | tr -d '\r')"
+log "VERIFY model=$(adb shell getprop ro.product.model | tr -d '\r') qemu=$(adb shell getprop ro.kernel.qemu | tr -d '\r') su=absent"
   exit 0
 fi
 log "root available via: $SU"
@@ -144,6 +145,7 @@ AFTER=$(adb shell df /data | tail -1 | awk '{print $4}')
 log "data free: before=${BEFORE}K after=${AFTER}K"
 
 # --- 4. Evidence (never report an unverified claim) --------------------------
+log "boot hook files: $(adb shell 'ls -l /init.ranchu.rc /vibely-boot-hook.sh 2>&1 | tr "\n" ";"' | tr -d '\r')"
 log "VERIFY model=$(adb shell getprop ro.product.model | tr -d '\r') brand=$(adb shell getprop ro.product.brand | tr -d '\r') device=$(adb shell getprop ro.product.device | tr -d '\r')"
 log "VERIFY hardware=$(adb shell getprop ro.hardware | tr -d '\r') qemu=$(adb shell getprop ro.kernel.qemu | tr -d '\r')"
 log "VERIFY fingerprint=$(adb shell getprop ro.build.fingerprint | tr -d '\r')"

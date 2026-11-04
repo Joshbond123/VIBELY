@@ -188,11 +188,20 @@ def patch(src: str) -> bool:
            "mkdir 000 .backup",
            "add 000 .backup/.magisk config",
            "add 0750 init.ranchu.rc init.ranchu.rc",
-           "add 0755 vibely-boot-hook.sh vibely-boot-hook.sh"]
+           "add 0755 vibely-boot-hook.sh vibely-boot-hook.sh",
+           # Magisk's magiskinit copies overlay.d into the rootfs *before* init
+           # starts, which is what makes /init.ranchu.rc present in time for
+           # `import /init.${ro.hardware}.rc` to parse it.
+           "add 0750 overlay.d/init.ranchu.rc init.ranchu.rc",
+           "add 0755 overlay.d/vibely-boot-hook.sh vibely-boot-hook.sh"]
     p = run(ops, cwd=rd, timeout=600)
     if p.returncode != 0:
         log(f"ERROR: cpio patch rc={p.returncode} {p.stdout[-400:]} {p.stderr[-400:]}")
         return False
+
+    listing = run([magiskboot, "cpio", raw, "ls"], cwd=rd).stdout
+    for name in ("init.ranchu.rc", "vibely-boot-hook.sh"):
+        log(f"{'PASS' if name in listing else 'FAIL'} ramdisk contains {name}")
 
     built = os.path.join(WORK, "ramdisk-patched.img")
     for kind in ("lz4_legacy", "gzip"):
