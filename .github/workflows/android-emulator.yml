@@ -186,7 +186,7 @@ jobs:
       - name: Prepare emulator agent & lifecycle scripts
         run: |
           chmod +x ./android-emulator/pre-launch.sh ./android-emulator/state-manager.sh ./android-emulator/run-session.sh
-          chmod +x ./android-emulator/restore-whole-avd.sh ./android-emulator/save-whole-avd.sh ./android-emulator/device-realism.sh ./android-emulator/hide-root-emulator.sh
+          chmod +x ./android-emulator/restore-whole-avd.sh ./android-emulator/save-whole-avd.sh ./android-emulator/device-realism.sh ./android-emulator/hide-root-emulator.sh ./android-emulator/real-phone.sh ./android-emulator/root-live.py
           cd ./android-emulator && npm install --no-audit --no-fund
 
       - name: Restore encrypted whole-AVD from GitHub (if any)
@@ -238,7 +238,7 @@ jobs:
           #   timeout tuning is done where it actually takes effect:
           #   pre-launch.sh (config.ini, after the whole-AVD restore) and
           #   device-realism.sh (settings/appops/deviceidle).
-          emulator-options: -no-window -no-snapshot-load -no-snapshot-save -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back emulated -camera-front emulated -dns-server 8.8.8.8,1.1.1.1 -netdelay none -netspeed full
+          emulator-options: -ramdisk /tmp/vibely-ramdisk.img -no-window -no-snapshot-load -no-snapshot-save -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back emulated -camera-front emulated -dns-server 8.8.8.8,1.1.1.1 -netdelay none -netspeed full
           pre-emulator-launch-script: ./android-emulator/pre-launch.sh
           script: ./android-emulator/run-session.sh 2>&1 | tee -a /tmp/vibely-agent.log
 

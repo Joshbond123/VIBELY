@@ -410,7 +410,7 @@ async function ensureLiveAttached(reason = 'watchdog') {
 /** The phone is back on its feet: re-apply the Play/permission/realism tuning. */
 async function afterBootTuning(where) {
   await prepareDevicePermissions().catch(() => {});
-  for (const script of ['device-realism.sh', 'hide-root-emulator.sh']) {
+  for (const script of ['device-realism.sh', 'real-phone.sh', 'hide-root-emulator.sh']) {
     try {
       const { stdout, stderr } = await execFileAsync('bash', [path.join(SCRIPTS_DIR, script)], { timeout: 120000, maxBuffer: 4 * 1024 * 1024 });
       if (stdout) log(`[${where}] ${script}: ${String(stdout).trim().slice(-600)}`);

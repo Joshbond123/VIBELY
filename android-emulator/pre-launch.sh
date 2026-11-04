@@ -114,3 +114,16 @@ if [[ -f "$AVD_DIR/config.ini" ]]; then
   du -sh "$AVD_DIR" 2>/dev/null || true
   ls -la "$AVD_DIR" | awk '{print "  "$5" "$9}' | grep -E 'img|qcow2' || true
 fi
+
+# Root the production image the only supported way: patch the emulator ramdisk on
+# the host and boot with `-ramdisk /tmp/vibely-ramdisk.img` (see root-live.py and
+# the emulator-options in android-emulator.yml).  Needed because a Play image
+# refuses `setprop ro.*`, so the phone can never stop reporting itself as
+# sdk_gphone64_x86_64 — which is exactly what makes TextMe's Play-Integrity
+# backed signup answer "Unable to Sign Up".
+# root-live.py always leaves a bootable image behind (stock ramdisk on failure),
+# so a patch failure degrades to today's behaviour instead of a black screen.
+if [[ -f "$(dirname "${BASH_SOURCE[0]}")/root-live.py" ]]; then
+  echo "[pre-launch] Preparing Magisk root ramdisk for the production AVD..."
+  python3 "$(dirname "${BASH_SOURCE[0]}")/root-live.py" || echo "[pre-launch] root-live reported a problem; stock ramdisk will be used"
+fi
