@@ -7,6 +7,8 @@
 # disappears - verified twice). This script spends its one root moment on
 # installing a persistent Magisk root hook and applying the identity.
 M=/debug_ramdisk/magisk
+echo "hook started $(date) uid=$(id -u)" > /data/local/tmp/vibely-boot.log 2>&1
+chmod 644 /data/local/tmp/vibely-boot.log 2>/dev/null
 LOG=/sdcard/Download/real-phone.log
 
 {
