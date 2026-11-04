@@ -23,6 +23,15 @@ set -uo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 log() { echo "[real-phone] $*"; }
 
+# Pre-launch (root-live.py) runs on this same runner: surface its verdict here so
+# the hook/ramdisk outcome is visible from the session log, not hours later.
+if [[ -f /tmp/root-live.log ]]; then
+  log "pre-launch root-live report:"
+  sed 's/^/    /' /tmp/root-live.log | tail -20
+else
+  log "no /tmp/root-live.log - pre-launch root step did not run"
+fi
+
 # Never touch `adb root`: on a Play image it bounces adbd and drops the tunnel.
 adb wait-for-device
 for _ in $(seq 1 60); do
@@ -141,3 +150,4 @@ log "VERIFY fingerprint=$(adb shell getprop ro.build.fingerprint | tr -d '\r')"
 log "VERIFY debuggable=$(adb shell getprop ro.debuggable | tr -d '\r') secure=$(adb shell getprop ro.secure | tr -d '\r')"
 log "VERIFY df=$(adb shell df /data | tail -1 | tr -s ' ')"
 log "VERIFY su=$(adb shell "$SU id" | tr -d '\r' | head -1)"
+log "VERIFY hook_ran=$(adb shell 'cat /sdcard/Download/real-phone.log 2>/dev/null | head -3 | tr "\n" ";"' | tr -d '\r')"

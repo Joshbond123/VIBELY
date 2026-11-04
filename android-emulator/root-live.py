@@ -48,8 +48,20 @@ PINNED = [
 ]
 
 
+STATUS_LOG = "/tmp/root-live.log"
+
+
 def log(msg: str) -> None:
-    print(f"[root-live] {msg}", flush=True)
+    line = f"[root-live] {msg}"
+    print(line, flush=True)
+    # The agent (real-phone.sh) runs on the same runner and reports this file
+    # into the session log, so a pre-launch failure is visible from the gateway
+    # instead of only in a workflow step that ends hours later.
+    try:
+        with open(STATUS_LOG, "a") as fh:
+            fh.write(line + "\n")
+    except Exception:  # noqa: BLE001
+        pass
 
 
 def run(cmd, timeout=900, cwd=None):
