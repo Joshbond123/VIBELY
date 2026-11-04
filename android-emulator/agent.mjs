@@ -412,7 +412,7 @@ async function afterBootTuning(where) {
   await prepareDevicePermissions().catch(() => {});
   for (const script of ['device-realism.sh', 'real-phone.sh', 'hide-root-emulator.sh']) {
     try {
-      const { stdout, stderr } = await execFileAsync('bash', [path.join(SCRIPTS_DIR, script)], { timeout: 120000, maxBuffer: 4 * 1024 * 1024 });
+      const { stdout, stderr } = await execFileAsync('bash', [path.join(SCRIPTS_DIR, script)], { timeout: 420000, maxBuffer: 8 * 1024 * 1024 });
       if (stdout) log(`[${where}] ${script}: ${String(stdout).trim().slice(-600)}`);
       if (stderr) log(`[${where}] ${script} note: ${String(stderr).trim().slice(-300)}`);
     } catch (e) { log(`[${where}] ${script} warning: ${e.message}`); }

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Make the production AVD report and behave like the physical phone it claims
-# to be, and keep its data partition from filling up.
+# Make the production AVD report and behave like the physical phone it claims to
+# be, and keep its data partition from filling up.
 #
 # Why this is the fix and not a workaround
 # ----------------------------------------
@@ -9,17 +9,18 @@
 # Apps that check (TextMe requests a Play Integrity token and looks at the build
 # fingerprint) then refuse to register ("Unable to Sign Up").
 #
-# We boot with a Magisk-patched ramdisk (root-live.py, host side), which gives us
-# `resetprop` for the read-only identity properties, and a Zygisk DenyList so the
-# root itself is invisible to the apps we run.  Nothing is wiped: /data is never
-# formatted, every login/app/setting stays.
+# We boot with a Magisk-patched ramdisk (root-live.py, host side, Magisk 28.1 —
+# 31.x removed the ADB root mode entirely), which gives us `resetprop` for the
+# read-only identity properties, and a Zygisk DenyList so the root itself stays
+# invisible to the apps we run.  /data is never formatted: every login, app,
+# setting and permission survives.
 #
-# Secondary, measured problem this script also fixes: /data was at 100% (0 bytes
+# Secondary, measured problem this script also fixes: /data was at 100 % (0 bytes
 # free) on the live phone, which makes Keystore unable to generate key pairs
 # ("Integrity key attestation record generation failed") and every app's SQLite
-# write fail with SQLITE_FULL.  Cache/crash cleanup is therefore part of being a
-# working phone, not cosmetics.
+# write fail with SQLITE_FULL.
 set -uo pipefail
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 log() { echo "[real-phone] $*"; }
 
 # Never touch `adb root`: on a Play image it bounces adbd and drops the tunnel.
@@ -29,37 +30,38 @@ for _ in $(seq 1 60); do
   sleep 5
 done
 
+# --- 0. Root: match the app to the daemon, then grant adb shell --------------
+if ! adb shell "su -c id" 2>/dev/null | grep -q 'uid=0'; then
+  DAEMON=$(adb shell "/debug_ramdisk/magisk -v 2>/dev/null" | tr -d '\r')
+  if [[ -n "$DAEMON" ]]; then
+    log "Magisk daemon in guest: $DAEMON"
+    # The app must be the same release as the daemon, otherwise its Settings UI
+    # refuses to talk to magiskd and the superuser mode cannot be set.
+    if [[ -f /tmp/Magisk.apk ]]; then
+      adb install -r -g /tmp/Magisk.apk >/dev/null 2>&1 && log "Magisk app installed from the same release"
+    fi
+    python3 "$HERE/magisk_grant.py" 2>&1 | sed 's/^/[real-phone] /'
+  else
+    log "NO ROOT: Magisk ramdisk not active — identity stays unspoofed (stock behaviour)"
+  fi
+fi
+
 SU=""
-for cand in "su -c" "/debug_ramdisk/su -c" "/data/adb/magisk/su -c"; do
+for cand in "su -c" "/debug_ramdisk/su -c"; do
   if adb shell "$cand id" 2>/dev/null | grep -q 'uid=0'; then SU="$cand"; break; fi
 done
 
 if [[ -z "$SU" ]]; then
-  # magiskd runs as root: its own sqlite front-end may authorise the shell uid
-  # (2000) without a UI prompt, which is what makes this usable headlessly.
-  for sql in "UPDATE settings SET value=3 WHERE key='root_access'" \
-             "INSERT OR REPLACE INTO policies (uid, process, policy, until, logging, notification) VALUES (2000, '*', 2, 0, 0, 0)"; do
-    for runner in "magisk --sqlite" "/debug_ramdisk/magisk --sqlite"; do
-      adb shell "$runner \"$sql\"" >/dev/null 2>&1 || true
-    done
-  done
-  sleep 3
-  for cand in "su -c" "/debug_ramdisk/su -c" "/data/adb/magisk/su -c"; do
-    if adb shell "$cand id" 2>/dev/null | grep -q 'uid=0'; then SU="$cand"; break; fi
-  done
-fi
-
-if [[ -z "$SU" ]]; then
-  log "NO ROOT: Magisk ramdisk not active — identity stays unspoofed (stock behaviour)"
   log "reported model: $(adb shell getprop ro.product.model | tr -d '\r') | hardware: $(adb shell getprop ro.hardware | tr -d '\r')"
+  log "VERIFY model=$(adb shell getprop ro.product.model | tr -d '\r') qemu=$(adb shell getprop ro.kernel.qemu | tr -d '\r') su=absent"
   exit 0
 fi
 log "root available via: $SU"
 R() { adb shell "$SU '$*'" 2>/dev/null | tr -d '\r'; }
 
 # --- 1. Physical-device identity (Pixel 6 / oriole, Android 14, release-keys) --
-# Must be internally consistent: fingerprint, build description, board, hardware
-# and the qemu flags all have to agree, otherwise detection gets *easier*.
+# Internally consistent on purpose: fingerprint, description, board and the qemu
+# flags have to agree, otherwise detection gets *easier*, not harder.
 IDENTITY=(
   "ro.product.model|Pixel 6"
   "ro.product.manufacturer|Google"
@@ -77,6 +79,7 @@ IDENTITY=(
   "ro.build.fingerprint|google/oriole/oriole:14/UQ1A.240205.002/11224170:user/release-keys"
   "ro.system.build.fingerprint|google/oriole/oriole:14/UQ1A.240205.002/11224170:user/release-keys"
   "ro.vendor.build.fingerprint|google/oriole/oriole:14/UQ1A.240205.002/11224170:user/release-keys"
+  "ro.bootimage.build.fingerprint|google/oriole/oriole:14/UQ1A.240205.002/11224170:user/release-keys"
   "ro.build.description|oriole-user 14 UQ1A.240205.002 11224170 release-keys"
   "ro.build.type|user"
   "ro.build.tags|release-keys"
@@ -89,21 +92,21 @@ IDENTITY=(
   "ro.boot.hardware|oriole"
   "ro.hardware|oriole"
   "ro.hardware.chipname|oriole"
-  "ro.bootimage.build.fingerprint|google/oriole/oriole:14/UQ1A.240205.002/11224170:user/release-keys"
   "ro.boot.verifiedbootstate|green"
   "ro.boot.flash.locked|1"
   "ro.boot.veritymode|enforcing"
-  "ro.zygote|zygote64_32"
   "ro.com.google.clientidbase|android-google"
 )
 APPLIED=0
 for kv in "${IDENTITY[@]}"; do
   k="${kv%%|*}"; v="${kv#*|}"
-  if R "resetprop -n $k '$v'" >/dev/null; then APPLIED=$((APPLIED+1)); fi
+  R "resetprop -n $k '$v'" >/dev/null
+  APPLIED=$((APPLIED+1))
 done
 log "identity props applied: ${APPLIED}/${#IDENTITY[@]}"
 
-# Persist across reboots/rotations as a Magisk module (post-fs-data runs early).
+# Persist as a Magisk module (post-fs-data.sh runs as root before zygote, so the
+# spoof is in place before any app — including Play services — starts).
 MOD=/data/adb/modules/realidentity
 SCRIPT=""
 for kv in "${IDENTITY[@]}"; do SCRIPT+="resetprop -n '${kv%%|*}' '${kv#*|}'"$'\n'; done
@@ -114,26 +117,19 @@ R "chmod 755 $MOD/post-fs-data.sh"
 log "identity module: $(R "ls /data/adb/modules" | tr '\n' ' ')"
 
 # --- 2. Hide the root that makes this possible --------------------------------
-# DenyList is enforced by Zygisk; both are Magisk settings, applied at next boot.
 R "magisk --sqlite \"UPDATE settings SET value=1 WHERE key='zygisk'\"" >/dev/null
 R "magisk --sqlite \"UPDATE settings SET value=1 WHERE key='denylist'\"" >/dev/null
-R "magisk --sqlite \"UPDATE settings SET value=1 WHERE key='magiskhide'\"" >/dev/null
 for pkg in com.textmeinc.textme com.zhiliaoapp.musically com.android.vending \
-           com.google.android.gms com.google.android.gms.persistent com.google.android.gsf \
-           com.google.android.apps.walletnfcrel; do
+           com.google.android.gms com.google.android.gms.persistent com.google.android.gsf; do
   R "magisk --denylist add $pkg $pkg" >/dev/null
-  # denylist only hides the *enforcement*; also drop the mount visibility for
-  # these UIDs so a casual /proc/mounts or su lookup finds nothing.
-  R "magisk --denylist add $pkg" >/dev/null
 done
-log "zygisk/denylist configured for: textme, tiktok, vending, gms, gsf"
+log "zygisk + denylist configured for textme/tiktok/vending/gms/gsf"
 
-# --- 3. Free the data partition (it was 100% full -> SQLITE_FULL everywhere) --
+# --- 3. Free the data partition (it was 100 % full -> SQLITE_FULL everywhere) --
 BEFORE=$(adb shell df /data | tail -1 | awk '{print $4}')
 R "logcat -b all -c" >/dev/null
-R "rm -rf /data/local/tmp/* /data/tombstones/* /data/anr/* /data/system/dropbox/* /data/log/*" >/dev/null
-R "find /data/data -maxdepth 2 -type d -name cache -exec sh -c 'rm -rf {}/* 2>/dev/null' \\;" >/dev/null
-R "find /data/media/0/Android/data -maxdepth 3 -type d -name cache -exec sh -c 'rm -rf {}/* 2>/dev/null' \\;" >/dev/null
+R "rm -rf /data/local/tmp/* /data/tombstones/* /data/anr/* /data/system/dropbox/*" >/dev/null
+R "for d in /data/data/*/cache; do rm -rf \"\$d\"/* 2>/dev/null; done" >/dev/null
 adb shell pm trim-caches 6000M >/dev/null 2>&1 || true
 AFTER=$(adb shell df /data | tail -1 | awk '{print $4}')
 log "data free: before=${BEFORE}K after=${AFTER}K"
@@ -144,5 +140,4 @@ log "VERIFY hardware=$(adb shell getprop ro.hardware | tr -d '\r') qemu=$(adb sh
 log "VERIFY fingerprint=$(adb shell getprop ro.build.fingerprint | tr -d '\r')"
 log "VERIFY debuggable=$(adb shell getprop ro.debuggable | tr -d '\r') secure=$(adb shell getprop ro.secure | tr -d '\r')"
 log "VERIFY df=$(adb shell df /data | tail -1 | tr -s ' ')"
-log "VERIFY su_visible_to_shell=$(adb shell 'command -v su || echo none' | tr -d '\r')"
-log "VERIFY su_works=$(adb shell "$SU id" | tr -d '\r' | head -1)"
+log "VERIFY su=$(adb shell "$SU id" | tr -d '\r' | head -1)"

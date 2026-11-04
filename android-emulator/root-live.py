@@ -36,6 +36,12 @@ AVD_DIR = os.environ.get("AVD_DIR") or os.path.expanduser("~/.android/avd/vibely
 RAMDISK_OUT = "/tmp/vibely-ramdisk.img"
 WORK = "/tmp/vibely-root-live"
 MAGISK_APK = "/tmp/Magisk.apk"
+# Magisk 31.x removed the interactive root prompt *and* the "Superuser access:
+# Apps and ADB" mode (its own changelog: superuser is now granted ahead of time
+# from the Superuser tab, which cannot grant non-app UIDs like adb shell). That
+# makes `adb shell su` impossible on 31.x, i.e. headless automation cannot use
+# the root at all. 28.1 is the newest release that still grants ADB root, and it
+# is the version the earlier root experiment verified end-to-end.
 PINNED = [
     "https://github.com/topjohnwu/Magisk/releases/download/v28.1/Magisk-v28.1.apk",
     "https://github.com/topjohnwu/Magisk/releases/download/v27.0/Magisk-v27.0.apk",
@@ -75,19 +81,7 @@ def image_ramdisk() -> str | None:
 def fetch_magisk() -> bool:
     if os.path.exists(MAGISK_APK) and os.path.getsize(MAGISK_APK) > 5_000_000:
         return True
-    try:
-        req = urllib.request.Request("https://api.github.com/repos/topjohnwu/Magisk/releases/latest",
-                                     headers={"User-Agent": "vibely-root-live"})
-        with urllib.request.urlopen(req, timeout=60) as r:
-            data = json.loads(r.read().decode())
-        for a in data.get("assets", []):
-            if a["name"].endswith(".apk"):
-                urllib.request.urlretrieve(a["browser_download_url"], MAGISK_APK)
-                if os.path.getsize(MAGISK_APK) > 5_000_000:
-                    log(f"Magisk {data.get('tag_name')} -> {os.path.getsize(MAGISK_APK)} bytes")
-                    return True
-    except Exception as exc:  # noqa: BLE001
-        log(f"Magisk API resolve failed: {exc}")
+    # Deliberately NOT GitHub "latest": see PINNED above (31.x breaks ADB root).
     for url in PINNED:
         run(["curl", "-sSL", "-o", MAGISK_APK, url], timeout=900)
         if os.path.exists(MAGISK_APK) and os.path.getsize(MAGISK_APK) > 5_000_000:
