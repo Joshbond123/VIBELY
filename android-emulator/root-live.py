@@ -161,6 +161,55 @@ def patch(src: str) -> bool:
     return True
 
 
+# ---------------------------------------------------------------------------
+# Identity / root-policy hook injection
+# ---------------------------------------------------------------------------
+HOOK_SRC = os.path.join(os.path.dirname(os.path.abspath(__file__)), "real-phone-hook.sh")
+HOOK_DST = "/data/adb/post-fs-data.d/real-phone.sh"
+
+
+def inject_hook() -> bool:
+    """Write the real-phone hook into the AVD's /data before the guest boots.
+
+    This is what makes the identity real without touching the UI: Magisk executes
+    /data/adb/post-fs-data.d/*.sh as root in the post-fs-data stage, before
+    zygote, so `resetprop` lands on the identity properties *and* the adb-shell
+    superuser policy exists, on every boot.  Editing the ext4 userdata image with
+    debugfs is the supported, offline way to do it (the emulator is not running).
+    """
+    img = None
+    for name in ("userdata-qemu.img", "userdata.img"):
+        cand = os.path.join(AVD_DIR, name)
+        if os.path.exists(cand):
+            img = cand
+            break
+    if not img:
+        log(f"FAIL no userdata image in {AVD_DIR}")
+        return False
+    kind = run(f"file -b '{img}'").stdout.strip()
+    log(f"userdata image: {img} :: {kind[:80]}")
+    if "ext" not in kind.lower():
+        log("FAIL userdata is not an ext filesystem (qcow2?); hook not injected")
+        return False
+    if not os.path.exists(HOOK_SRC):
+        log(f"FAIL hook source missing: {HOOK_SRC}")
+        return False
+    for d in ("/data/adb", "/data/adb/post-fs-data.d"):
+        run(["debugfs", "-w", "-R", f"mkdir {d}", img])
+    r = run(["debugfs", "-w", "-R", f"rm {HOOK_DST}", img])
+    r = run(["debugfs", "-w", "-R", f"write {HOOK_SRC} {HOOK_DST}", img])
+    if r.returncode != 0:
+        log(f"FAIL debugfs write rc={r.returncode} {r.stderr[-300:]}")
+        return False
+    run(["debugfs", "-w", "-R", f"sif {HOOK_DST} mode 0100755", img])
+    run(["debugfs", "-w", "-R", f"sif {HOOK_DST} uid 0", img])
+    run(["debugfs", "-w", "-R", f"sif {HOOK_DST} gid 0", img])
+    listing = run(["debugfs", "-R", f"stat {HOOK_DST}", img]).stdout
+    ok = "Inode:" in listing
+    log(f"{'PASS' if ok else 'FAIL'} identity hook injected at {HOOK_DST}")
+    return ok
+
+
 def main() -> int:
     src = image_ramdisk()
     if not src:
@@ -176,6 +225,7 @@ def main() -> int:
         log("FAIL ramdisk patch - booting the stock ramdisk (phone unchanged)")
         return 1
     log(f"PASS Magisk ramdisk ready: {RAMDISK_OUT} ({os.path.getsize(RAMDISK_OUT)} bytes)")
+    inject_hook()   # identity hook; a failure here only means no spoof, not a bad boot
     return 0
 
 
