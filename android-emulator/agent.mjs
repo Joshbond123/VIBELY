@@ -412,6 +412,9 @@ async function ensureLiveAttached(reason = 'watchdog') {
 
 /** The phone is back on its feet: re-apply the Play/permission/realism tuning. */
 async function afterBootTuning(where) {
+  lastBootOkAt = Date.now();
+  // FIRST: stop the churn that kills adb within a minute of boot.
+  await suppressBackgroundChurn(where).catch((e) => log(`[${where}] churn suppression: ${e.message}`));
   await prepareDevicePermissions().catch(() => {});
   for (const script of ['device-realism.sh', 'real-phone.sh', 'hide-root-emulator.sh']) {
     try {
@@ -432,6 +435,23 @@ async function afterBootTuning(where) {
  */
 async function restartEmulatorLocally(reason = 'adb-lost') {
   if (emulatorRestartInFlight) return false;
+  // ESCALATION: if the phone keeps dying within two minutes of a successful boot,
+  // this runner's AVD/emulator is poisoned and relaunching it again just repeats
+  // the freeze for the user. Hand over to a fresh runner (which restores the last
+  // good checkpoint) instead of looping forever on the same disk.
+  const sinceBoot = lastBootOkAt ? Date.now() - lastBootOkAt : Infinity;
+  if (sinceBoot < 120000) {
+    rapidRestartCount += 1;
+    if (rapidRestartCount >= 3) {
+      log(`EMULATOR SELF-HEAL: ${rapidRestartCount} rapid deaths within 2 minutes of boot - this runner is not recovering. Requesting a replacement runner instead of relaunching again.`);
+      await captureEmulatorForensics('rapid-restart-escalation').catch(() => {});
+      retiring = true;
+      await dispatchReplacementWorkflow().catch((e) => log('Replacement dispatch failed: ' + e.message));
+      return false;
+    }
+  } else {
+    rapidRestartCount = 0;
+  }
   emulatorRestartInFlight = true;
   try {
     log(`EMULATOR SELF-HEAL: relaunching ${AVD_NAME} from its own disk (reason=${reason}; apps/accounts/data are preserved).`);
@@ -501,6 +521,7 @@ async function restartEmulatorLocally(reason = 'adb-lost') {
       return false;
     }
 
+    lastBootOkAt = Date.now();
     log('EMULATOR SELF-HEAL: Android booted; re-attaching display, control and tuning.');
     await sleep(2500);
     await adbShell('svc power stayon true; input keyevent 224', 20000).catch(() => {});
@@ -523,6 +544,10 @@ async function restartEmulatorLocally(reason = 'adb-lost') {
     }
     await deviceDoctor('post-self-heal').catch(() => {});
     log('EMULATOR SELF-HEAL COMPLETE: the phone is live again with its data intact.');
+    // If this boot survives past the two-minute window the runner is healthy again.
+    setTimeout(() => {
+      if (Date.now() - lastBootOkAt > 110000) rapidRestartCount = 0;
+    }, 125000).unref?.();
     return true;
   } catch (e) {
     log('EMULATOR SELF-HEAL error: ' + e.message);
@@ -769,6 +794,8 @@ let lastDisplayGuardAt = 0;
 let blankFrameStreak = 0;
 
 let compileStormUntil = 0;
+let lastBootOkAt = 0;
+let rapidRestartCount = 0;
 async function keepDisplayAlive(where = 'guard') {
   const stay = (await adbShell('settings get global stay_on_while_plugged_in', 10000).catch(() => ({ stdout: '' }))).stdout.trim();
   if (stay !== '7') {
@@ -815,6 +842,46 @@ async function screenProbeBytes() {
     .catch(() => ({ stdout: '' }))).stdout.trim();
   const n = Number((out.match(/(\d+)\s*$/) || [])[1]);
   return Number.isFinite(n) ? n : -1;
+}
+
+
+/**
+ * Kill the guest's background churn BEFORE anything else runs.
+ *
+ * Two things starve this guest within a minute of every boot and make adbd stop
+ * answering (which the user sees as a frozen/blank/restarting phone):
+ *   1. Android schedules background dexopt whenever the device reports CHARGING,
+ *      and the emulator always reports AC online. TikTok + Vibes are large, so
+ *      dex2oat pinned all 4 vCPUs (loadavg 20, measured) and adb read "offline".
+ *   2. Play Store auto-updates then compile again in a loop.
+ * The emulator's own boot scripts re-assert "charging", so this is re-applied
+ * here, at the front of boot tuning, and again by the supervisor every 20s.
+ */
+async function suppressBackgroundChurn(where = 'boot') {
+  const cmds = [
+    // Device on battery: background dexopt is only scheduled while charging.
+    'dumpsys battery unplug',
+    'dumpsys battery set ac 0',
+    'dumpsys battery set usb 0',
+    'dumpsys battery set wireless 0',
+    'dumpsys battery set status 3',
+    'dumpsys battery set level 90',
+    // Cheapest possible background compilation if it ever does run.
+    'setprop pm.dexopt.bg-dexopt verify',
+    'setprop pm.dexopt.bg-dexopt-low-priority verify',
+    // Play Store must not churn; it still works when opened.
+    'cmd appops set com.android.vending RUN_ANY_IN_BACKGROUND ignore',
+    'cmd appops set com.android.vending WAKE_LOCK ignore',
+    'am force-stop com.android.vending',
+    // Keep the panel awake no matter the power state.
+    'settings put system screen_off_timeout 2147483647',
+    'settings put global stay_on_while_plugged_in 7',
+    'svc power stayon true',
+  ];
+  for (const c of cmds) {
+    try { await adbShell(c, 12000); } catch (_) {}
+  }
+  log(`[${where}] background churn suppressed (battery unplugged, Play frozen, panel stay-on)`);
 }
 
 async function tunePlayStoreForEmulator() {
