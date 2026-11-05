@@ -155,6 +155,18 @@ def guest_install_busy():
         return None
 
 
+def _apparent_bytes(path):
+    """Total apparent size of the files under `path` (sparse files read as holes)."""
+    total = 0
+    for p in Path(path).rglob('*'):
+        try:
+            if p.is_file():
+                total += p.stat().st_size
+        except OSError:
+            pass
+    return total
+
+
 def capture(avd, destination, hold=False):
     avd = Path(avd).resolve(); destination = Path(destination).resolve()
     if not (avd/'config.ini').is_file():
@@ -174,7 +186,17 @@ def capture(avd, destination, hold=False):
     if not evidence['guest']['boot']:
         raise RuntimeError('Unbooted Android is not a valid checkpoint')
     destination.parent.mkdir(parents=True, exist_ok=True)
-    with tempfile.TemporaryDirectory(prefix='vibely-avd-') as tmp:
+    # ROOT CAUSE of "generation never advances": the runner has one AVD worth of
+    # free disk, not two. The old flow copied the whole AVD (several GB) into a
+    # /tmp staging dir and only then compressed it, which died with
+    #   rsync: write failed on ".../userdata-qemu.img.qcow2": Disk quota exceeded (122)
+    # so no checkpoint was ever published and every rotation threw the installs
+    # away. Default is now a single pass: the guest is paused and the live disks
+    # are streamed straight into the compressed archive (tar --sparse -> zstd),
+    # which needs room for the archive only. Set VIBELY_CHECKPOINT_DIRECT=0 to get
+    # the old staging flow back on a runner that has the space.
+    direct = os.environ.get('VIBELY_CHECKPOINT_DIRECT', '1') != '0'
+    with tempfile.TemporaryDirectory(prefix='vibely-avd-meta-') as tmp:
         os.chmod(tmp, 0o700)
         stage = Path(tmp)/'avd'
         # A production Google Play image authorizes this HOST key. A new runner
@@ -189,6 +211,22 @@ def capture(avd, destination, hold=False):
                 raise RuntimeError('Original ADB host key missing; portable restore refused')
             shutil.copyfile(key, host_keys/name)
             os.chmod(host_keys/name, 0o600)
+        # The manifest is written BEFORE the pause: guest_evidence() talks to adb,
+        # which is unavailable while the vCPU is stopped.
+        Path(tmp, 'manifest.json').write_text(json.dumps(evidence, sort_keys=True))
+        # Junk that must not travel: RAM snapshots, per-boot temp dirs, locks.
+        excluded = ['avd/snapshots', 'avd/tmpAdbCmds', 'avd/modem_simulator', '*.lock']
+        excluded += os.environ.get('VIBELY_CHECKPOINT_EXTRA_EXCLUDES', '').split()
+        excluded = tuple(e for e in excluded if e)
+        partial = destination.with_suffix(destination.suffix + '.partial')
+        free = shutil.disk_usage(destination.parent).free
+        if direct:
+            apparent = _apparent_bytes(avd)
+            print('[capture] direct stream: avd apparent=%dB, free on destination fs=%dB'
+                  % (apparent, free), flush=True)
+            if free < 1024**3:
+                raise RuntimeError('Refusing checkpoint: only %dB free next to %s; the archive '
+                                   'needs >1GB (runner disk exhausted)' % (free, destination))
         stopped = False
         pause_started = 0.0
         try:
@@ -200,34 +238,35 @@ def capture(avd, destination, hold=False):
             run('sync')
             # Full AVD disks: userdata, metadata/encryption/keystore, SD card,
             # hardware config and qcow2 overlays travel together. The guest is
-            # paused, therefore the copy is crash-consistent and boots cold.
-            # The staging copy must be independent of the live disks (the guest is
-            # resumed immediately afterwards, and a hardlink farm would then
-            # mutate while tar reads it), so this stays a real copy.
-            # RAM snapshots are no longer part of the format — dropping them from
-            # the copy keeps the vCPU-pause window short and the archive small.
-            # Copy only the state-bearing files; skipping snapshots/tmp/lock
-            # junk keeps the vCPU-pause window (the part the user feels as a
-            # freeze) as short as possible. Compression happens after the resume.
-            stage.mkdir(parents=True, exist_ok=True)
-            excluded = ('snapshots', 'tmpAdbCmds', 'modem_simulator', 'hardware-qemu.ini.lock',
-                        'multiinstance.lock', '*.lock')
-            if shutil.which('rsync'):
-                run('rsync', '-a', *[f'--exclude={e}' for e in excluded],
-                    str(avd) + '/', str(stage) + '/', timeout=900)
+            # paused, therefore the read is crash-consistent and boots cold.
+            if direct:
+                # One pass, no staging copy. Multiple -C keeps the archive layout
+                # identical to the old flow: avd/..., manifest.json, host-adb/....
+                run('tar', '--sparse', '--use-compress-program=zstd -3 -T0', '-cf', str(partial),
+                    *[f'--exclude={e}' for e in excluded],
+                    '-C', str(avd.parent), avd.name,
+                    '-C', str(tmp), 'manifest.json', 'host-adb', timeout=2400)
+                os.chmod(partial, 0o600)
             else:
-                run('cp', '-a', '--reflink=auto', str(avd), str(stage), timeout=900)
-            shutil.rmtree(stage/'snapshots', ignore_errors=True)
-            for p in list(stage.rglob('*')):
-                if p.name.endswith('.lock'):
-                    try:
-                        if p.is_dir(): shutil.rmtree(p)
-                        else: p.unlink()
-                    except OSError:
-                        pass
+                # Legacy two-pass flow (needs a second AVD worth of disk).
+                stage.mkdir(parents=True, exist_ok=True)
+                if shutil.which('rsync'):
+                    run('rsync', '-a', '--sparse', *[f'--exclude={e.split("/")[-1]}' for e in excluded],
+                        str(avd) + '/', str(stage) + '/', timeout=900)
+                else:
+                    run('cp', '-a', '--reflink=auto', str(avd), str(stage), timeout=900)
+                shutil.rmtree(stage/'snapshots', ignore_errors=True)
+                for p in list(stage.rglob('*')):
+                    if p.name.endswith('.lock'):
+                        try:
+                            if p.is_dir(): shutil.rmtree(p)
+                            else: p.unlink()
+                        except OSError:
+                            pass
         except BaseException:
             # --hold is only valid after a SUCCESSFUL capture. Any failed
             # capture must release the original phone, including copy errors.
+            partial.unlink(missing_ok=True)
             if stopped and hold:
                 console('avd', 'start')
             raise
@@ -240,13 +279,16 @@ def capture(avd, destination, hold=False):
                     raise ResumeFailed(
                         'guest did not answer adb %.1fs after resuming from the checkpoint pause '
                         '(pause was %.0fs); the emulator must be relaunched' % (90, pause_len))
-        Path(tmp, 'manifest.json').write_text(json.dumps(evidence, sort_keys=True))
-        partial = destination.with_suffix(destination.suffix + '.partial')
+            elif stopped and hold:
+                print('[capture] guest left paused (hold=true) after %.1fs'
+                      % (time.time() - pause_started))
         try:
-            run('tar', '--sparse', '--use-compress-program=zstd -3 -T0', '-cf', str(partial), '-C', tmp, 'avd', 'manifest.json', 'host-adb', timeout=900)
-            os.chmod(partial, 0o600)
+            if not direct:
+                run('tar', '--sparse', '--use-compress-program=zstd -3 -T0', '-cf', str(partial),
+                    '-C', str(tmp), 'avd', 'manifest.json', 'host-adb', timeout=900)
+                os.chmod(partial, 0o600)
             # Validate the entire compressed stream, not merely archive headers.
-            run('zstd', '-t', str(partial), timeout=600)
+            run('zstd', '-t', str(partial), timeout=900)
             os.replace(partial, destination)
         except BaseException:
             partial.unlink(missing_ok=True)

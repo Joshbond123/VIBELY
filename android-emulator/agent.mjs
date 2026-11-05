@@ -902,15 +902,20 @@ async function runStateManager(mode, opts = {}) {
       }
       const started = Date.now();
       const env={...process.env,EMULATOR_SESSION_ID:SESSION_ID,CHECKPOINT_HOLD:hold?'true':'false',AVD_DIR:process.env.AVD_DIR||`${process.env.HOME}/.android/avd/vibely_pixel6_api34.avd`};
+      let published = false;
       try {
         const {stdout,stderr}=await execFileAsync('python3',[path.join(SCRIPTS_DIR,'github_live_checkpoint.py')],{timeout:1800000,maxBuffer:16*1024*1024,env});
         if(stdout)process.stdout.write(stdout);if(stderr)process.stderr.write(stderr);
+        // The publisher prints FULL_AVD_GITHUB_CHECKPOINT_PUBLISHED only after the
+        // release + state.json generation were actually written.
+        published = /FULL_AVD_GITHUB_CHECKPOINT_PUBLISHED/.test(stdout||'');
         lastWholeAvdAt = Date.now();
-        log(`Whole-AVD checkpoint published in ${Math.round((Date.now()-started)/1000)}s (reason=${opts.reason||mode}, hold=${hold}).`);
+        log(`Whole-AVD checkpoint ${published?'published':'did NOT publish'} in ${Math.round((Date.now()-started)/1000)}s (reason=${opts.reason||mode}, hold=${hold}).`);
+        if (!published) log('Whole-AVD checkpoint ran but no publish marker was emitted; state generation is unchanged.');
       } catch (e) {
         log(`Whole-AVD checkpoint failed after ${Math.round((Date.now()-started)/1000)}s: ${e.message}`);
       }
-      return;
+      return published;
     }
     const { stdout, stderr } = await execFileAsync('bash', [STATE_SCRIPT, mode], {
       timeout: 180000,
@@ -1108,8 +1113,12 @@ async function handleGatewayRpc(action, payload) {
       // viewer or a quiet-window check silently skipped it and the caller was told
       // "ok" anyway -- that is exactly how the TikTok install and everything after
       // 18:00 never reached the state branch.
-      const captured = await livePersist('explicit-checkpoint', { whole: true, hold: true, force: true });
-      return { ok: captured !== false, captured: captured !== false, backed_up_at: new Date().toISOString() };
+      // hold=false on purpose: an explicit checkpoint from the UI/API must leave
+      // the phone RUNNING. hold=true leaves the vCPU stopped for a rotation that
+      // may never come, i.e. a frozen handset.
+      const captured = await livePersist('explicit-checkpoint', { whole: true, hold: false, force: true });
+      if (captured === false) return { ok: false, captured: false, error: 'checkpoint not published (see agent log)' };
+      return { ok: true, captured: true, backed_up_at: new Date().toISOString() };
     }
     case 'apply_delta_state': {
       await runStateManager('restore');
