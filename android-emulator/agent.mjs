@@ -75,7 +75,7 @@ const EMERGENCY_EMPTY_ONLY = String(process.env.EMULATOR_EMPTY_GATEWAY_ONLY || '
 // on no viewer, no download/install and 2 minutes of quiet.
 // A live viewer may delay a capture but never indefinitely (bounds state loss).
 const VIEWER_CAPTURE_GRACE_MS = 12 * 60 * 1000;
-const WHOLE_AVD_MIN_INTERVAL_MS = Math.max(5, Number(process.env.WHOLE_AVD_MIN_INTERVAL_MIN || 10)) * 60 * 1000;
+const WHOLE_AVD_MIN_INTERVAL_MS = Math.max(5, Number(process.env.WHOLE_AVD_MIN_INTERVAL_MIN || 30)) * 60 * 1000;
 const INSTALL_TEST_PACKAGE = (process.env.VIBELY_INSTALL_TEST_PACKAGE || '').trim();
 // A run only boots when the workflow coordination decided it should, so a booted
 // emulator is a legitimate replacement candidate and may take the phone over from
@@ -329,11 +329,14 @@ async function quickAdbRecovery() {
   await sleep(800);
   try { await execFileAsync('adb', ['start-server'], { timeout: 20000, killSignal: 'SIGKILL' }); } catch (_) {}
   await sleep(800);
-  for (let i = 0; i < 6; i++) {
+  for (let i = 0; i < 8; i++) {
     if (await deviceOnline()) {
       const boot = (await adbShell('getprop sys.boot_completed', 15000).catch(() => ({ stdout: '' }))).stdout.trim();
       if (boot.startsWith('1')) return true;
     }
+    // "device offline" is often just a stale transport handle: nudge it before
+    // concluding the emulator is dead and killing it.
+    try { await execFileAsync('adb', ['reconnect', 'offline'], { timeout: 10000, killSignal: 'SIGKILL' }); } catch (_) {}
     await sleep(3000);
   }
   return false;
@@ -438,6 +441,19 @@ async function restartEmulatorLocally(reason = 'adb-lost') {
     liveDevice = undefined;
 
     await hostSh('pkill -9 -f "qemu-system-x86_64" || true', 15000);
+    // Wait for the process to actually be gone: spawning a second emulator while the
+    // corpse still holds :5554 / the AVD leaves adb permanently "offline", which is
+    // the endless stuck-phone loop this used to produce.
+    for (let i = 0; i < 20; i++) {
+      if (!(await qemuPids()).length) break;
+      await sleep(1000);
+    }
+    const leftovers = await qemuPids();
+    if (leftovers.length) {
+      log(`EMULATOR SELF-HEAL: ${leftovers.length} qemu process(es) survived SIGKILL; sending KILL again.`);
+      await hostSh(`kill -9 ${leftovers.join(' ')} || true`, 10000);
+      await sleep(2000);
+    }
     // Free the runner's memory of stale helpers so the relaunch cannot inherit an
     // out-of-memory situation (the usual reason a cloud emulator disappears).
     await hostSh('pkill -9 -f "scrcpy" || true; pkill -9 -f "adb exec-out" || true', 12000);
@@ -836,16 +852,27 @@ async function activeViewerCount() {
  *  45 min) plus a quiet-window check, and a forced capture (rotation) skips only
  *  the rate limit.
  */
+let lastPersistError = '';
 async function livePersist(reason = 'periodic', { whole = false, hold = false, force = false } = {}) {
   log(`Live persist start (${reason}, whole=${whole}, hold=${hold}, force=${force})`);
   let captured = false;
   try {
     const out = await runStateManager('backup', { reason, hold, force, whole });
     captured = out !== false;
+    lastPersistError = '';
   } catch (e) {
+    lastPersistError = e.message || String(e);
     log(`Live persist warning (${reason}): ${e.message}`);
   }
   log(`Live persist done (${reason})`);
+  // A capture that could not RESUME the VM means the phone is frozen right now.
+  // Relaunch immediately instead of waiting for the supervisor to notice a dead
+  // adb transport (that delay is what users see as "the phone is stuck").
+  if (!captured && /refused to resume|did not answer adb/i.test(lastPersistError)) {
+    log('Post-capture: guest stuck paused - relaunching the emulator from its own disk.');
+    restartEmulatorLocally('post-capture-wedged').catch(() => {});
+    return false;
+  }
   // A checkpoint pauses the vCPU while several GB are copied, so the guest needs a
   // moment to answer adb again. A single failed probe used to relaunch (=pkill)
   // the emulator immediately, which killed healthy sessions right after a capture.

@@ -167,6 +167,28 @@ def _apparent_bytes(path):
     return total
 
 
+def resume_guest(attempts=4):
+    """Start the vCPU again and CONFIRM it. Returning without a confirmed resume
+    is what left the phone frozen: adb then reads "offline", the supervisor kills
+    the emulator and relaunches it, and the freeze looks like a random hang."""
+    last = None
+    for i in range(attempts):
+        try:
+            console('avd', 'start')
+            time.sleep(2 + i)
+            status = console('avd', 'status').lower()
+            if 'stopped' not in status:
+                print('[capture] vCPU resumed (attempt %d, status=%s)'
+                      % (i + 1, status.strip().splitlines()[0][:40] if status.strip() else '?'), flush=True)
+                return True
+            last = 'still stopped per avd status'
+        except Exception as e:  # console rejected / adb dropped
+            last = str(e)[:200]
+        time.sleep(3 * (i + 1))
+    raise ResumeFailed('emulator refused to resume after %d attempts (%s); '
+                       'the VM is stuck paused and must be relaunched' % (attempts, last))
+
+
 def capture(avd, destination, hold=False):
     avd = Path(avd).resolve(); destination = Path(destination).resolve()
     if not (avd/'config.ini').is_file():
@@ -242,7 +264,7 @@ def capture(avd, destination, hold=False):
             if direct:
                 # One pass, no staging copy. Multiple -C keeps the archive layout
                 # identical to the old flow: avd/..., manifest.json, host-adb/....
-                run('tar', '--sparse', '--use-compress-program=zstd -3 -T0', '-cf', str(partial),
+                run('tar', '--sparse', '--use-compress-program=zstd -1 -T0', '-cf', str(partial),
                     *[f'--exclude={e}' for e in excluded],
                     '--transform=s,^%s,avd,' % re.escape(avd.name),
                     '-C', str(avd.parent), avd.name,
@@ -273,19 +295,24 @@ def capture(avd, destination, hold=False):
             raise
         finally:
             if stopped and not hold:
-                console('avd', 'start')
+                # Resume FIRST and never swallow the failure: a guest left paused is a
+                # frozen phone, and the supervisor then fights it with relaunches.
+                resumed = resume_guest()
                 pause_len = time.time() - pause_started
-                print('[capture] guest resumed after %.1fs of vCPU pause' % pause_len)
-                if not guest_responding(90):
+                print('[capture] guest resumed after %.1fs of vCPU pause' % pause_len, flush=True)
+                # A multi-GB archive keeps the vCPU stopped for minutes; give the guest
+                # a real chance to answer adb before declaring it dead (it used to be 90s).
+                grace = int(os.environ.get('VIBELY_RESUME_GRACE_SEC', '240'))
+                if not guest_responding(grace):
                     raise ResumeFailed(
-                        'guest did not answer adb %.1fs after resuming from the checkpoint pause '
-                        '(pause was %.0fs); the emulator must be relaunched' % (90, pause_len))
+                        'guest did not answer adb %ss after a CONFIRMED resume (pause was %.0fs too long); '
+                        'the emulator must be relaunched' % (grace, pause_len))
             elif stopped and hold:
                 print('[capture] guest left paused (hold=true) after %.1fs'
                       % (time.time() - pause_started))
         try:
             if not direct:
-                run('tar', '--sparse', '--use-compress-program=zstd -3 -T0', '-cf', str(partial),
+                run('tar', '--sparse', '--use-compress-program=zstd -1 -T0', '-cf', str(partial),
                     '-C', str(tmp), 'avd', 'manifest.json', 'host-adb', timeout=900)
                 os.chmod(partial, 0o600)
             # Validate the entire compressed stream, not merely archive headers.
