@@ -634,8 +634,8 @@ async function isGuestBusyForPersist() {
     // whole-AVD capture is what turned "busy" into "frozen". Defer instead.
     const load = Number((await adbShell('cat /proc/loadavg 2>/dev/null', 10000)).stdout.trim().split(/\s+/)[0]);
     if (Number.isFinite(load) && load > 6) return `high_load_${load.toFixed(1)}`;
-    const compiling = (await adbShell('ps -A -o ARGS 2>/dev/null | grep -c dex2oat', 12000)).stdout.trim();
-    if (Number(compiling) > 0) return 'dex2oat_compiling';
+    // NOTE: do NOT treat a mere dex2oat process as busy - idle dex2oat children
+    // linger after a job and used to block every checkpoint. Only real load counts.
     // NOTE: an idle Play Store home/listing screen is NOT a reason to skip a
     // capture. Blocking on it meant a session that ended on the store never
     // persisted anything and lost every install at the next rotation. Only real
