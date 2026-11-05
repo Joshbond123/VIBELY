@@ -852,6 +852,7 @@ async function activeViewerCount() {
  *  45 min) plus a quiet-window check, and a forced capture (rotation) skips only
  *  the rate limit.
  */
+const processStartAt = Date.now();
 let lastPersistError = '';
 async function livePersist(reason = 'periodic', { whole = false, hold = false, force = false } = {}) {
   log(`Live persist start (${reason}, whole=${whole}, hold=${hold}, force=${force})`);
@@ -901,6 +902,15 @@ async function runStateManager(mode, opts = {}) {
       if(mode==='restore'){log('Native-verified whole AVD already restored pre-boot; skipping logical restore.');return;}
       const hold = Boolean(opts.hold);
       const force = Boolean(opts.force) || hold;
+      // WARM-UP: a whole-AVD capture pauses the vCPU for minutes. Doing that in the
+      // first minutes after boot (when the user is finally holding a working phone)
+      // is perceived as "the phone got stuck again", so the first automatic capture
+      // is held back by WHOLE_AVD_WARMUP_MIN (explicit checkpoints still force).
+      const warmupMs = Math.max(0, Number(process.env.WHOLE_AVD_WARMUP_MIN || 15)) * 60 * 1000;
+      if (!force && warmupMs && (Date.now() - processStartAt) < warmupMs) {
+        log(`Whole-AVD capture skipped (warm-up: ${Math.round((Date.now()-processStartAt)/60000)}m < ${warmupMs/60000}m since this agent started; reason=${opts.reason||mode})`);
+        return false;
+      }
       if (!force && Date.now() - lastWholeAvdAt < WHOLE_AVD_MIN_INTERVAL_MS) {
         log(`Whole-AVD capture skipped (rate limit: ${Math.round((Date.now()-lastWholeAvdAt)/60000)}m < ${WHOLE_AVD_MIN_INTERVAL_MS/60000}m since last; reason=${opts.reason||mode})`);
         return false;
