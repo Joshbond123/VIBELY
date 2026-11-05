@@ -605,6 +605,12 @@ async function isGuestBusyForPersist() {
     if (/download|install/i.test(svc)) return 'play_download_service';
     const act = (await adbShell('dumpsys activity activities 2>/dev/null | grep -iE "vending|PackageInstaller|Download" | head -25', 15000)).stdout || '';
     if (/DOWNLOADING|downloading|Installing|INSTALLING|Pending\.{0,3}$/i.test(act)) return 'play_or_installer_ui';
+    // A compiling guest (dex2oat after a restore) is at 100% CPU: pausing it for a
+    // whole-AVD capture is what turned "busy" into "frozen". Defer instead.
+    const load = Number((await adbShell('cat /proc/loadavg 2>/dev/null', 10000)).stdout.trim().split(/\s+/)[0]);
+    if (Number.isFinite(load) && load > 6) return `high_load_${load.toFixed(1)}`;
+    const compiling = (await adbShell('ps -A -o ARGS 2>/dev/null | grep -c dex2oat', 12000)).stdout.trim();
+    if (Number(compiling) > 0) return 'dex2oat_compiling';
     // NOTE: an idle Play Store home/listing screen is NOT a reason to skip a
     // capture. Blocking on it meant a session that ended on the store never
     // persisted anything and lost every install at the next rotation. Only real
@@ -762,6 +768,7 @@ async function reconcileInstallQueue(where = 'promote') {
 let lastDisplayGuardAt = 0;
 let blankFrameStreak = 0;
 
+let compileStormUntil = 0;
 async function keepDisplayAlive(where = 'guard') {
   const stay = (await adbShell('settings get global stay_on_while_plugged_in', 10000).catch(() => ({ stdout: '' }))).stdout.trim();
   if (stay !== '7') {
@@ -779,6 +786,16 @@ async function keepDisplayAlive(where = 'guard') {
     await sleep(1200);
     await adbShell('wm dismiss-keyguard', 10000).catch(() => {});
     await adbShell('input keyevent 82', 8000).catch(() => {});     // MENU = unblank
+  }
+  if (Number((await adbShell('ps -A -o ARGS 2>/dev/null | grep -c dex2oat', 12000).catch(() => ({ stdout: '0' }))).stdout.trim()) > 0) {
+    compileStormUntil = Date.now() + 10 * 60 * 1000;
+  }
+  // Re-assert the unplugged/battery state: a guest that turns "charging" again
+  // re-arms background dexopt, which is what froze the phone.
+  const ac = (await adbShell('dumpsys battery | grep -m1 "AC powered"', 10000).catch(() => ({ stdout: '' }))).stdout;
+  if (/AC powered:\s*true/i.test(ac)) {
+    log(`Display guard (${where}): device reports charging again - unplugging to stop background dexopt.`);
+    await adbShell('dumpsys battery unplug; dumpsys battery set ac 0; dumpsys battery set usb 0; dumpsys battery set status 3; dumpsys battery set level 90', 12000).catch(() => {});
   }
   // Play Store storm: it auto-updates apps at boot, pins itself in the
   // foreground (AssetBrowserActivity) and starves the CPU until adb dies.
@@ -815,6 +832,18 @@ async function tunePlayStoreForEmulator() {
     'cmd appops set com.android.vending RUN_IN_BACKGROUND allow',
     'cmd appops set com.android.vending WAKE_LOCK ignore',
     'am force-stop com.android.vending',
+    // ROOT CAUSE of the blank/frozen phone: with the emulator reporting "charging",
+    // Android schedules background dexopt for every installed app. TikTok + Vibes
+    // are huge, so dex2oat pinned all 4 vCPUs (loadavg 20) for many minutes, adbd
+    // stopped answering, the supervisor relaunched the emulator and the compile
+    // started over - forever. Reporting the phone as unplugged stops the job.
+    'dumpsys battery unplug',
+    'dumpsys battery set ac 0',
+    'dumpsys battery set usb 0',
+    'dumpsys battery set wireless 0',
+    'dumpsys battery set status 3',
+    'dumpsys battery set level 90',
+    'dumpsys battery set present true',
     'cmd appops set com.google.android.gms RUN_IN_BACKGROUND allow',
     'cmd appops set com.google.android.gms RUN_ANY_IN_BACKGROUND allow',
     'cmd appops set com.android.providers.downloads RUN_IN_BACKGROUND allow',
@@ -1649,6 +1678,13 @@ function startEmulatorSupervisor() {
       }
       const deadSec = Math.round((Date.now() - lastAdbHealthyAt) / 1000);
       if (deadSec < 40) return;
+      // Give a compiling guest a chance: adb can stall while dex2oat owns every
+      // vCPU, and relaunching restarts the compile from scratch (the old endless
+      // blank-screen loop). Only escalate after the storm window.
+      if (deadSec < 300 && Date.now() < compileStormUntil) {
+        log(`SUPERVISOR: adb stalled for ${deadSec}s but the guest was compiling recently - waiting instead of relaunching.`);
+        return;
+      }
       log(`SUPERVISOR: emulator unreachable for ${deadSec}s (duty tick age ${Math.round((Date.now() - lastDutyTickAt) / 1000)}s) - starting self-heal.`);
       adbRecoveryInFlight = true;
       let healed = false;
