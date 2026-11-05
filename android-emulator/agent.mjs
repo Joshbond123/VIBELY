@@ -748,6 +748,58 @@ async function reconcileInstallQueue(where = 'promote') {
   }
 }
 
+
+// ============================================================================
+// ALWAYS-ON DISPLAY GUARD
+//
+// The phone kept going blank for two reasons that had nothing to do with the
+// encoder: (1) the guest was allowed to sleep (screen_off_timeout / doze), and
+// (2) the Play Store's background auto-update storm saturated the guest
+// (loadavg 20+) until adbd stopped answering - which reads as a blank/frozen
+// phone and then triggered a relaunch loop. This guard keeps the panel awake and
+// stops the storm instead of relaunching a perfectly booted phone.
+// ============================================================================
+let lastDisplayGuardAt = 0;
+let blankFrameStreak = 0;
+
+async function keepDisplayAlive(where = 'guard') {
+  const stay = (await adbShell('settings get global stay_on_while_plugged_in', 10000).catch(() => ({ stdout: '' }))).stdout.trim();
+  if (stay !== '7') {
+    await adbShell('settings put global stay_on_while_plugged_in 7', 10000).catch(() => {});
+    await adbShell('svc power stayon true', 10000).catch(() => {});
+  }
+  const tmo = (await adbShell('settings get system screen_off_timeout', 10000).catch(() => ({ stdout: '' }))).stdout.trim();
+  if (tmo !== '2147483647') {
+    await adbShell('settings put system screen_off_timeout 2147483647', 10000).catch(() => {});
+  }
+  const power = (await adbShell("dumpsys power | grep -m1 'mWakefulness='", 12000).catch(() => ({ stdout: '' }))).stdout;
+  if (/Asleep|Dozing|Shutting\s*down/i.test(power)) {
+    log(`Display guard (${where}): panel was asleep (${power.trim().slice(0, 40)}) - waking it.`);
+    await adbShell('input keyevent 224', 10000).catch(() => {});   // KEYCODE_WAKEUP
+    await sleep(1200);
+    await adbShell('wm dismiss-keyguard', 10000).catch(() => {});
+    await adbShell('input keyevent 82', 8000).catch(() => {});     // MENU = unblank
+  }
+  // Play Store storm: it auto-updates apps at boot, pins itself in the
+  // foreground (AssetBrowserActivity) and starves the CPU until adb dies.
+  const load = Number((await adbShell('cat /proc/loadavg', 10000).catch(() => ({ stdout: '0' }))).stdout.trim().split(/\s+/)[0]);
+  if (Number.isFinite(load) && load > 8) {
+    const top = (await adbShell('dumpsys activity activities | grep -m1 topResumedActivity', 12000).catch(() => ({ stdout: '' }))).stdout;
+    if (/com\.android\.vending/.test(top)) {
+      log(`Display guard (${where}): Play Store update storm (load ${load}) - force-stopping it to keep the phone responsive.`);
+      await adbShell('am force-stop com.android.vending', 15000).catch(() => {});
+    }
+  }
+}
+
+/** A blank screen compresses to almost nothing: use file size as a cheap probe. */
+async function screenProbeBytes() {
+  const out = (await adbShell('screencap -p /sdcard/_vibely_probe.jpg; stat -c %s /sdcard/_vibely_probe.jpg', 20000)
+    .catch(() => ({ stdout: '' }))).stdout.trim();
+  const n = Number((out.match(/(\d+)\s*$/) || [])[1]);
+  return Number.isFinite(n) ? n : -1;
+}
+
 async function tunePlayStoreForEmulator() {
   const cmds = [
     'svc power stayon true',
@@ -757,8 +809,12 @@ async function tunePlayStoreForEmulator() {
     'settings put global verifier_verify_adb_installs 0',
     'cmd connectivity airplane-mode disable',
     'svc wifi enable',
+    // Auto-update storms are what freeze the guest: allow Play to work when the
+    // user opens it, but never let it churn in the background.
+    'cmd appops set com.android.vending RUN_ANY_IN_BACKGROUND ignore',
     'cmd appops set com.android.vending RUN_IN_BACKGROUND allow',
-    'cmd appops set com.android.vending RUN_ANY_IN_BACKGROUND allow',
+    'cmd appops set com.android.vending WAKE_LOCK ignore',
+    'am force-stop com.android.vending',
     'cmd appops set com.google.android.gms RUN_IN_BACKGROUND allow',
     'cmd appops set com.google.android.gms RUN_ANY_IN_BACKGROUND allow',
     'cmd appops set com.android.providers.downloads RUN_IN_BACKGROUND allow',
@@ -1535,6 +1591,26 @@ function startEmulatorSupervisor() {
       }
       if (await deviceOnline()) {
         lastAdbHealthyAt = Date.now();
+        // Keep the panel alive and detect a genuinely blank screen. Cheap enough
+        // for the 20s supervisor tick.
+        if (Date.now() - lastDisplayGuardAt > 20000) {
+          lastDisplayGuardAt = Date.now();
+          await keepDisplayAlive('supervisor').catch(() => {});
+          const bytes = await screenProbeBytes();
+          if (bytes > 0 && bytes < 45000) {
+            blankFrameStreak += 1;
+            log(`Supervisor: blank screen detected (${bytes}B probe, streak ${blankFrameStreak}).`);
+            await adbShell('input keyevent 224; wm dismiss-keyguard', 12000).catch(() => {});
+            if (blankFrameStreak >= 3 && !liveAttachInFlight) {
+              log('Supervisor: screen still blank - re-attaching the display channel.');
+              ensureLiveAttached('blank-screen').catch(() => {});
+              blankFrameStreak = 0;
+            }
+          } else if (bytes > 0) {
+            if (blankFrameStreak > 0) log('Supervisor: screen is live again.');
+            blankFrameStreak = 0;
+          }
+        }
         // The OS is up: make sure the live picture/touch channel is up too.
         // A static Android screen legitimately produces no new H.264 frames, so
         // silence alone is NOT a fault. Only re-attach when a frame is actually
