@@ -244,6 +244,7 @@ def capture(avd, destination, hold=False):
                 # identical to the old flow: avd/..., manifest.json, host-adb/....
                 run('tar', '--sparse', '--use-compress-program=zstd -3 -T0', '-cf', str(partial),
                     *[f'--exclude={e}' for e in excluded],
+                    '--transform=s,^%s,avd,' % re.escape(avd.name),
                     '-C', str(avd.parent), avd.name,
                     '-C', str(tmp), 'manifest.json', 'host-adb', timeout=2400)
                 os.chmod(partial, 0o600)
@@ -334,10 +335,22 @@ def extract(archive, avd):
                 # arch (already enforced above), so version drift is evidence only.
                 print('[extract] WARNING: emulator/system-image build differs from checkpoint (%s); '
                       'disks are family/API compatible, continuing.' % ','.join(sorted(mismatches)))
-        restored = Path(tmp, 'avd')
         # Disk-only checkpoints are the supported format: the guest is paused while
-        # the disks are copied, so the image is crash-consistent and boots cold.
+        # the disks are read, so the image is crash-consistent and boots cold.
         # RAM snapshots are no longer required (and are no longer loaded).
+        #
+        # Layout tolerance: the canonical layout stores the disks under `avd/`, but
+        # the single-pass capture stores them under the AVD's real directory name
+        # (e.g. vibely_pixel6_api34.avd/). Accept either, otherwise a perfectly good
+        # checkpoint is rejected as "no userdata disk" and the phone never boots.
+        restored = Path(tmp, 'avd')
+        if not list(restored.glob('userdata*')):
+            cands = [p for p in Path(tmp).iterdir() if p.is_dir() and list(p.glob('userdata*'))]
+            if len(cands) == 1:
+                restored = cands[0]
+                print('[extract] AVD stored as %s/; using it as the restore root.' % restored.name)
+            elif list(Path(tmp).glob('userdata*')):
+                restored = Path(tmp)
         if not list(restored.glob('userdata*')):
             raise ValueError('Checkpoint is not a complete AVD (no userdata disk)')
         # Never overwrite a preexisting phone implicitly, even on a failed restore.
