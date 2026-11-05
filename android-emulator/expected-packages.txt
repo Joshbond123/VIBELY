@@ -1,5 +1,8 @@
 # Packages that must exist on the phone after a restore.
-# A restore that comes back without these is a lost generation, not a fresh phone;
-# verify-restore.sh fails loudly instead of letting it look like a silent wipe.
-com.zhiliaoapp.musically
-com.facebook.stella
+# A restore that comes back without these is a lost generation, not a fresh
+# phone; verify-restore.sh fails loudly instead of letting it look like a wipe.
+com.zhiliaoapp.musically   # TikTok
+com.facebook.vibes         # Vibes - Meta AI video creation
+# com.facebook.stella      # Meta AI app itself: not on APKPure, APKMirror is
+#                          # behind a Cloudflare challenge the emulator cannot
+#                          # pass; add here once a trusted APK source exists.
