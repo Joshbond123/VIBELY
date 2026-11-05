@@ -153,3 +153,7 @@ log "VERIFY debuggable=$(adb shell getprop ro.debuggable | tr -d '\r') secure=$(
 log "VERIFY df=$(adb shell df /data | tail -1 | tr -s ' ')"
 log "VERIFY su=$(adb shell "$SU id" | tr -d '\r' | head -1)"
 log "VERIFY hook_ran=$(adb shell 'cat /sdcard/Download/real-phone.log 2>/dev/null | head -3 | tr "\n" ";"' | tr -d '\r')"
+
+# Post-restore gate: fail loudly if the restored checkpoint is missing the apps it
+# is supposed to have (a silent "wipe" otherwise looks like a healthy phone).
+bash "$(dirname "${BASH_SOURCE[0]}")/verify-restore.sh" || log "RESTORE GATE FAILED (see [verify-restore] above)"

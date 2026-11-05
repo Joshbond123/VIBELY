@@ -1,0 +1,5 @@
+# Packages that must exist on the phone after a restore.
+# A restore that comes back without these is a lost generation, not a fresh phone;
+# verify-restore.sh fails loudly instead of letting it look like a silent wipe.
+com.zhiliaoapp.musically
+com.facebook.stella
