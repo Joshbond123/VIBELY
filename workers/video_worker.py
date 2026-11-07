@@ -30,13 +30,17 @@ def prepare():
  global COMFY_PROC
  STATE['stage']='verifying_mounted_models'
  staged=ROOT/'models';staged.mkdir(exist_ok=True)
- for spec in MODEL_SPECS:
+ def stage_one(spec):
   matches=[p for p in pathlib.Path('/kaggle/input').rglob(spec['filename']) if p.stat().st_size==spec['expected_bytes']]
   if not matches:raise RuntimeError('Required account-owned cache asset missing: '+spec['filename']+'; no GPU-time weight download is allowed')
   dst=staged/spec['filename'];digest=hashlib.sha256()
   with matches[0].open('rb') as src,dst.open('wb') as out:
-   for b in iter(lambda:src.read(16*1024*1024),b''):digest.update(b);out.write(b)
+   for b in iter(lambda:src.read(16*1024*1024),b''):
+    if STOP.is_set():raise RuntimeError('Model preparation cancelled')
+    digest.update(b);out.write(b)
   if digest.hexdigest()!=spec['sha256']:dst.unlink();raise RuntimeError('Model integrity mismatch: '+spec['filename'])
+ from concurrent.futures import ThreadPoolExecutor
+ with ThreadPoolExecutor(max_workers=3) as copies:list(copies.map(stage_one,MODEL_SPECS))
  STATE['dataset_cached']=True;STATE['stage']='installing_pinned_comfyui'
  command(['git','clone','https://github.com/Comfy-Org/ComfyUI.git',str(COMFY)],timeout=180)
  command(['git','checkout','1332fabfcc507aa7c548cd5152071ed494c207e8'],cwd=COMFY)
@@ -252,6 +256,14 @@ def main():
  def watchdog():
   while not STOP.wait(5):
    elapsed=time.time()-STATE['started_at']
+   if not STATE['comfyui_ready'] and elapsed>120:
+    try:
+     leases=backend('/api/gpu/leases?service_id='+SERVICE)
+     if leases.get('ok') and leases.get('pending')==0:
+      log('No pending generation lease during startup; stopping unused GPU session')
+      if COMFY_PROC and COMFY_PROC.poll() is None:COMFY_PROC.kill()
+      os._exit(0)
+    except Exception:pass
    if not STATE['comfyui_ready'] and elapsed>18*60 or elapsed>2*3600:
     log('Hard startup/runtime deadline reached; terminating batch session')
     if COMFY_PROC and COMFY_PROC.poll() is None:COMFY_PROC.kill()
