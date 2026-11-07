@@ -988,6 +988,43 @@ async function saveWholeAvd(hold = false) {
   return wholeAvdSaveInFlight;
 }
 
+/** How long an explicit-checkpoint HTTP call may block before it answers
+ *  "pending" and lets the copy finish in the background. Must stay well under
+ *  the reverse-tunnel proxy idle timeout (which is why 500s used to appear). */
+const EXPLICIT_CHECKPOINT_RESPONSE_MS = 45 * 1000;
+
+/** Deduplicated explicit checkpoint job. A second request while a multi-GB copy
+ *  is in flight must JOIN it, never stack another capture on the same disk. */
+let explicitCheckpointJob = null;
+let lastExplicitCheckpoint = null;
+function startExplicitCheckpoint() {
+  if (explicitCheckpointJob) {
+    log('Explicit checkpoint already running; joining the in-flight capture.');
+    return explicitCheckpointJob;
+  }
+  const job = { startedAt: Date.now(), finishedAt: 0, done: false, ok: null, error: '' };
+  job.promise = livePersist('explicit-checkpoint', { whole: true, hold: false, force: true })
+    .then((captured) => {
+      job.ok = captured !== false;
+      if (!job.ok) job.error = 'checkpoint not published (see agent log)';
+      return job.ok;
+    })
+    .catch((e) => {
+      job.ok = false;
+      job.error = e.message || String(e);
+      return false;
+    })
+    .finally(() => {
+      job.done = true;
+      job.finishedAt = Date.now();
+      lastExplicitCheckpoint = job;
+      explicitCheckpointJob = null;
+      log(`Explicit checkpoint ${job.ok ? 'published' : 'failed'} in ${Math.round((job.finishedAt - job.startedAt) / 1000)}s.`);
+    });
+  explicitCheckpointJob = job;
+  return job;
+}
+
 let lastWholeAvdAt = 0;
 let persistLeaseUntil = 0;
 let lastGuestChangeAt = Date.now();
@@ -1329,9 +1366,44 @@ async function handleGatewayRpc(action, payload) {
       // hold=false on purpose: an explicit checkpoint from the UI/API must leave
       // the phone RUNNING. hold=true leaves the vCPU stopped for a rotation that
       // may never come, i.e. a frozen handset.
-      const captured = await livePersist('explicit-checkpoint', { whole: true, hold: false, force: true });
-      if (captured === false) return { ok: false, captured: false, error: 'checkpoint not published (see agent log)' };
-      return { ok: true, captured: true, backed_up_at: new Date().toISOString() };
+      //
+      // A whole-AVD capture copies several GB and PAUSES the vCPU, so this used to
+      // hold the HTTP response open for minutes. The reverse-tunnel proxy gives up
+      // long before that and the caller got "HTTP 500 Internal Server Error" while
+      // the capture was in fact still running -- which read as "checkpoint is
+      // broken / the phone hung". Start the job, wait a bounded grace window, and
+      // answer 202-style (ok + pending) when it is still copying. The job keeps
+      // running in the background and is deduplicated, so a retry joins it instead
+      // of starting a second multi-GB copy on top of the first.
+      const job = startExplicitCheckpoint();
+      const deadline = Date.now() + EXPLICIT_CHECKPOINT_RESPONSE_MS;
+      while (!job.done && Date.now() < deadline) await sleep(1000);
+      if (!job.done) {
+        return {
+          ok: true,
+          captured: false,
+          pending: true,
+          started_at: new Date(job.startedAt).toISOString(),
+          message: 'checkpoint is still copying; it continues in the background and the phone stays responsive',
+        };
+      }
+      if (job.ok) return { ok: true, captured: true, backed_up_at: new Date(job.finishedAt ? new Date(job.finishedAt).toISOString() : new Date().toISOString()) };
+      return { ok: false, captured: false, error: job.error || 'checkpoint not published (see agent log)' };
+    }
+    case 'checkpoint_status': {
+      const job = explicitCheckpointJob;
+      return {
+        ok: true,
+        running: !!job,
+        last: lastExplicitCheckpoint
+          ? {
+              ok: lastExplicitCheckpoint.ok,
+              finished_at: lastExplicitCheckpoint.finishedAt ? new Date(lastExplicitCheckpoint.finishedAt).toISOString() : null,
+              seconds: lastExplicitCheckpoint.finishedAt ? Math.round((lastExplicitCheckpoint.finishedAt - lastExplicitCheckpoint.startedAt) / 1000) : null,
+              error: lastExplicitCheckpoint.error || '',
+            }
+          : null,
+      };
     }
     case 'apply_delta_state': {
       await runStateManager('restore');
