@@ -62,6 +62,10 @@ const RUN_ATTEMPT = process.env.GITHUB_RUN_ATTEMPT || '1';
 const RUNNER_NAME = process.env.RUNNER_NAME || 'github-actions-ubuntu';
 
 const ROTATION_MINUTES = Math.max(2, Number(process.env.ROTATION_MINUTES || 240));
+/** Retry gap between successor-dispatch attempts. The duty loop runs every ~20s;
+ *  without this the agent re-captured a multi-GB checkpoint and re-dispatched on
+ *  every single cycle once the rotation target was reached. */
+const ROTATION_ATTEMPT_BACKOFF_MS = 3 * 60 * 1000;
 const RAPID_TEST_CYCLES = Math.max(0, Number(process.env.RAPID_TEST_CYCLES || 0));
 const SIMULATE_BOOT_FAILURE = String(process.env.SIMULATE_BOOT_FAILURE || 'false').toLowerCase() === 'true';
 // Emergency-only mode: refuse to promote onto a gateway that still has a live
@@ -1964,6 +1968,7 @@ async function main() {
   const CHANGE_POLL_MS = 20 * 1000;
   const SAFETY_WHOLE_MS = 60 * 60 * 1000; // safety net only; captures pause the guest
   let lastWholeAvdMs = Date.now();
+  let lastRotationAttemptAt = 0;
   let lastBlitzWakeMs = Date.now();
   let changePersistInFlight = false;
   let lastSelfHealMs = 0;
@@ -2203,8 +2208,16 @@ async function main() {
 
     // 4. Trigger 4-hour replacement workflow when rotation target is reached
     if (activeMinutes >= ROTATION_MINUTES && replacementDispatchedAt === 0) {
-      await livePersist('pre-rotation', { whole: true, hold: true });
-      await dispatchReplacementWorkflow();
+      // hold:true PAUSES the vCPU and leaves it paused until a successor takes
+      // over. When the successor never arrives (dispatch 403, gateway churn,
+      // Actions queue) the user is left with a FROZEN, blank panel for up to two
+      // hours and then a dead job. Capture the state but keep the phone RUNNING.
+      if (Date.now() - lastRotationAttemptAt > ROTATION_ATTEMPT_BACKOFF_MS) {
+        lastRotationAttemptAt = Date.now();
+        await livePersist('pre-rotation', { whole: true, hold: false });
+        const dispatched = await dispatchReplacementWorkflow();
+        if (!dispatched) log('Successor dispatch failed; will retry in ' + Math.round(ROTATION_ATTEMPT_BACKOFF_MS / 60000) + 'm. The phone stays live meanwhile.');
+      }
     }
 
     // 5. Monitor dispatched successor & auto-retry if successor fails initialization!
@@ -2215,7 +2228,16 @@ async function main() {
     // Hard safety ceiling at 345 minutes (15m before GitHub Actions' 360m hard job limit)
     if (activeMinutes >= 345) {
       log('Approaching GitHub Actions 6h runner ceiling (345m); performing final state backup before exit.');
-      await livePersist('pre-exit-ceiling', { whole: true, hold: true });
+      // One last chance to leave a successor behind: if every earlier dispatch
+      // failed, the phone dies with this job and the page stays blank until the
+      // next 4-hourly cron. Try again, and make the failure explicit.
+      if (replacementDispatchedAt === 0) {
+        const ok = await dispatchReplacementWorkflow().catch(() => false);
+        log(ok ? 'Successor dispatched at the ceiling.' : 'FATAL: no successor could be dispatched at the runner ceiling; the watchdog must recover the phone.');
+      }
+      // hold:false -> if this job is killed right after the capture, the guest is
+      // not left paused, so a successor can still attach to a live VM.
+      await livePersist('pre-exit-ceiling', { whole: true, hold: false });
       break;
     }
   }

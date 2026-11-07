@@ -1136,6 +1136,20 @@ wssViewer.on('connection', (ws: WebSocket,req:http.IncomingMessage) => {
 // Ping the separate idle media transport without generating screen traffic.
 setInterval(()=>{for(const ws of wssAgentVideo.clients)if(ws.readyState===WebSocket.OPEN)ws.ping();},20000);
 
+// Phone-presence broadcaster.
+// The viewer used to receive NOTHING when the emulator worker disappeared, so the
+// page sat on a black canvas with no explanation (the status pill was CSS-hidden
+// too). Push presence changes explicitly: viewers can then say "no phone
+// connected, a replacement is starting" instead of showing an indistinguishable
+// black rectangle.
+let lastPresenceNoPhone: boolean | null = null;
+setInterval(() => {
+  const noPhone = !getActiveSession();
+  if (noPhone === lastPresenceNoPhone) return;
+  lastPresenceNoPhone = noPhone;
+  try { broadcastViewerJson({ type: noPhone ? 'no_phone' : 'phone_back', at: Date.now(), rotation_count: rotationCount }); } catch (_) {}
+}, 5000);
+
 // Ping WebSockets every 20s to keep Cloudflare/Blitz reverse proxies warm
 setInterval(() => {
   for (const s of sessions.values()) {
