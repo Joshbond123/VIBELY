@@ -70,15 +70,35 @@ jobs:
       - name: Checkout VIBELY repository
         uses: actions/checkout@v4
 
+      - name: Compute gateway source hash
+        id: hash
+        run: |
+          HASH="$(find android-remote-gateway/src android-remote-gateway/Dockerfile android-remote-gateway/package.json -type f -print0 \
+            | sort -z | xargs -0 sha256sum | sha256sum | cut -c1-12)"
+          echo "hash=${HASH}" >> "$GITHUB_OUTPUT"
+          echo "Gateway source hash: ${HASH}"
+
       - name: Check if android.aivideo.blitz.cloud gateway is already online
         id: quickcheck
         run: |
           GW_URL="${{ secrets.EMULATOR_GATEWAY_URL }}"
           ONLINE="false"
+          WANT="${{ steps.hash.outputs.hash }}"
           if [[ "${FORCE_GATEWAY_REDEPLOY}" != "true" && -n "$GW_URL" ]]; then
-            SVC=$(curl -fsSL --max-time 10 "${GW_URL}/api/public/health" 2>/dev/null | jq -r '.service // empty' || echo "")
+            BODY=$(curl -fsSL --max-time 10 "${GW_URL}/api/public/health" 2>/dev/null || echo "")
+            SVC=$(echo "$BODY" | jq -r '.service // empty' 2>/dev/null || echo "")
+            RUNNING=$(echo "$BODY" | jq -r '.build // "unknown"' 2>/dev/null || echo "unknown")
+            echo "running gateway build=${RUNNING} wanted=${WANT}"
             if [[ "$SVC" == "vibely-android-remote-gateway" ]]; then
-              ONLINE="true"
+              if [[ -z "$WANT" || "$RUNNING" == "$WANT" ]]; then
+                ONLINE="true"
+              else
+                # The gateway is up but running OLD code. This is exactly how every
+                # viewer/UI fix got silently ignored: the build step only ran when
+                # the gateway was offline, so a healthy-but-stale container served
+                # the old UI forever.
+                echo "Gateway is running build ${RUNNING}, repository wants ${WANT}; rebuilding and redeploying."
+              fi
             fi
           fi
           echo "already_online=$ONLINE" >> "$GITHUB_OUTPUT"
@@ -88,11 +108,13 @@ jobs:
         run: |
           echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
           IMG="ghcr.io/$(echo '${{ github.repository_owner }}' | tr '[:upper:]' '[:lower:]')/vibely-android-gateway:latest"
-          docker build -t "$IMG" ./android-remote-gateway
+          docker build --build-arg GATEWAY_BUILD="${{ steps.hash.outputs.hash }}" -t "$IMG" ./android-remote-gateway
           docker push "$IMG"
 
       - name: Provision / Verify android.aivideo.blitz.cloud Remote Gateway
         id: prov
+        env:
+          GATEWAY_BUILD: ${{ steps.hash.outputs.hash }}
         run: |
           node ./android-emulator/deploy-gateway.mjs
 
@@ -103,6 +125,15 @@ jobs:
           FORCE="${{ inputs.force_rotate || 'false' }}"
           EVENT="${{ github.event_name }}"
           SHOULD_BOOT="true"
+
+          # `gateway_only` was declared as an input and never read, so asking for a
+          # gateway-only deploy still booted a whole new emulator. Honour it: the
+          # only safe way to ship a viewer/gateway change without disturbing the
+          # live phone.
+          if [[ "${{ inputs.gateway_only }}" == "true" ]]; then
+            echo "gateway_only=true: deploying gateway code without rotating the phone."
+            SHOULD_BOOT="false"
+          fi
 
           if [[ "$EVENT" == "schedule" && "$FORCE" != "true" && -n "$GW_URL" ]]; then
             HEALTH=$(curl -fsSL --max-time 15 "${GW_URL}/api/public/health" 2>/dev/null || echo "")

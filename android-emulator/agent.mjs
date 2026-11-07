@@ -62,6 +62,10 @@ const RUN_ATTEMPT = process.env.GITHUB_RUN_ATTEMPT || '1';
 const RUNNER_NAME = process.env.RUNNER_NAME || 'github-actions-ubuntu';
 
 const ROTATION_MINUTES = Math.max(2, Number(process.env.ROTATION_MINUTES || 240));
+/** Retry gap between successor-dispatch attempts. The duty loop runs every ~20s;
+ *  without this the agent re-captured a multi-GB checkpoint and re-dispatched on
+ *  every single cycle once the rotation target was reached. */
+const ROTATION_ATTEMPT_BACKOFF_MS = 3 * 60 * 1000;
 const RAPID_TEST_CYCLES = Math.max(0, Number(process.env.RAPID_TEST_CYCLES || 0));
 const SIMULATE_BOOT_FAILURE = String(process.env.SIMULATE_BOOT_FAILURE || 'false').toLowerCase() === 'true';
 // Emergency-only mode: refuse to promote onto a gateway that still has a live
@@ -807,13 +811,31 @@ async function keepDisplayAlive(where = 'guard') {
   if (tmo !== '2147483647') {
     await adbShell('settings put system screen_off_timeout 2147483647', 10000).catch(() => {});
   }
+  // A dialog that stole focus (ANR / crash / "System UI isn't responding") shows as
+  // the current focus window. Clear it, otherwise the phone accepts no input at all.
+  const focus = (await adbShell("dumpsys window | grep -m1 mCurrentFocus", 12000).catch(() => ({ stdout: '' }))).stdout.trim();
+  if (/not responding|application error|has stopped/i.test(focus)) {
+    log(`Display guard (${where}): ANR/crash dialog owns the screen (${focus.slice(0, 90)}) - dismissing it so the phone stays usable.`);
+    await adbShell('input keyevent 4', 8000).catch(() => {});      // BACK dismisses the dialog
+    await sleep(900);
+    await adbShell('input keyevent 3', 8000).catch(() => {});      // HOME refocuses the launcher
+    await sleep(600);
+  }
   const power = (await adbShell("dumpsys power | grep -m1 'mWakefulness='", 12000).catch(() => ({ stdout: '' }))).stdout;
   if (/Asleep|Dozing|Shutting\s*down/i.test(power)) {
     log(`Display guard (${where}): panel was asleep (${power.trim().slice(0, 40)}) - waking it.`);
-    await adbShell('input keyevent 224', 10000).catch(() => {});   // KEYCODE_WAKEUP
-    await sleep(1200);
-    await adbShell('wm dismiss-keyguard', 10000).catch(() => {});
-    await adbShell('input keyevent 82', 8000).catch(() => {});     // MENU = unblank
+    await adbShell('input keyevent 224', 10000).catch(() => {});   // KEYCODE_WAKEUP (focus-independent)
+    await sleep(1500);
+    // Only inject keyguard/MENU input once Android actually has a focused window.
+    // Injecting into a window-less guest is precisely what produced
+    // 'Input dispatching timed out (Application does not have a focused window)'.
+    const ready = (await adbShell("dumpsys window | grep -m1 mCurrentFocus", 12000).catch(() => ({ stdout: '' }))).stdout;
+    if (/mCurrentFocus=(?!null)/.test(ready)) {
+      await adbShell('wm dismiss-keyguard', 10000).catch(() => {});
+      await adbShell('input keyevent 82', 8000).catch(() => {});   // MENU = unblank
+    } else {
+      log(`Display guard (${where}): woke the panel but no window has focus yet - skipping key injection.`);
+    }
   }
   // NOTE: `grep -c dex2oat` matches its OWN command line, so it always returned 1
   // and pinned compileStormUntil permanently. The bracket keeps grep from
@@ -837,6 +859,7 @@ async function keepDisplayAlive(where = 'guard') {
       'cmd appops set com.android.vending RUN_ANY_IN_BACKGROUND ignore; ' +
       'cmd appops set com.zhiliaoapp.musically RUN_ANY_IN_BACKGROUND ignore; ' +
       'cmd appops set com.facebook.vibes RUN_ANY_IN_BACKGROUND ignore; ' +
+      'settings put global hide_error_dialogs 1; ' +
       'setprop pm.dexopt.bg-dexopt verify',
       20000
     ).catch(() => {});
@@ -914,6 +937,15 @@ async function suppressBackgroundChurn(where = 'boot') {
     'cmd appops set com.facebook.vibes RUN_ANY_IN_BACKGROUND ignore',
     'am force-stop com.zhiliaoapp.musically',
     'am force-stop com.facebook.vibes',
+    // An ANR/crash dialog is drawn ON TOP of the phone and eats every tap: the
+    // user sees a phone that is 'stuck' and often goes black when the launcher is
+    // restarted underneath. Real cause measured on this guest:
+    //   am_anr: com.google.android.apps.nexuslauncher,
+    //   Input dispatching timed out (Application does not have a focused window)
+    // It sat on screen for 34 minutes and made the phone unusable. Never show
+    // these dialogs at all.
+    'settings put global hide_error_dialogs 1',
+    'settings put secure anr_show_background 0',
     // Keep the panel awake no matter the power state.
     'settings put system screen_off_timeout 2147483647',
     'settings put global stay_on_while_plugged_in 7',
@@ -1809,12 +1841,31 @@ function startEmulatorSupervisor() {
           lastDisplayGuardAt = Date.now();
           await keepDisplayAlive('supervisor').catch(() => {});
           const bytes = await screenProbeBytes();
-          if (bytes > 0 && bytes < 45000) {
+          // ROOT CAUSE of the endless 'blank / stuck / restarting' phone:
+          // this used to call the screen BLANK whenever the JPEG was smaller than
+          // 45 KB. A healthy 1080x2400 launcher with a dark wallpaper compresses to
+          // ~27 KB (measured: 27079, 27138, 27145 B), so a perfectly good phone was
+          // declared blank on EVERY 20s tick. The agent then injected
+          // `input keyevent 224; wm dismiss-keyguard` every tick and tore down and
+          // rebuilt the whole scrcpy channel every third tick. That reproduced
+          // precisely the user's symptoms on a guest whose loadavg was 0.2:
+          //   am_anr: com.google.android.apps.nexuslauncher,
+          //     Input dispatching timed out (Application does not have a focused window)
+          //   adb: device offline
+          //   frozen/blank panel, then a self-restart.
+          // A genuinely black frame is only a few KB, and only a logically asleep
+          // panel should ever be woken.
+          if (bytes > 0 && bytes < 8000) {
             blankFrameStreak += 1;
-            log(`Supervisor: blank screen detected (${bytes}B probe, streak ${blankFrameStreak}).`);
-            await adbShell('input keyevent 224; wm dismiss-keyguard', 12000).catch(() => {});
+            const awake = /mWakefulness=Awake/i.test(
+              (await adbShell("dumpsys power | grep -m1 'mWakefulness='", 10000).catch(() => ({ stdout: '' }))).stdout
+            );
+            log(`Supervisor: black frame detected (${bytes}B probe, streak ${blankFrameStreak}, awake=${awake}).`);
+            if (!awake && blankFrameStreak >= 2) {
+              await adbShell('input keyevent 224', 10000).catch(() => {});
+            }
             if (blankFrameStreak >= 3 && !liveAttachInFlight) {
-              log('Supervisor: screen still blank - re-attaching the display channel.');
+              log('Supervisor: screen still black (real black frame, not a dark wallpaper) - re-attaching the display channel.');
               ensureLiveAttached('blank-screen').catch(() => {});
               blankFrameStreak = 0;
             }
@@ -1861,6 +1912,19 @@ function startEmulatorSupervisor() {
       }
       const deadSec = Math.round((Date.now() - lastAdbHealthyAt) / 1000);
       if (deadSec < 40) return;
+      // A busy guest (Play downloads, an install, a heavy app launch) can stall adb
+      // for minutes while the phone is completely fine. Relaunching qemu there
+      // destroys a healthy phone and costs 10+ minutes of blank screen -- measured:
+      // opening the Play Store tripped 'play_download_service', adb stalled, the
+      // supervisor relaunched the emulator and the user lost the phone for ~12 min.
+      // Only relaunch when the guest is NOT busy, and give it a much longer grace.
+      if (deadSec < 600) {
+        const busy = await isGuestBusyForPersist().catch(() => '');
+        if (busy) {
+          log(`SUPERVISOR: adb stalled for ${deadSec}s but the guest is busy (${busy}) - waiting instead of relaunching.`);
+          return;
+        }
+      }
       // Give a compiling guest a chance: adb can stall while dex2oat owns every
       // vCPU, and relaunching restarts the compile from scratch (the old endless
       // blank-screen loop). Only escalate after the storm window.
@@ -1964,6 +2028,7 @@ async function main() {
   const CHANGE_POLL_MS = 20 * 1000;
   const SAFETY_WHOLE_MS = 60 * 60 * 1000; // safety net only; captures pause the guest
   let lastWholeAvdMs = Date.now();
+  let lastRotationAttemptAt = 0;
   let lastBlitzWakeMs = Date.now();
   let changePersistInFlight = false;
   let lastSelfHealMs = 0;
@@ -2203,8 +2268,16 @@ async function main() {
 
     // 4. Trigger 4-hour replacement workflow when rotation target is reached
     if (activeMinutes >= ROTATION_MINUTES && replacementDispatchedAt === 0) {
-      await livePersist('pre-rotation', { whole: true, hold: true });
-      await dispatchReplacementWorkflow();
+      // hold:true PAUSES the vCPU and leaves it paused until a successor takes
+      // over. When the successor never arrives (dispatch 403, gateway churn,
+      // Actions queue) the user is left with a FROZEN, blank panel for up to two
+      // hours and then a dead job. Capture the state but keep the phone RUNNING.
+      if (Date.now() - lastRotationAttemptAt > ROTATION_ATTEMPT_BACKOFF_MS) {
+        lastRotationAttemptAt = Date.now();
+        await livePersist('pre-rotation', { whole: true, hold: false });
+        const dispatched = await dispatchReplacementWorkflow();
+        if (!dispatched) log('Successor dispatch failed; will retry in ' + Math.round(ROTATION_ATTEMPT_BACKOFF_MS / 60000) + 'm. The phone stays live meanwhile.');
+      }
     }
 
     // 5. Monitor dispatched successor & auto-retry if successor fails initialization!
@@ -2215,7 +2288,16 @@ async function main() {
     // Hard safety ceiling at 345 minutes (15m before GitHub Actions' 360m hard job limit)
     if (activeMinutes >= 345) {
       log('Approaching GitHub Actions 6h runner ceiling (345m); performing final state backup before exit.');
-      await livePersist('pre-exit-ceiling', { whole: true, hold: true });
+      // One last chance to leave a successor behind: if every earlier dispatch
+      // failed, the phone dies with this job and the page stays blank until the
+      // next 4-hourly cron. Try again, and make the failure explicit.
+      if (replacementDispatchedAt === 0) {
+        const ok = await dispatchReplacementWorkflow().catch(() => false);
+        log(ok ? 'Successor dispatched at the ceiling.' : 'FATAL: no successor could be dispatched at the runner ceiling; the watchdog must recover the phone.');
+      }
+      // hold:false -> if this job is killed right after the capture, the guest is
+      // not left paused, so a successor can still attach to a live VM.
+      await livePersist('pre-exit-ceiling', { whole: true, hold: false });
       break;
     }
   }

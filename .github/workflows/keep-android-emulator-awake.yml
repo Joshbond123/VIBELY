@@ -1,14 +1,27 @@
 name: Keep Android Emulator Awake
 
-# The Blitz container sleeps after ~15 minutes without HTTP traffic, which drops the
-# reverse tunnel and leaves the phone blank/offline. This job pokes the gateway every
-# 10 minutes so the container stays hot, and reports the phone's real state so a dead
-# emulator is visible in the Actions history instead of being silently ignored.
+# Two jobs, because there are two very different failure modes:
+#
+#  1. The Blitz container sleeps after ~15 min without HTTP traffic -> the reverse
+#     tunnel drops and the phone goes blank. Poking the gateway every 10 minutes
+#     keeps it hot.
+#
+#  2. The emulator worker itself is GONE. The emulator workflow is a single
+#     GitHub Actions job with a hard 355-minute ceiling. If the successor
+#     handover did not happen (dispatch 403, gateway churn, queue backlog) the job
+#     simply ends at the ceiling and there is no emulator at all. This workflow
+#     used to only print `::warning::No active Android phone right now` in that
+#     case, so the phone stayed dead until the next 4-hourly cron -- up to four
+#     hours of blank screen with nothing retrying.
+#
+# Now it RECOVERS: when the gateway reports no active phone and no standby
+# candidate, and no emulator run is already queued or in progress, it dispatches
+# the emulator workflow itself. Worst case the phone is back in ~10-15 minutes.
 #
 # NOTE: this file used to contain an inline `python3 - <<'PY'` heredoc at column 0
-# inside a `run: |` block. YAML blocks end at the first unindented line, so the file
-# was INVALID YAML and every scheduled run failed before a job was ever created.
-# The Blitz resume now lives in android-emulator/blitz-resume.py.
+# inside a `run: |` block. YAML blocks end at the first unindented line, so the
+# file was INVALID YAML and every scheduled run failed before a job was created.
+# Keep scripts in files.
 
 on:
   schedule:
@@ -17,6 +30,9 @@ on:
 
 permissions:
   contents: read
+  # Required to read run history and to dispatch the recovery workflow with the
+  # workflow token (no personal PAT needed).
+  actions: write
 
 concurrency:
   group: vibely-keep-awake
@@ -25,17 +41,19 @@ concurrency:
 jobs:
   wake:
     runs-on: ubuntu-latest
-    timeout-minutes: 6
+    timeout-minutes: 8
     env:
       GATEWAY_PRIMARY: ${{ vars.EMULATOR_GATEWAY_URL || 'https://android.aivideo.prod.page' }}
       GATEWAY_FALLBACK: https://android.aivideo.blitz.cloud
       BLITZ_API_KEY: ${{ secrets.BLITZ_API_KEY }}
       BLITZ_ANDROID_APP: ${{ secrets.BLITZ_ANDROID_APP }}
+      GH_TOKEN: ${{ secrets.GH_PAT || github.token }}
+      REPO: ${{ github.repository }}
 
     steps:
       - uses: actions/checkout@v4
 
-      - name: Keep-alive request + phone status
+      - name: Keep-alive request + phone status + recovery
         run: |
           set -o pipefail
           probe() {
@@ -62,15 +80,53 @@ jobs:
           STANDBY="$(echo "${HEALTH}" | jq -r '.standby_count // 0')"
           RSS="$(echo "${HEALTH}" | jq -r '.rss_mb // 0')"
           DEGRADED="$(echo "${HEALTH}" | jq -r '.active_guest_degraded // false')"
-          echo "connected=${CONNECTED} standby=${STANDBY} degraded=${DEGRADED} gateway_rss_mb=${RSS}"
+          STREAMING="$(echo "${HEALTH}" | jq -r '.streaming // false')"
+          echo "connected=${CONNECTED} standby=${STANDBY} degraded=${DEGRADED} streaming=${STREAMING} gateway_rss_mb=${RSS}"
+
+          RECOVERED="no"
+          if [ "${CONNECTED}" != "true" ] && [ "${STANDBY}" = "0" ]; then
+            echo "No phone and no standby candidate. Checking for an in-flight emulator run..."
+            RUNS="$(curl -fsSL --max-time 25 \
+              -H "Authorization: Bearer ${GH_TOKEN}" \
+              -H "Accept: application/vnd.github+json" \
+              "https://api.github.com/repos/${REPO}/actions/workflows/android-emulator.yml/runs?per_page=5" || true)"
+            BUSY="$(echo "${RUNS}" | jq -r '[.workflow_runs[]? | select(.status=="in_progress" or .status=="queued")] | length' 2>/dev/null || echo 0)"
+            LAST_AGE_SEC="$(echo "${RUNS}" | jq -r 'if (.workflow_runs|length)>0 then ((now - (.workflow_runs[0].created_at|fromdateiso8601))|floor) else 999999 end' 2>/dev/null || echo 999999)"
+            echo "in_flight_runs=${BUSY} newest_run_age_sec=${LAST_AGE_SEC}"
+            if [ -z "${BUSY}" ]; then BUSY=0; fi
+            if [ "${BUSY}" -gt 0 ]; then
+              echo "An emulator run is already queued/in progress; waiting for it instead of dispatching another."
+            elif [ "${LAST_AGE_SEC}" -lt 600 ]; then
+              echo "A very recent emulator run exists; giving it time to connect before dispatching."
+            else
+              echo "Dispatching the Android Live Phone workflow to restore the phone..."
+              CODE="$(curl -s -o /tmp/dispatch.out -w '%{http_code}' -X POST \
+                -H "Authorization: Bearer ${GH_TOKEN}" \
+                -H "Accept: application/vnd.github+json" \
+                "https://api.github.com/repos/${REPO}/actions/workflows/android-emulator.yml/dispatches" \
+                -d '{"ref":"main","inputs":{"rotation_minutes":"240","rapid_test_cycles":"0","force_rotate":"true","simulate_boot_failure":"false"}}')"
+              echo "dispatch http=${CODE}"
+              cat /tmp/dispatch.out 2>/dev/null || true
+              if [ "${CODE}" = "204" ] || [ "${CODE}" = "201" ]; then
+                RECOVERED="dispatched"
+              else
+                echo "::error::Could not dispatch a replacement emulator (HTTP ${CODE}). The phone stays offline until the 4-hourly cron."
+                exit 1
+              fi
+            fi
+          fi
+
           {
             echo "### Android phone keep-alive"
             echo "- gateway reachable: yes"
             echo "- active phone: ${CONNECTED}"
             echo "- standby candidates: ${STANDBY}"
             echo "- guest degraded: ${DEGRADED}"
+            echo "- streaming: ${STREAMING}"
             echo "- gateway RSS: ${RSS} MB"
+            echo "- recovery action: ${RECOVERED}"
           } >> "$GITHUB_STEP_SUMMARY"
-          if [ "${CONNECTED}" != "true" ]; then
-            echo "::warning::No active Android phone right now (standby=${STANDBY}); the self-healing rotation is responsible for recovery."
+
+          if [ "${CONNECTED}" != "true" ] && [ "${RECOVERED}" = "no" ]; then
+            echo "::warning::No active Android phone right now (standby=${STANDBY}); a run is already in flight or just started."
           fi

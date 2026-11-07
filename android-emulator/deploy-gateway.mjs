@@ -102,6 +102,15 @@ async function main() {
     (a) => a.name === 'Android Remote Gateway' || (a.url && a.url.includes('android.aivideo.blitz.cloud')) || a.subLabel === 'android'
   );
 
+  const runningBuild = async (url) => {
+    try {
+      const r = await fetch(`${url}/api/public/health`, { signal: AbortSignal.timeout(10000) });
+      if (!r.ok) return 'unknown';
+      const j = await r.json();
+      return String(j.build || 'unknown');
+    } catch { return 'unknown'; }
+  };
+
   if (existingApp && !FORCE_REDEPLOY) {
     const appDetailsRes = await mcp('apps_get', { app: existingApp.id });
     const appDetails = JSON.parse(appDetailsRes.texts[0] || '{}');
@@ -141,7 +150,36 @@ async function main() {
         }
       }
     }
-    if (await healthy()) return;
+    if (await healthy()) {
+      // The gateway answered -- but is it running THIS repository's code?
+      // Previously any healthy container was reused forever, so changes to the
+      // viewer UI and the gateway server never reached users (the blank-screen
+      // status fix included). Restart the app when the stamp does not match; the
+      // container pulls :latest, which the build step just pushed.
+      const want = String(process.env.GATEWAY_BUILD || '').trim();
+      const have = await runningBuild(url);
+      if (want && have !== want) {
+        console.log(`[deploy-gateway] Gateway is healthy but running build ${have}; expected ${want}. Restarting to pick up the new image...`);
+        try {
+          await mcp('apps_restart', { app: existingApp.id, confirm: true });
+        } catch (e) {
+          console.log(`[deploy-gateway] restart call failed: ${e.message}`);
+        }
+        for (let i = 0; i < 12; i++) {
+          await sleep(10000);
+          const now = await runningBuild(url);
+          if (now === want) {
+            console.log(`[deploy-gateway] Gateway now serving build ${now}.`);
+            appendGithubOutput('gateway_url', url);
+            appendGithubOutput('blitz_app_id', existingApp.id);
+            return;
+          }
+        }
+        const finalBuild = await runningBuild(url);
+        console.log(`[deploy-gateway] WARNING: gateway still reports build ${finalBuild} after restart (wanted ${want}); keeping it online.`);
+      }
+      return;
+    }
     throw new Error('Existing gateway is temporarily unreachable after 3 resume attempts; refusing an implicit redeploy that would disconnect the live phone. Retry or explicitly request force_gateway_redeploy.');
   }
 
@@ -188,6 +226,11 @@ async function main() {
   await mcp('env_set', { app: appId, name: 'PORT', value: '8080' });
   await mcp('env_set', { app: appId, name: 'DATA_DIR', value: '/app/data' });
   await mcp('env_set', { app: appId, name: 'EMULATOR_ACCESS_TOKEN', value: ACCESS_TOKEN });
+  // Stamp the bundle so /api/public/health can prove which code is running. The
+  // gateway here is a JS bundle uploaded into /app/data, so a plain container
+  // restart keeps serving the OLD bundle forever; without this stamp nothing could
+  // detect that.
+  await mcp('env_set', { app: appId, name: 'GATEWAY_BUILD', value: String(process.env.GATEWAY_BUILD || 'dev') });
   await mcp('env_set', { app: appId, name: 'EMULATOR_GATEWAY_SECRET', value: GATEWAY_SECRET });
 
   // 5. If GHCR defaulted package visibility to private, upload compiled gateway bundle into /app/data/gateway & activate via NODE_OPTIONS

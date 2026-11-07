@@ -17,6 +17,7 @@ const GATEWAY_SECRET = (process.env.EMULATOR_GATEWAY_SECRET || '').trim();
 const COORDINATOR_FILE = path.join(DATA_DIR, 'coordinator.json');
 const ROTATION_LOG_FILE = path.join(DATA_DIR, 'rotation-history.json');
 const SNAPSHOT_FILE = path.join(PERSIST_DIR, 'latest-state.tar.zst');
+const GATEWAY_BUILD = process.env.GATEWAY_BUILD || 'dev';
 const MANIFEST_FILE = path.join(PERSIST_DIR, 'manifest.json');
 const IDENTITY_FILE = path.join(PERSIST_DIR, 'device-identity.json');
 
@@ -338,6 +339,10 @@ app.get('/api/public/health', (_req: Request, res: Response) => {
   res.json({
     ok: true,
     service: 'vibely-android-remote-gateway',
+    // Build stamp of the code actually running in this container. Without it the
+    // deploy step had no way to tell a freshly-built image from a stale one that
+    // had been running for days, so gateway fixes were silently never deployed.
+    build: GATEWAY_BUILD,
     active_emulator_connected: Boolean(active) && !isSessionGuestDegraded(active!),
     active_guest_degraded: Boolean(active) && isSessionGuestDegraded(active!),
     active_session_id: active ? active.sessionId : null,
@@ -1135,6 +1140,20 @@ wssViewer.on('connection', (ws: WebSocket,req:http.IncomingMessage) => {
 
 // Ping the separate idle media transport without generating screen traffic.
 setInterval(()=>{for(const ws of wssAgentVideo.clients)if(ws.readyState===WebSocket.OPEN)ws.ping();},20000);
+
+// Phone-presence broadcaster.
+// The viewer used to receive NOTHING when the emulator worker disappeared, so the
+// page sat on a black canvas with no explanation (the status pill was CSS-hidden
+// too). Push presence changes explicitly: viewers can then say "no phone
+// connected, a replacement is starting" instead of showing an indistinguishable
+// black rectangle.
+let lastPresenceNoPhone: boolean | null = null;
+setInterval(() => {
+  const noPhone = !getActiveSession();
+  if (noPhone === lastPresenceNoPhone) return;
+  lastPresenceNoPhone = noPhone;
+  try { broadcastViewerJson({ type: noPhone ? 'no_phone' : 'phone_back', at: Date.now(), rotation_count: rotationCount }); } catch (_) {}
+}, 5000);
 
 // Ping WebSockets every 20s to keep Cloudflare/Blitz reverse proxies warm
 setInterval(() => {
