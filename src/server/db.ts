@@ -212,6 +212,7 @@ async function runMigrations(client: pg.PoolClient): Promise<void> {
     WHERE service_id='minimax_music_3' AND EXISTS(SELECT 1 FROM model_endpoints WHERE service_id='minimax_music_3' AND lower(username)<>'black797')`);
   await client.query(`UPDATE model_endpoints SET username='black797',endpoint_url='',api_key='',status='off',comfyui_ready=FALSE,gpu_name='',extra_meta='{}'::jsonb WHERE service_id='minimax_music_3' AND lower(username)<>'black797'`);
   await client.query(`INSERT INTO model_endpoints(service_id,username,model_name,status) VALUES('ltx_2_3_distilled_gguf_q4','temilolo','LTX-2.3 Distilled GGUF Q4_K_M','off') ON CONFLICT DO NOTHING`);
+  await client.query(`UPDATE model_endpoints SET dataset_cached=FALSE,storage_sources='{}'::jsonb WHERE service_id='minimax_music_3' AND COALESCE(extra_meta->>'worker_version','')<>'lifecycle-v3'`);
   // Migrate only the music endpoint ownership. No user/media/reference data is removed.
   await client.query(
     `

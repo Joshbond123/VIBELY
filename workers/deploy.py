@@ -4,7 +4,7 @@ Secrets are injected at deployment time; never commit rendered worker files.
 import ast, json, os, pathlib, subprocess, tempfile, sys, time, urllib.request, urllib.error
 SPECS={
  'music':('black797','vibely-music-gpu-worker',['black797/minimax-music-3-q4-0-gguf-cache'],'KAGGLE_BLACK797_TOKEN','MINIMAX_MUSIC3_API_KEY'),
- 'video':('temilolo','vibely-ltx-video-gpu-worker',['temilolo/ltx-23-distilled-q4-cache','temilolo/ltx-23-gemma-q4-cache'],'KAGGLE_TEMILOLO_TOKEN','LTX_VIDEO_API_KEY')}
+ 'video':('temilolo','vibely-video-gpu-worker',['temilolo/ltx-23-distilled-q4-cache','temilolo/ltx-23-gemma-q4-cache'],'KAGGLE_TEMILOLO_TOKEN','LTX_VIDEO_API_KEY')}
 probe=False
 if len(sys.argv)>1 and sys.argv[1] not in ('all','music','video'):raise SystemExit('Only the two dedicated video/music workers are supported')
 for kind in ([sys.argv[1]] if len(sys.argv)>1 and sys.argv[1]!='all' else SPECS):

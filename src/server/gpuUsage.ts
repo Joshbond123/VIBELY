@@ -40,7 +40,7 @@ export async function gpuFleetDashboard(workers:any[]){
    weekly:{total_seconds:WEEKLY_SECONDS,observed_seconds:tracked,used_seconds:provider.used_seconds,remaining_seconds:provider.remaining_seconds,provider_used_seconds:provider.used_seconds,
     provider_remaining_seconds:provider.remaining_seconds,reserved_seconds:provider.reserved_seconds,provider_total_seconds:provider.total_seconds,quota_verified:provider.quota_verified,provider_source:provider.source,verified_at:provider.verified_at,refresh_at:provider.refresh_at,basis:'Observed connected intervals only (maximum 90-second observation gap); excludes pre-tracking/provider usage. Not a provider quota balance.',
     window:'rolling 7 days; provider reset time unverified',tracking_started_at:usage?.tracking_started_at || null,last_seen:usage?.last_seen || null},
-   provisioning:worker?'registered legacy worker':'No verified worker or model installation',
+   provisioning:worker?.telemetry_is_live?'Measured active worker':worker?.status==='OFF'?'Off by default · starts for generation':'Worker installation/readiness not yet verified',
    credential_configured:Boolean(process.env[profile.token_env])};
  }));
  return {fleet,allocation:{total_seconds:WEEKLY_SECONDS,observed_seconds:fleet.reduce((n,p)=>n+p.weekly.observed_seconds,0),remaining_seconds:null,
