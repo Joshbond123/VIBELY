@@ -11,7 +11,7 @@ for kind in ([sys.argv[1]] if len(sys.argv)>1 and sys.argv[1]!='all' else SPECS)
  attempt_started_at=time.time()
  user,slug,datasets,token_var,api_var=SPECS[kind]
  source=pathlib.Path(__file__).with_name(kind+'_worker.py').read_text()
- values={'KAGGLE_API_TOKEN':os.environ[token_var],'WORKER_API_KEY':os.environ[api_var],'HF_TOKEN':os.environ.get('HF_TOKEN',''),'VIBELY_MODEL_REGISTRY_SECRET':os.environ['VIBELY_MODEL_REGISTRY_SECRET'],'VIBELY_BACKEND_URL':'https://aivideo.aivideo.blitz.cloud'}
+ values={'KAGGLE_API_TOKEN':os.environ[token_var],'WORKER_API_KEY':os.environ[api_var],'HF_TOKEN':os.environ.get('HF_TOKEN',''),'VIBELY_MODEL_REGISTRY_SECRET':os.environ['VIBELY_MODEL_REGISTRY_SECRET'],'VIBELY_BACKEND_URL':'https://aivideo.aivideo.prod.page'}
  # Replace only explicit deployment placeholders, not arbitrary source strings.
  for key,value in values.items(): source=source.replace('os.environ['+repr(key)+']',repr(value))
  compile(source,slug,'exec')

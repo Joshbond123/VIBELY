@@ -576,7 +576,7 @@ def start_cloudflared_and_heartbeat():
         }
         threading.Thread(target=_publish_endpoint_dataset, args=(payload_dict,), daemon=True).start()
         body = json.dumps(payload_dict).encode()
-        for base_u in ("https://aivideo.aivideo.blitz.cloud", "https://vibely.aivideo.blitz.cloud", "https://aivideo.blitz.cloud"):
+        for base_u in ("https://aivideo.aivideo.prod.page", "https://vibely.aivideo.blitz.cloud", "https://aivideo.blitz.cloud"):
             try:
                 req = urllib.request.Request(
                     f"{base_u}/api/models/register",
