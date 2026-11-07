@@ -222,16 +222,29 @@ async function main() {
     gateErrors: false,
   });
 
-  // 4. Configure environment secrets on Blitz
-  await mcp('env_set', { app: appId, name: 'PORT', value: '8080' });
-  await mcp('env_set', { app: appId, name: 'DATA_DIR', value: '/app/data' });
-  await mcp('env_set', { app: appId, name: 'EMULATOR_ACCESS_TOKEN', value: ACCESS_TOKEN });
-  // Stamp the bundle so /api/public/health can prove which code is running. The
-  // gateway here is a JS bundle uploaded into /app/data, so a plain container
-  // restart keeps serving the OLD bundle forever; without this stamp nothing could
-  // detect that.
-  await mcp('env_set', { app: appId, name: 'GATEWAY_BUILD', value: String(process.env.GATEWAY_BUILD || 'dev') });
-  await mcp('env_set', { app: appId, name: 'EMULATOR_GATEWAY_SECRET', value: GATEWAY_SECRET });
+  // 4. Configure environment secrets on Blitz.
+  // Every env write RESTARTS the container, and a restart in the middle of the
+  // bundle upload made the very first upload command fail (that is why a deploy
+  // could bump the build stamp while still serving the old code). Only write the
+  // values that actually changed.
+  const currentEnv = new Map();
+  try {
+    const envRes = await mcp('env_list', { app: appId });
+    for (const t of envRes.texts || []) {
+      try { const j = JSON.parse(t); if (j && j.name) currentEnv.set(j.name, j.value); } catch {}
+    }
+  } catch {}
+  const setEnv = async (name, value) => {
+    if (currentEnv.get(name) === String(value)) return;
+    await mcp('env_set', { app: appId, name, value });
+  };
+  await setEnv('PORT', '8080');
+  await setEnv('DATA_DIR', '/app/data');
+  await setEnv('EMULATOR_ACCESS_TOKEN', ACCESS_TOKEN);
+  await setEnv('EMULATOR_GATEWAY_SECRET', GATEWAY_SECRET);
+  // Stamp the bundle so /api/public/health can prove which code is running: the
+  // gateway is a JS bundle in /app/data, so a plain restart keeps serving old code.
+  await setEnv('GATEWAY_BUILD', String(process.env.GATEWAY_BUILD || 'dev'));
 
   // 5. If GHCR defaulted package visibility to private, upload compiled gateway bundle into /app/data/gateway & activate via NODE_OPTIONS
   if (needVolumeBootstrap) {
@@ -253,11 +266,18 @@ async function main() {
           if(/not running|starting|wake it|rate limit|too many|429/i.test(message)){console.log('Waiting for hosting process/rate limit before installing artifact...');await sleep(10000);continue;}
           throw new Error('Artifact install: '+message);
         }
-        for(const t of r.texts){try{const j=JSON.parse(t);if(j.exitCode || j.exit_code)throw new Error('Artifact command failed: '+String(j.output || ''));}catch(e){if(e.message.startsWith('Artifact command failed'))throw e;}}
+        let failed='';
+        for(const t of r.texts){try{const j=JSON.parse(t);if(j.exitCode || j.exit_code)failed=String(j.output || '');}catch{}}
+        if(failed){
+          console.log('Artifact command exited non-zero (retrying after a possible restart): ' + (failed.slice(0,200) || '<no output>'));
+          await sleep(8000);
+          continue;
+        }
         return;
       }
       throw new Error('Hosting process did not become available for verified artifact installation');
     }
+    await sleep(10000); // let any env-triggered restart finish before running commands
     await runArtifactCommand("require('fs').writeFileSync('/app/data/gateway-artifact.b64','')");
     for(let offset=0;offset<artifact.length;offset+=1300) {
       await runArtifactCommand("const fs=require('fs'),p='/app/data/gateway-artifact.b64',v=fs.readFileSync(p,'utf8'),part='"+artifact.slice(offset,offset+1300)+"';if(v.length==="+offset+")fs.appendFileSync(p,part);else if(v.slice("+offset+","+(offset+1300)+")!==part)throw new Error('Artifact chunk offset mismatch');");
