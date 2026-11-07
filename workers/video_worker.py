@@ -157,19 +157,24 @@ def heartbeat():
  while not STOP.is_set():
   try:
    if STATE.get('endpoint_url'):backend('/api/models/register',{'service':SERVICE,'username':OWNER,'model_name':'LTX-2.3 Distilled GGUF Q4_K_M','endpoint_url':STATE['endpoint_url'],'api_key':API_KEY,'comfyui_ready':STATE['comfyui_ready'],'dataset_cached':STATE.get('dataset_cached',False),'storage_sources':{'model_dataset':'temilolo/ltx-23-distilled-q4-cache'},'gpu_name':STATE.get('gpu_name'),'worker_version':'lifecycle-v3','worker_started_at':STATE['started_at']})
-  except Exception:pass
+  except Exception as e:log('Registry heartbeat failed: '+type(e).__name__+' '+str(getattr(e,'code','')))
   STOP.wait(10)
 def tunnel():
  global TUNNEL_PROC
  try:
   binary=ROOT/'cloudflared';command(['curl','-fsSL','https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64','-o',str(binary)],timeout=90);binary.chmod(0o755)
   while not STOP.is_set():
-   file=ROOT/'tunnel.log';f=file.open('w');TUNNEL_PROC=subprocess.Popen([str(binary),'tunnel','--url','http://127.0.0.1:8000','--no-autoupdate'],stdout=f,stderr=subprocess.STDOUT)
+   file=WORK/'cloudflared_ltx.log';f=file.open('w');TUNNEL_PROC=subprocess.Popen([str(binary),'tunnel','--protocol','http2','--url','http://127.0.0.1:8000','--no-autoupdate'],stdout=f,stderr=subprocess.STDOUT)
    while TUNNEL_PROC.poll() is None and not STOP.wait(1):
     m=re.search(r'https://[a-z0-9-]+\.trycloudflare\.com',file.read_text())
-    if m:STATE['endpoint_url']=m.group(0)
+    if m and STATE.get('endpoint_url')!=m.group(0):
+     STATE['endpoint_url']=m.group(0);log('Quick tunnel endpoint discovered')
+    if not m and int(time.time()-STATE['started_at'])%30==0:
+     excerpt=re.sub(r'https?://[^\s]+','[URL]',file.read_text()[-1200:])
+     log('Tunnel initialization diagnostic: '+excerpt)
+   if not STOP.is_set():log('Tunnel process exited; retrying');STOP.wait(3)
    f.close()
- except Exception as e:STATE['last_error']=str(e);STOP.set()
+ except Exception as e:STATE['last_error']=str(e);log('Tunnel fatal error: '+type(e).__name__);STOP.set()
 def main():
  global COMFY_PROC
  command([sys.executable,'-m','pip','install','-q','fastapi','uvicorn'],timeout=180)

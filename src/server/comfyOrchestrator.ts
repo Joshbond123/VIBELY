@@ -102,6 +102,8 @@ export async function getReadyEndpoint(serviceId:string,jobId:string):Promise<Mo
   await acquireGpu(serviceId,jobId);
   const start=Date.now();
   while(Date.now()-start<20*60000) {
+    const [local]=await query<any>(`SELECT status FROM video_generations WHERE id=$1 UNION ALL SELECT status FROM music_tracks WHERE id=$1 LIMIT 1`,[jobId]);
+    if(local && ['completed','failed','cancelled'].includes(local.status))throw new Error('Generation was cancelled or became terminal during GPU startup');
     const [ep]=await query<ModelEndpointRecord>('SELECT * FROM model_endpoints WHERE service_id=$1',[serviceId]);
     const [session]=await query<any>('SELECT * FROM gpu_sessions WHERE service_id=$1',[serviceId]);
     // A terminated failed startup must not silently re-dispatch in this same wait loop.
