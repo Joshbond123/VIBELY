@@ -794,6 +794,7 @@ let lastDisplayGuardAt = 0;
 let blankFrameStreak = 0;
 
 let compileStormUntil = 0;
+let lastChurnReassertAt = 0;
 let lastBootOkAt = 0;
 let rapidRestartCount = 0;
 async function keepDisplayAlive(where = 'guard') {
@@ -814,7 +815,10 @@ async function keepDisplayAlive(where = 'guard') {
     await adbShell('wm dismiss-keyguard', 10000).catch(() => {});
     await adbShell('input keyevent 82', 8000).catch(() => {});     // MENU = unblank
   }
-  if (Number((await adbShell('ps -A -o ARGS 2>/dev/null | grep -c dex2oat', 12000).catch(() => ({ stdout: '0' }))).stdout.trim()) > 0) {
+  // NOTE: `grep -c dex2oat` matches its OWN command line, so it always returned 1
+  // and pinned compileStormUntil permanently. The bracket keeps grep from
+  // matching itself, so this now measures real compile activity.
+  if (Number((await adbShell("ps -A -o ARGS 2>/dev/null | grep '[d]ex2oat' | wc -l", 12000).catch(() => ({ stdout: '0' }))).stdout.trim()) > 0) {
     compileStormUntil = Date.now() + 10 * 60 * 1000;
   }
   // Re-assert the unplugged/battery state: a guest that turns "charging" again
@@ -823,6 +827,19 @@ async function keepDisplayAlive(where = 'guard') {
   if (/AC powered:\s*true/i.test(ac)) {
     log(`Display guard (${where}): device reports charging again - unplugging to stop background dexopt.`);
     await adbShell('dumpsys battery unplug; dumpsys battery set ac 0; dumpsys battery set usb 0; dumpsys battery set status 3; dumpsys battery set level 90', 12000).catch(() => {});
+  }
+  // Periodic re-assert of the app-level churn guards. Android resets appops on
+  // some package updates and the emulator boot scripts re-arm "charging", so a
+  // one-shot boot fix silently decays. Cheap (3 adb calls) and idempotent.
+  if (Date.now() - lastChurnReassertAt > 3 * 60 * 1000) {
+    lastChurnReassertAt = Date.now();
+    await adbShell(
+      'cmd appops set com.android.vending RUN_ANY_IN_BACKGROUND ignore; ' +
+      'cmd appops set com.zhiliaoapp.musically RUN_ANY_IN_BACKGROUND ignore; ' +
+      'cmd appops set com.facebook.vibes RUN_ANY_IN_BACKGROUND ignore; ' +
+      'setprop pm.dexopt.bg-dexopt verify',
+      20000
+    ).catch(() => {});
   }
   // Heavy background app guard: if a user app is burning >80% CPU while it is NOT
   // the foreground activity, it is starving the guest for nothing (this is what
@@ -1541,6 +1558,9 @@ async function onPromoted() {
     if (stdout) log('GitHub state claim: ' + String(stdout).trim());
   } catch (e) { log('GitHub state claim warning: ' + e.message); }
 
+  // Re-assert the churn guards here too: promotion happens on every rotation and
+  // is the last moment where a missed guard silently becomes a frozen phone.
+  await suppressBackgroundChurn('post-promotion').catch((e) => log('post-promotion churn suppression: ' + e.message));
   // Play Store download/install path (background, device-idle and storage friendly).
   await tunePlayStoreForEmulator().catch((e) => log('Play tune: ' + e.message));
   await reconcileInstallQueue('promote').catch((e) => log('Install reconcile: ' + e.message));
@@ -1890,6 +1910,16 @@ async function main() {
 
   // Pre-load persisted state onto this new emulator while isolated in standby
   await runStateManager('restore');
+  // ROOT CAUSE of "the phone keeps getting stuck after a rotation": the churn
+  // guards (unplug the battery so background dexopt is never scheduled, freeze
+  // Play's background work, stop TikTok/Vibes burning CPU off-screen, force the
+  // panel stay-on) were only ever applied on the SELF-HEAL path -- i.e. only
+  // after the phone had already choked. A planned rotation/reboot is exactly the
+  // case where none of them ran, so every few hours the guest went back to
+  // charging -> dex2oat on 4 vCPUs -> loadavg ~20 -> dead adb -> blank,
+  // self-restarting phone. Apply them on EVERY boot, before promotion and before
+  // anything can freeze.
+  await suppressBackgroundChurn('first-boot').catch((e) => log('first-boot churn suppression: ' + e.message));
   const deviceInfo = await collectDeviceInfo();
   await startLive();
   startEmulatorSupervisor();
