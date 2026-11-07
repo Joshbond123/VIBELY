@@ -41,8 +41,8 @@ def resume_website(key, app):
 
     rpc("initialize", {"protocolVersion": "2024-11-05", "capabilities": {},
         "clientInfo": {"name": "vibely-website-keep-awake", "version": "1"}}, 1)
-    # Idempotent resume also refreshes the control-plane request when already awake.
-    # This targets the website only; it does not restart or inspect the phone.
+    # Resume only after a failed website probe. An already-live app must not
+    # be disrupted by control-plane resumption. The phone is never targeted.
     rpc("tools/call", {"name": "apps_resume", "arguments": {"app": app}}, 2)
 
 
@@ -52,16 +52,17 @@ def main():
     if not key or app != WEBSITE_APP:
         print("Website keep-awake requires its own valid, website-scoped settings.")
         return 1
-    try:
-        resume_website(key, app)
-        print("Website-only resume request accepted.")
-    except Exception as error:
-        print("Website resume check:", type(error).__name__)
     primary = os.environ.get("WEBSITE_PRIMARY", "https://aivideo.aivideo.prod.page")
     fallback = os.environ.get("WEBSITE_FALLBACK", "https://aivideo.aivideo.blitz.cloud")
+    resumed = False
     for attempt in range(6):
         for host in (primary, fallback):
             try:
+                # Real document traffic, not just API polling, keeps the website warm.
+                document = urllib.request.Request(host.rstrip("/") + "/?website_keep_awake=1",
+                    headers={"User-Agent": "VIBELY-Website-KeepAwake/1"})
+                with urllib.request.urlopen(document, timeout=20) as page:
+                    page.read()
                 request = urllib.request.Request(host.rstrip("/") + "/api/health",
                     headers={"User-Agent": "VIBELY-Website-KeepAwake/1"})
                 with urllib.request.urlopen(request, timeout=25) as response:
@@ -75,10 +76,17 @@ def main():
                     with open(summary, "a") as output:
                         output.write("### Website keep-awake\n- Website healthy: yes\n- Database connected: yes\n"
                                      "- Emulator unchanged\n- No generation or GPU activation requested\n"
-                                     "- Schedule: every 10 minutes (GitHub scheduling is best-effort)\n")
+                                     "- Schedule: every 5 minutes, staggered (GitHub scheduling is best-effort)\n")
                 return 0
             except Exception:
                 pass
+        if not resumed:
+            resumed = True
+            try:
+                resume_website(key, app)
+                print("Unreachable website: website-only resume request accepted.")
+            except Exception as error:
+                print("Website resume check:", type(error).__name__)
         if attempt < 5:
             time.sleep(10)
     print("Website did not become healthy within the bounded keep-awake check.")
