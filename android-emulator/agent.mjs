@@ -824,6 +824,23 @@ async function keepDisplayAlive(where = 'guard') {
     log(`Display guard (${where}): device reports charging again - unplugging to stop background dexopt.`);
     await adbShell('dumpsys battery unplug; dumpsys battery set ac 0; dumpsys battery set usb 0; dumpsys battery set status 3; dumpsys battery set level 90', 12000).catch(() => {});
   }
+  // Heavy background app guard: if a user app is burning >80% CPU while it is NOT
+  // the foreground activity, it is starving the guest for nothing (this is what
+  // produced loadavg ~20 and a stalled adb with a frozen/blank screen). Stop it -
+  // it stays installed and still opens instantly when tapped.
+  try {
+    const cpu = (await adbShell('dumpsys cpuinfo 2>/dev/null | head -10', 15000)).stdout || '';
+    const top = (await adbShell('dumpsys activity activities | grep -m1 topResumedActivity', 12000)).stdout || '';
+    const fg = (top.match(/u0\s+([\w.]+)\//) || [])[1] || '';
+    const keep = /^(system_server|android|com\.android\.systemui|com\.google\.android\.gms|com\.google\.android\.gms\.persistent|media\.swcodec|surfaceflinger|com\.android\.vending)$/;
+    for (const m of cpu.matchAll(/(\d+)%\s+\d+\/([\w.]+)\s*:/g)) {
+      const pct = Number(m[1]), pkg = m[2];
+      if (pct >= 80 && pkg !== fg && !keep.test(pkg)) {
+        log(`Display guard (${where}): ${pkg} is burning ${pct}% CPU in the background (fg=${fg || 'none'}) - force-stopping it to keep the phone smooth.`);
+        await adbShell(`am force-stop ${pkg}`, 15000).catch(() => {});
+      }
+    }
+  } catch (_) {}
   // Play Store storm: it auto-updates apps at boot, pins itself in the
   // foreground (AssetBrowserActivity) and starves the CPU until adb dies.
   const load = Number((await adbShell('cat /proc/loadavg', 10000).catch(() => ({ stdout: '0' }))).stdout.trim().split(/\s+/)[0]);
@@ -873,6 +890,13 @@ async function suppressBackgroundChurn(where = 'boot') {
     'cmd appops set com.android.vending RUN_ANY_IN_BACKGROUND ignore',
     'cmd appops set com.android.vending WAKE_LOCK ignore',
     'am force-stop com.android.vending',
+    // Heavy user apps are the other starvation source: measured 198% CPU from
+    // com.zhiliaoapp.musically while it was NOT even on screen (video decode +
+    // prefetch). They stay installed and still open instantly on tap.
+    'cmd appops set com.zhiliaoapp.musically RUN_ANY_IN_BACKGROUND ignore',
+    'cmd appops set com.facebook.vibes RUN_ANY_IN_BACKGROUND ignore',
+    'am force-stop com.zhiliaoapp.musically',
+    'am force-stop com.facebook.vibes',
     // Keep the panel awake no matter the power state.
     'settings put system screen_off_timeout 2147483647',
     'settings put global stay_on_while_plugged_in 7',
