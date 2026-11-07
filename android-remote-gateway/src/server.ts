@@ -830,14 +830,38 @@ app.post('/api/adb/shell', requireUserAuth, async (req: Request, res: Response) 
   }
 });
 
+/**
+ * HTTP input path.
+ *
+ * On a slow or flapping network the control WebSocket is often the first thing to
+ * fail while plain HTTP still gets through -- and the viewer refused to send ANY
+ * input unless that socket was open, so the phone became unusable exactly when the
+ * link got bad. Accept the same event objects the WebSocket accepts and route them
+ * identically: pointer events go to the low-latency scrcpy input channel, the
+ * legacy shapes fall back to `input_event`.
+ */
 app.post('/api/input', requireUserAuth, async (req: Request, res: Response) => {
   const active = getActiveSession();
   if (!active) {
     res.status(503).json({ ok: false, error: 'No active Android emulator connected' });
     return;
   }
+  const body: any = req.body || {};
+  const event: any = body.event && typeof body.event === 'object' ? body.event : body;
   try {
-    const out = await callAgentRpc(active, 'input_event', req.body || {}, 15000);
+    let out: any;
+    if (event?.kind === 'pointer' && active.deviceInfo.stream_transport === 'scrcpy-h264') {
+      out = await callAgentRpc(active, 'live_input', { ...event, pointerId: 0 }, 8000);
+    } else if (event?.kind === 'pointer') {
+      // Legacy transport has no pointer channel: collapse to tap/swipe.
+      const w = Number(String(active.deviceInfo.resolution || '1080x2400').split('x')[0]) || 1080;
+      const h = Number(String(active.deviceInfo.resolution || '1080x2400').split('x')[1]) || 2400;
+      const x = Math.round(Number(event.x || 0) * w);
+      const y = Math.round(Number(event.y || 0) * h);
+      out = await callAgentRpc(active, 'input_event', { kind: 'tap', x, y }, 8000);
+    } else {
+      out = await callAgentRpc(active, 'input_event', event, 15000);
+    }
     res.json({ ok: true, session_id: active.sessionId, ...out });
   } catch (err: any) {
     res.status(500).json({ ok: false, error: err?.message || String(err) });
@@ -1082,8 +1106,16 @@ wssViewer.on('connection', (ws: WebSocket,req:http.IncomingMessage) => {
   if(!controlOnly && active && new URL(req.url || '/', 'http://relay').searchParams.get('wake')!=='0'){callAgentRpc(active,'adb_shell',{command:'input keyevent 224; dumpsys window policy | grep -E "mShowingLockscreen|isStatusBarKeyguard|showing="'},15000).then(r=>{if(ws.readyState===WebSocket.OPEN)ws.send(JSON.stringify({type:'screen_state',locked:/mShowingLockscreen=true|isStatusBarKeyguard=true|showing=true/.test(r.stdout||'')}));}).catch(()=>{});}
   if(!controlOnly && active?.videoConfig){
     const packets=active.videoGop || [];
-    if(packets.length){const last=packets[packets.length-1];ws.send(JSON.stringify({type:'bootstrap_replay',until:Number(last.readBigUInt64BE(1)&((1n<<62n)-1n)),captured_at:active.lastFrameAt}));}
-    ws.send(active.videoConfig,{binary:true});for(const packet of packets)ws.send(packet,{binary:true});
+    // Replay ONLY from the newest keyframe. Sending the whole cached GOP (up to 90
+    // frames) on every viewer connect is a multi-megabyte burst: on a slow link that
+    // alone guarantees the picture never settles and the viewer reconnects forever.
+    let startIdx=0;
+    for(let i=packets.length-1;i>=0;i--){
+      try{ if(packets[i].readBigUInt64BE(1)&(1n<<62n)){startIdx=i;break;} }catch{}
+    }
+    const replay=packets.slice(startIdx);
+    if(replay.length){const last=replay[replay.length-1];ws.send(JSON.stringify({type:'bootstrap_replay',until:Number(last.readBigUInt64BE(1)&((1n<<62n)-1n)),captured_at:active.lastFrameAt}));}
+    ws.send(active.videoConfig,{binary:true});for(const packet of replay)ws.send(packet,{binary:true});
   }
   // A legacy warm encoder may have dropped its last IDR while nobody watched.
   // Recover that encoder only, once per cold cache, without rebooting Android.
