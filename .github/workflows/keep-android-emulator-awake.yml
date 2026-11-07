@@ -1,11 +1,14 @@
 name: Keep Android Emulator Awake
 
-# The Blitz container sleeps after ~15 minutes without HTTP traffic, which dropped
-# the reverse tunnel and left the phone offline (one cause of the black screen).
-# This job used to spin a full Playwright/Chromium install every 10 minutes —
-# ~8 runner-minutes of overhead per attempt. A plain keep-alive request is enough
-# to keep the container hot, and it reports the phone's real state so a dead
+# The Blitz container sleeps after ~15 minutes without HTTP traffic, which drops the
+# reverse tunnel and leaves the phone blank/offline. This job pokes the gateway every
+# 10 minutes so the container stays hot, and reports the phone's real state so a dead
 # emulator is visible in the Actions history instead of being silently ignored.
+#
+# NOTE: this file used to contain an inline `python3 - <<'PY'` heredoc at column 0
+# inside a `run: |` block. YAML blocks end at the first unindented line, so the file
+# was INVALID YAML and every scheduled run failed before a job was ever created.
+# The Blitz resume now lives in android-emulator/blitz-resume.py.
 
 on:
   schedule:
@@ -24,58 +27,50 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 6
     env:
-      GATEWAY: ${{ vars.EMULATOR_GATEWAY_URL || 'https://android.aivideo.blitz.cloud' }}
+      GATEWAY_PRIMARY: ${{ vars.EMULATOR_GATEWAY_URL || 'https://android.aivideo.prod.page' }}
+      GATEWAY_FALLBACK: https://android.aivideo.blitz.cloud
       BLITZ_API_KEY: ${{ secrets.BLITZ_API_KEY }}
       BLITZ_ANDROID_APP: ${{ secrets.BLITZ_ANDROID_APP }}
 
     steps:
+      - uses: actions/checkout@v4
+
       - name: Keep-alive request + phone status
-        id: keepalive
         run: |
           set -o pipefail
-          HEALTH=$(curl -fsSL --max-time 20 "${GATEWAY}/api/public/health" 2>/dev/null || echo '')
-          if [[ -z "$HEALTH" ]]; then
-            echo "Gateway did not answer; attempting a Blitz resume."
-            if [[ -n "${BLITZ_API_KEY}" && -n "${BLITZ_ANDROID_APP}" ]]; then
-              python3 - <<'PY' || true
-import json, os, urllib.request
-key, app = os.environ["BLITZ_API_KEY"], os.environ["BLITZ_ANDROID_APP"]
-hdrs = {"Authorization": f"Bearer {key}", "Content-Type": "application/json",
-        "Accept": "application/json, text/event-stream"}
-def call(method, params, rid):
-    req = urllib.request.Request("https://mcp.blitz.cloud/mcp",
-        data=json.dumps({"jsonrpc": "2.0", "id": rid, "method": method, "params": params}).encode(),
-        headers=hdrs, method="POST")
-    with urllib.request.urlopen(req, timeout=30) as r:
-        return r.headers.get("mcp-session-id"), r.read().decode()
-sid, out = call("initialize", {"protocolVersion": "2024-11-05", "capabilities": {}, "clientInfo": {"name": "keep-awake", "version": "1"}}, 1)
-if sid: hdrs["Mcp-Session-Id"] = sid
-sid, out = call("tools/call", {"name": "apps_resume", "arguments": {"app": app}}, 2)
-print(out[:400])
-PY
-              sleep 20
-              HEALTH=$(curl -fsSL --max-time 20 "${GATEWAY}/api/public/health" 2>/dev/null || echo '')
-            fi
+          probe() {
+            curl -fsSL --max-time 20 "$1/api/public/health" 2>/dev/null || true
+          }
+          HEALTH="$(probe "${GATEWAY_PRIMARY}")"
+          if [ -z "${HEALTH}" ]; then
+            echo "Primary gateway ${GATEWAY_PRIMARY} did not answer; trying ${GATEWAY_FALLBACK}"
+            HEALTH="$(probe "${GATEWAY_FALLBACK}")"
           fi
-
-          if [[ -z "$HEALTH" ]]; then
+          if [ -z "${HEALTH}" ]; then
+            echo "No gateway answered; asking Blitz to resume the container."
+            python3 android-emulator/blitz-resume.py || true
+            sleep 25
+            HEALTH="$(probe "${GATEWAY_PRIMARY}")"
+            [ -n "${HEALTH}" ] || HEALTH="$(probe "${GATEWAY_FALLBACK}")"
+          fi
+          if [ -z "${HEALTH}" ]; then
             echo "::error::Gateway unreachable even after a resume attempt"
             exit 1
           fi
-          echo "$HEALTH" | jq .
-          CONNECTED=$(echo "$HEALTH" | jq -r '.active_emulator_connected // false')
-          STANDBY=$(echo "$HEALTH" | jq -r '.standby_count // 0')
-          RSS=$(echo "$HEALTH" | jq -r '.rss_mb // 0')
-          echo "connected=${CONNECTED} standby=${STANDBY} gateway_rss_mb=${RSS}"
+          echo "${HEALTH}" | jq . || echo "${HEALTH}"
+          CONNECTED="$(echo "${HEALTH}" | jq -r '.active_emulator_connected // false')"
+          STANDBY="$(echo "${HEALTH}" | jq -r '.standby_count // 0')"
+          RSS="$(echo "${HEALTH}" | jq -r '.rss_mb // 0')"
+          DEGRADED="$(echo "${HEALTH}" | jq -r '.active_guest_degraded // false')"
+          echo "connected=${CONNECTED} standby=${STANDBY} degraded=${DEGRADED} gateway_rss_mb=${RSS}"
           {
             echo "### Android phone keep-alive"
             echo "- gateway reachable: yes"
             echo "- active phone: ${CONNECTED}"
             echo "- standby candidates: ${STANDBY}"
+            echo "- guest degraded: ${DEGRADED}"
             echo "- gateway RSS: ${RSS} MB"
           } >> "$GITHUB_STEP_SUMMARY"
-          if [[ "$CONNECTED" != "true" ]]; then
-            # Not fatal: the scheduled rotation / self-healing agent is responsible
-            # for recovery. Surfacing it keeps the failure visible in history.
-            echo "::warning::No active Android phone right now (standby=${STANDBY}); self-healing rotation will restore it."
+          if [ "${CONNECTED}" != "true" ]; then
+            echo "::warning::No active Android phone right now (standby=${STANDBY}); the self-healing rotation is responsible for recovery."
           fi

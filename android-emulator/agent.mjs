@@ -794,6 +794,7 @@ let lastDisplayGuardAt = 0;
 let blankFrameStreak = 0;
 
 let compileStormUntil = 0;
+let lastChurnReassertAt = 0;
 let lastBootOkAt = 0;
 let rapidRestartCount = 0;
 async function keepDisplayAlive(where = 'guard') {
@@ -814,7 +815,10 @@ async function keepDisplayAlive(where = 'guard') {
     await adbShell('wm dismiss-keyguard', 10000).catch(() => {});
     await adbShell('input keyevent 82', 8000).catch(() => {});     // MENU = unblank
   }
-  if (Number((await adbShell('ps -A -o ARGS 2>/dev/null | grep -c dex2oat', 12000).catch(() => ({ stdout: '0' }))).stdout.trim()) > 0) {
+  // NOTE: `grep -c dex2oat` matches its OWN command line, so it always returned 1
+  // and pinned compileStormUntil permanently. The bracket keeps grep from
+  // matching itself, so this now measures real compile activity.
+  if (Number((await adbShell("ps -A -o ARGS 2>/dev/null | grep '[d]ex2oat' | wc -l", 12000).catch(() => ({ stdout: '0' }))).stdout.trim()) > 0) {
     compileStormUntil = Date.now() + 10 * 60 * 1000;
   }
   // Re-assert the unplugged/battery state: a guest that turns "charging" again
@@ -824,6 +828,36 @@ async function keepDisplayAlive(where = 'guard') {
     log(`Display guard (${where}): device reports charging again - unplugging to stop background dexopt.`);
     await adbShell('dumpsys battery unplug; dumpsys battery set ac 0; dumpsys battery set usb 0; dumpsys battery set status 3; dumpsys battery set level 90', 12000).catch(() => {});
   }
+  // Periodic re-assert of the app-level churn guards. Android resets appops on
+  // some package updates and the emulator boot scripts re-arm "charging", so a
+  // one-shot boot fix silently decays. Cheap (3 adb calls) and idempotent.
+  if (Date.now() - lastChurnReassertAt > 3 * 60 * 1000) {
+    lastChurnReassertAt = Date.now();
+    await adbShell(
+      'cmd appops set com.android.vending RUN_ANY_IN_BACKGROUND ignore; ' +
+      'cmd appops set com.zhiliaoapp.musically RUN_ANY_IN_BACKGROUND ignore; ' +
+      'cmd appops set com.facebook.vibes RUN_ANY_IN_BACKGROUND ignore; ' +
+      'setprop pm.dexopt.bg-dexopt verify',
+      20000
+    ).catch(() => {});
+  }
+  // Heavy background app guard: if a user app is burning >80% CPU while it is NOT
+  // the foreground activity, it is starving the guest for nothing (this is what
+  // produced loadavg ~20 and a stalled adb with a frozen/blank screen). Stop it -
+  // it stays installed and still opens instantly when tapped.
+  try {
+    const cpu = (await adbShell('dumpsys cpuinfo 2>/dev/null | head -10', 15000)).stdout || '';
+    const top = (await adbShell('dumpsys activity activities | grep -m1 topResumedActivity', 12000)).stdout || '';
+    const fg = (top.match(/u0\s+([\w.]+)\//) || [])[1] || '';
+    const keep = /^(system_server|android|com\.android\.systemui|com\.google\.android\.gms|com\.google\.android\.gms\.persistent|media\.swcodec|surfaceflinger|com\.android\.vending)$/;
+    for (const m of cpu.matchAll(/(\d+)%\s+\d+\/([\w.]+)\s*:/g)) {
+      const pct = Number(m[1]), pkg = m[2];
+      if (pct >= 80 && pkg !== fg && !keep.test(pkg)) {
+        log(`Display guard (${where}): ${pkg} is burning ${pct}% CPU in the background (fg=${fg || 'none'}) - force-stopping it to keep the phone smooth.`);
+        await adbShell(`am force-stop ${pkg}`, 15000).catch(() => {});
+      }
+    }
+  } catch (_) {}
   // Play Store storm: it auto-updates apps at boot, pins itself in the
   // foreground (AssetBrowserActivity) and starves the CPU until adb dies.
   const load = Number((await adbShell('cat /proc/loadavg', 10000).catch(() => ({ stdout: '0' }))).stdout.trim().split(/\s+/)[0]);
@@ -873,6 +907,13 @@ async function suppressBackgroundChurn(where = 'boot') {
     'cmd appops set com.android.vending RUN_ANY_IN_BACKGROUND ignore',
     'cmd appops set com.android.vending WAKE_LOCK ignore',
     'am force-stop com.android.vending',
+    // Heavy user apps are the other starvation source: measured 198% CPU from
+    // com.zhiliaoapp.musically while it was NOT even on screen (video decode +
+    // prefetch). They stay installed and still open instantly on tap.
+    'cmd appops set com.zhiliaoapp.musically RUN_ANY_IN_BACKGROUND ignore',
+    'cmd appops set com.facebook.vibes RUN_ANY_IN_BACKGROUND ignore',
+    'am force-stop com.zhiliaoapp.musically',
+    'am force-stop com.facebook.vibes',
     // Keep the panel awake no matter the power state.
     'settings put system screen_off_timeout 2147483647',
     'settings put global stay_on_while_plugged_in 7',
@@ -962,6 +1003,43 @@ async function saveWholeAvd(hold = false) {
   };
   wholeAvdSaveInFlight = run();
   return wholeAvdSaveInFlight;
+}
+
+/** How long an explicit-checkpoint HTTP call may block before it answers
+ *  "pending" and lets the copy finish in the background. Must stay well under
+ *  the reverse-tunnel proxy idle timeout (which is why 500s used to appear). */
+const EXPLICIT_CHECKPOINT_RESPONSE_MS = 45 * 1000;
+
+/** Deduplicated explicit checkpoint job. A second request while a multi-GB copy
+ *  is in flight must JOIN it, never stack another capture on the same disk. */
+let explicitCheckpointJob = null;
+let lastExplicitCheckpoint = null;
+function startExplicitCheckpoint() {
+  if (explicitCheckpointJob) {
+    log('Explicit checkpoint already running; joining the in-flight capture.');
+    return explicitCheckpointJob;
+  }
+  const job = { startedAt: Date.now(), finishedAt: 0, done: false, ok: null, error: '' };
+  job.promise = livePersist('explicit-checkpoint', { whole: true, hold: false, force: true })
+    .then((captured) => {
+      job.ok = captured !== false;
+      if (!job.ok) job.error = 'checkpoint not published (see agent log)';
+      return job.ok;
+    })
+    .catch((e) => {
+      job.ok = false;
+      job.error = e.message || String(e);
+      return false;
+    })
+    .finally(() => {
+      job.done = true;
+      job.finishedAt = Date.now();
+      lastExplicitCheckpoint = job;
+      explicitCheckpointJob = null;
+      log(`Explicit checkpoint ${job.ok ? 'published' : 'failed'} in ${Math.round((job.finishedAt - job.startedAt) / 1000)}s.`);
+    });
+  explicitCheckpointJob = job;
+  return job;
 }
 
 let lastWholeAvdAt = 0;
@@ -1305,9 +1383,44 @@ async function handleGatewayRpc(action, payload) {
       // hold=false on purpose: an explicit checkpoint from the UI/API must leave
       // the phone RUNNING. hold=true leaves the vCPU stopped for a rotation that
       // may never come, i.e. a frozen handset.
-      const captured = await livePersist('explicit-checkpoint', { whole: true, hold: false, force: true });
-      if (captured === false) return { ok: false, captured: false, error: 'checkpoint not published (see agent log)' };
-      return { ok: true, captured: true, backed_up_at: new Date().toISOString() };
+      //
+      // A whole-AVD capture copies several GB and PAUSES the vCPU, so this used to
+      // hold the HTTP response open for minutes. The reverse-tunnel proxy gives up
+      // long before that and the caller got "HTTP 500 Internal Server Error" while
+      // the capture was in fact still running -- which read as "checkpoint is
+      // broken / the phone hung". Start the job, wait a bounded grace window, and
+      // answer 202-style (ok + pending) when it is still copying. The job keeps
+      // running in the background and is deduplicated, so a retry joins it instead
+      // of starting a second multi-GB copy on top of the first.
+      const job = startExplicitCheckpoint();
+      const deadline = Date.now() + EXPLICIT_CHECKPOINT_RESPONSE_MS;
+      while (!job.done && Date.now() < deadline) await sleep(1000);
+      if (!job.done) {
+        return {
+          ok: true,
+          captured: false,
+          pending: true,
+          started_at: new Date(job.startedAt).toISOString(),
+          message: 'checkpoint is still copying; it continues in the background and the phone stays responsive',
+        };
+      }
+      if (job.ok) return { ok: true, captured: true, backed_up_at: new Date(job.finishedAt ? new Date(job.finishedAt).toISOString() : new Date().toISOString()) };
+      return { ok: false, captured: false, error: job.error || 'checkpoint not published (see agent log)' };
+    }
+    case 'checkpoint_status': {
+      const job = explicitCheckpointJob;
+      return {
+        ok: true,
+        running: !!job,
+        last: lastExplicitCheckpoint
+          ? {
+              ok: lastExplicitCheckpoint.ok,
+              finished_at: lastExplicitCheckpoint.finishedAt ? new Date(lastExplicitCheckpoint.finishedAt).toISOString() : null,
+              seconds: lastExplicitCheckpoint.finishedAt ? Math.round((lastExplicitCheckpoint.finishedAt - lastExplicitCheckpoint.startedAt) / 1000) : null,
+              error: lastExplicitCheckpoint.error || '',
+            }
+          : null,
+      };
     }
     case 'apply_delta_state': {
       await runStateManager('restore');
@@ -1445,6 +1558,9 @@ async function onPromoted() {
     if (stdout) log('GitHub state claim: ' + String(stdout).trim());
   } catch (e) { log('GitHub state claim warning: ' + e.message); }
 
+  // Re-assert the churn guards here too: promotion happens on every rotation and
+  // is the last moment where a missed guard silently becomes a frozen phone.
+  await suppressBackgroundChurn('post-promotion').catch((e) => log('post-promotion churn suppression: ' + e.message));
   // Play Store download/install path (background, device-idle and storage friendly).
   await tunePlayStoreForEmulator().catch((e) => log('Play tune: ' + e.message));
   await reconcileInstallQueue('promote').catch((e) => log('Install reconcile: ' + e.message));
@@ -1794,6 +1910,16 @@ async function main() {
 
   // Pre-load persisted state onto this new emulator while isolated in standby
   await runStateManager('restore');
+  // ROOT CAUSE of "the phone keeps getting stuck after a rotation": the churn
+  // guards (unplug the battery so background dexopt is never scheduled, freeze
+  // Play's background work, stop TikTok/Vibes burning CPU off-screen, force the
+  // panel stay-on) were only ever applied on the SELF-HEAL path -- i.e. only
+  // after the phone had already choked. A planned rotation/reboot is exactly the
+  // case where none of them ran, so every few hours the guest went back to
+  // charging -> dex2oat on 4 vCPUs -> loadavg ~20 -> dead adb -> blank,
+  // self-restarting phone. Apply them on EVERY boot, before promotion and before
+  // anything can freeze.
+  await suppressBackgroundChurn('first-boot').catch((e) => log('first-boot churn suppression: ' + e.message));
   const deviceInfo = await collectDeviceInfo();
   await startLive();
   startEmulatorSupervisor();
