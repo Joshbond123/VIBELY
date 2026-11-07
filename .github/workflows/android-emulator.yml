@@ -126,6 +126,15 @@ jobs:
           EVENT="${{ github.event_name }}"
           SHOULD_BOOT="true"
 
+          # `gateway_only` was declared as an input and never read, so asking for a
+          # gateway-only deploy still booted a whole new emulator. Honour it: the
+          # only safe way to ship a viewer/gateway change without disturbing the
+          # live phone.
+          if [[ "${{ inputs.gateway_only }}" == "true" ]]; then
+            echo "gateway_only=true: deploying gateway code without rotating the phone."
+            SHOULD_BOOT="false"
+          fi
+
           if [[ "$EVENT" == "schedule" && "$FORCE" != "true" && -n "$GW_URL" ]]; then
             HEALTH=$(curl -fsSL --max-time 15 "${GW_URL}/api/public/health" 2>/dev/null || echo "")
             if [[ -n "$HEALTH" ]]; then
