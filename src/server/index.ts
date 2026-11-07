@@ -1,3 +1,4 @@
+import {startWebsiteKeepAwake} from './websiteKeepAwake.js';
 import {ltxVideoStatus} from './ltxVideoProvider.js';
 import {launchVideoGenerationPipeline,resumeFailedLtxVideo} from './ltxVideoPipeline.js';
 import {gpuFleetDashboard} from './gpuUsage.js';
@@ -725,6 +726,7 @@ async function bootstrap() {
   }
   app.listen(PORT, '0.0.0.0', () => {
     console.log(`[VIBELY] Platform server listening on 0.0.0.0:${PORT}`);
+    startWebsiteKeepAwake();
   });
 }
 

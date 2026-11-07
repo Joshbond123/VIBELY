@@ -13,7 +13,15 @@ export async function renderLtxSegment(id:string,index:number,prompt:string,imag
  const record=await query<any>('SELECT comfyui_workflow FROM video_generations WHERE id=$1',[id]);
  const known=record[0]?.comfyui_workflow?.ltx_segments?.[String(index)];
  if(known?.persisted&&fs.existsSync(dest))return;
- const ep=await getReadyEndpoint(LTX_SERVICE,id);
+ let ep:ModelEndpointRecord;
+ if(known){
+  // Never start replacement hardware just to poll an old, ambiguous job.
+  const [session]=await query<any>('SELECT state FROM gpu_sessions WHERE service_id=$1',[LTX_SERVICE]);
+  const [existing]=await query<ModelEndpointRecord>('SELECT * FROM model_endpoints WHERE service_id=$1',[LTX_SERVICE]);
+  if(session?.state!=='ON'||!existing?.comfyui_ready||existing.endpoint_url!==known.endpoint)
+   throw Error('Prior LTX segment was not persisted and its original runtime is unavailable; explicit saved-segment resume is required');
+  ep=existing;
+ }else ep=await getReadyEndpoint(LTX_SERVICE,id);
  const headers={Authorization:`Bearer ${ep.api_key}`,'Content-Type':'application/json'};
  // Write an intention before submitting. Unknown POST outcomes are never retried.
  if(!known){

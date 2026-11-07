@@ -156,7 +156,15 @@ def run_job(jid,payload):
       result=paths[0];command(['ffmpeg','-v','error','-i',str(result),'-f','null','-'],timeout=120)
       probe=subprocess.run(['ffprobe','-v','error','-count_frames','-select_streams','v:0','-show_entries','stream=nb_read_frames','-of','csv=p=0',str(result)],capture_output=True,text=True,check=True)
       if int(probe.stdout.strip())<job['frames']:raise RuntimeError('Generated clip is too short; padding/looping is forbidden')
-      job.update(status='completed',stage='awaiting_durable_output_receipt',output_path=str(result),bytes=result.stat().st_size,sha256=hashlib.sha256(result.read_bytes()).hexdigest(),completed_at=time.time());return
+      # Preserve genuine output in Kaggle's exported working directory even when
+      # the website is asleep. /tmp outputs disappear when the provider exits.
+      saved=WORK/'ltx_outputs'/(jid+'.mp4');saved.parent.mkdir(exist_ok=True)
+      with result.open('rb') as src,saved.open('wb') as dst:
+       shutil.copyfileobj(src,dst);dst.flush();os.fsync(dst.fileno())
+      result=saved
+      job.update(status='completed',stage='awaiting_durable_output_receipt',output_path=str(result),bytes=result.stat().st_size,sha256=hashlib.sha256(result.read_bytes()).hexdigest(),completed_at=time.time())
+      (saved.with_suffix('.json')).write_text(json.dumps({k:job[k] for k in ('id','frames','width','height','seed','bytes','sha256','completed_at')}))
+      log('Genuine output durably staged for provider export: '+jid);return
     if COMFY_PROC.poll() is not None:raise RuntimeError('ComfyUI exited')
     time.sleep(2)
    raise TimeoutError('LTX segment exceeded its bounded inference deadline')
