@@ -1,29 +1,30 @@
+import {notebookStatus} from './kaggleRuntime.js';
 import {recordGpuObservation} from './gpuUsage.js';
 import {GPU_PROFILES} from './gpuFleetPolicy.js';
 import {providerQuota} from './kaggleQuota.js';
 import crypto from 'crypto';
 import { pool, query } from './db.js';
 
-export const GPU_SERVICES=['minimax_music_3'];
+export const GPU_SERVICES=['minimax_music_3','ltx_2_3_distilled_gguf_q4'];
 const booting=new Map<string,Promise<void>>();
 export async function gpuEvent(service:string,event:string,detail:any={}) {
   await query('INSERT INTO gpu_events(service_id,event,detail) VALUES($1,$2,$3::jsonb)',[service,event,JSON.stringify(detail)]);
 }
 
 async function dispatchWorker(service:string) {
-  const profile=GPU_PROFILES.find(p=>p.account==='happink')!;
+  const profile=GPU_PROFILES.find(p=>p.desired_engine===service)!;
   const quota=await providerQuota(profile);
   if(!quota.quota_verified)throw new Error('GPU activation blocked: provider quota could not be verified');
   if(quota.remaining_seconds<=0)throw new Error(`GPU activation blocked: ${profile.account} weekly provider quota exhausted; resets ${quota.refresh_at}. No cross-account quota fallback.`);
   if(!process.env.GH_PAT) throw new Error('GPU auto-start unavailable: GitHub Actions credential is not configured');
-  const res=await fetch('https://api.github.com/repos/Joshbond123/VIBELY/actions/workflows/gpu-workers.yml/dispatches',{method:'POST',signal:AbortSignal.timeout(20000),headers:{Authorization:`Bearer ${process.env.GH_PAT}`,Accept:'application/vnd.github+json','Content-Type':'application/json','User-Agent':'VIBELY-GPU-lifecycle'},body:JSON.stringify({ref:'main',inputs:{worker:'music'}})});
+  const res=await fetch('https://api.github.com/repos/Joshbond123/VIBELY/actions/workflows/gpu-workers.yml/dispatches',{method:'POST',signal:AbortSignal.timeout(20000),headers:{Authorization:`Bearer ${process.env.GH_PAT}`,Accept:'application/vnd.github+json','Content-Type':'application/json','User-Agent':'VIBELY-GPU-lifecycle'},body:JSON.stringify({ref:'main',inputs:{worker:service==='minimax_music_3'?'music':'video'}})});
   if(!res.ok) throw new Error(`GPU startup dispatch failed: GitHub HTTP ${res.status}`);
   await gpuEvent(service,'ACTIVATION_REQUESTED',{method:'GitHub Actions -> Kaggle SaveKernel',request_id:crypto.randomUUID()});
 }
 
 // Durable leases are created before startup. Browsing/health/captions never call this.
 export async function acquireGpu(service:string,jobId:string) {
-  if(service!=='minimax_music_3')throw new Error('Only the music GPU is supported');
+  if(!GPU_SERVICES.includes(service))throw new Error('Unsupported video/music GPU service');
   const client=await pool!.connect();let start=false;
   try {
     await client.query('BEGIN');await client.query('SELECT pg_advisory_xact_lock(hashtext($1))',[service]);
@@ -55,7 +56,7 @@ export async function releaseGpuJob(jobId:string) {
 }
 
 export async function acceptGpuHeartbeat(service:string,version:string,started:number,ready:boolean) {
-  if(service!=='minimax_music_3'||version!=='lifecycle-v3') return;
+  if(!GPU_SERVICES.includes(service)||version!=='lifecycle-v3') return;
   const [before]=await query<any>('SELECT state FROM gpu_sessions WHERE service_id=$1',[service]);
   await query(`INSERT INTO gpu_sessions(service_id,state,started_at,worker_started_at)
     VALUES($1,$2,to_timestamp($3),$3) ON CONFLICT(service_id) DO UPDATE
@@ -67,7 +68,7 @@ export async function acceptGpuHeartbeat(service:string,version:string,started:n
 }
 
 async function deliverReceipt(row:any) {
-  const kind='music';
+  const kind=row.service_id==='minimax_music_3'?'music':'video';
   const r=await fetch(`${row.endpoint_url}/v1/${kind}/jobs/${encodeURIComponent(row.remote_job_id)}/acknowledge`,{method:'POST',signal:AbortSignal.timeout(12000),headers:{Authorization:`Bearer ${row.api_key}`,'Content-Type':'application/json'},body:JSON.stringify(row.receipt)});
   if(!r.ok) throw new Error(`Output acknowledgement HTTP ${r.status}`);
   await query('UPDATE gpu_output_receipts SET delivered_at=NOW(),last_error=NULL,attempts=attempts+1 WHERE service_id=$1 AND remote_job_id=$2',[row.service_id,row.remote_job_id]);
@@ -89,7 +90,7 @@ let ticking=false;
 export async function gpuLifecycleTick() {
   if(ticking || !pool)return;ticking=true;
   try {
-    const receipts=await query<any>("SELECT * FROM gpu_output_receipts WHERE delivered_at IS NULL AND service_id='minimax_music_3' ORDER BY created_at LIMIT 10");
+    const receipts=await query<any>("SELECT * FROM gpu_output_receipts WHERE delivered_at IS NULL AND service_id IN ('minimax_music_3','ltx_2_3_distilled_gguf_q4') ORDER BY created_at LIMIT 10");
     for(const receipt of receipts) {
       try{await deliverReceipt(receipt);}catch(e:any){await query('UPDATE gpu_output_receipts SET attempts=attempts+1,last_error=$3 WHERE service_id=$1 AND remote_job_id=$2',[receipt.service_id,receipt.remote_job_id,e.message]);}
     }
@@ -103,11 +104,9 @@ export async function gpuLifecycleTick() {
         if(!state){await c.query('COMMIT');continue;}
         const {rows:[leases]}=await c.query('SELECT COUNT(*)::int AS count FROM gpu_leases WHERE service_id=$1',[service]);
         if(['STARTING','INITIALIZING'].includes(state.state)) {
-          const user='happink';
-          const slug='vibely-music-gpu-worker';
-          const token=process.env['KAGGLE_HAPPINK_TOKEN'];
-          const r=await fetch(`https://www.kaggle.com/api/v1/kernels/status?userName=${user}&kernelSlug=${slug}`,{signal:AbortSignal.timeout(8000),headers:{Authorization:`Bearer ${token || ''}`}});
-          if(r.ok){const k:any=await r.json();if(['error','failed'].includes(String(k.status).toLowerCase()) && Date.now()-new Date(state.requested_at || state.started_at).getTime()>120000) {
+          const profile=GPU_PROFILES.find(p=>p.desired_engine===service)!;
+          let k:any;try{k=await notebookStatus(profile);}catch{k={status:'unknown'};}
+          {if(['error','failed'].includes(String(k.status).toLowerCase()) && Date.now()-new Date(state.requested_at || state.started_at).getTime()>120000) {
             await c.query("UPDATE gpu_sessions SET state='ERROR',error=$2 WHERE service_id=$1",[service,`Kaggle session failed: ${String(k.failureMessage || k.status).slice(0,500)}`]);
             await c.query("INSERT INTO gpu_events(service_id,event,detail) VALUES($1,'SESSION_FAILED',$2::jsonb)",[service,JSON.stringify({status:k.status})]);
           }}
@@ -127,12 +126,9 @@ export async function gpuLifecycleTick() {
           }
         }
         if(['STOPPING','ERROR'].includes(state.state)) {
-          const user='happink';
-          const slug='vibely-music-gpu-worker';
-          const token=process.env['KAGGLE_HAPPINK_TOKEN'];
-          const r=await fetch(`https://www.kaggle.com/api/v1/kernels/status?userName=${user}&kernelSlug=${slug}`,{signal:AbortSignal.timeout(10000),headers:{Authorization:`Bearer ${token || ''}`}});
-          if(r.ok) {
-            const k:any=await r.json();const status=String(k.status || '').toLowerCase();
+          const profile=GPU_PROFILES.find(p=>p.desired_engine===service)!;
+          let k:any;try{k=await notebookStatus(profile);}catch{k={status:'unknown'};}
+          {const status=String(k.status || '').toLowerCase();
             if(['complete','completed','cancelacknowledged','canceled','cancelled','error','failed'].includes(status)) {
               await c.query("UPDATE gpu_sessions SET state='OFF',last_shutdown_at=NOW(),session_status=$2,telemetry=NULL,telemetry_at=NULL WHERE service_id=$1",[service,status]);
               await c.query("UPDATE model_endpoints SET status='off',comfyui_ready=FALSE WHERE service_id=$1",[service]);
@@ -147,7 +143,7 @@ export async function gpuLifecycleTick() {
 }
 
 export async function gpuDashboard() {
-  const rows=await query<any>(`SELECT s.*,m.username,m.model_name,m.endpoint_url,m.api_key,m.gpu_name,m.extra_meta,(SELECT count(*)::int FROM gpu_leases l WHERE l.service_id=s.service_id) AS leased_jobs FROM gpu_sessions s LEFT JOIN model_endpoints m USING(service_id) WHERE s.service_id='minimax_music_3' ORDER BY s.service_id`);
+  const rows=await query<any>(`SELECT s.*,m.username,m.model_name,m.endpoint_url,m.api_key,m.gpu_name,m.extra_meta,(SELECT count(*)::int FROM gpu_leases l WHERE l.service_id=s.service_id) AS leased_jobs FROM gpu_sessions s LEFT JOIN model_endpoints m USING(service_id) WHERE s.service_id IN ('minimax_music_3','ltx_2_3_distilled_gguf_q4') ORDER BY s.service_id`);
   return await Promise.all(rows.map(async(row)=>{
     let live:any=null;let availability='Unknown';
     let legacyActive=false;
@@ -164,9 +160,8 @@ export async function gpuDashboard() {
     if(!live && ['ON','INITIALIZING','STOPPING','ERROR'].includes(row.state)) {
       const profile=GPU_PROFILES.find(p=>p.account===String(row.username || '').toLowerCase());
       if(profile?.kernel_ref && process.env[profile.token_env])try {
-        const [user,slug]=profile.kernel_ref.split('/');
-        const r=await fetch(`https://www.kaggle.com/api/v1/kernels/status?userName=${user}&kernelSlug=${slug}`,{signal:AbortSignal.timeout(5000),headers:{Authorization:`Bearer ${process.env[profile.token_env]}`}});
-        if(r.ok){const k:any=await r.json();if(['complete','completed','cancelacknowledged','canceled','cancelled','error','failed'].includes(String(k.status).toLowerCase())){
+        let k:any;try{k=await notebookStatus(profile);}catch{k={status:'unknown'};}
+        {if(['complete','completed','cancelacknowledged','canceled','cancelled','error','failed'].includes(String(k.status).toLowerCase())){
           const changed=await query<any>(`UPDATE gpu_sessions SET state='OFF',session_status=$2,telemetry=NULL,telemetry_at=NULL WHERE service_id=$1 AND worker_started_at=$3 RETURNING service_id`,[row.service_id,String(k.status),row.worker_started_at]);
           row.state=changed.length?'OFF':'UNKNOWN';availability=changed.length?'Provider confirms session terminated':'Session changed during observation; refresh required';
         }}

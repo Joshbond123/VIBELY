@@ -14,38 +14,16 @@ import urllib.error
 import urllib.request
 import uuid
 
-KAGGLE_USERNAME = "happink"
+KAGGLE_USERNAME = "joshbond123"
 KAGGLE_API_TOKEN = os.environ['KAGGLE_API_TOKEN']
 HF_TOKEN = os.environ['HF_TOKEN']
 API_KEY = os.environ['WORKER_API_KEY']
 REGISTRY_SECRET = os.environ['VIBELY_MODEL_REGISTRY_SECRET']
 VIBELY_BACKEND_URL = os.environ['VIBELY_BACKEND_URL']
-CACHE_DATASET_SLUG = "happink/minimax-music-3-q4-0-gguf-cache"
+CACHE_DATASET_SLUG = "joshbond123/minimax-music-3-q4-0-gguf-cache"
 CACHE_DATASET_TITLE = "MiniMax Music 3 Q4_0 GGUF Persistent Cache"
 
-MODEL_SPECS = [
-    {
-        "filename": "minimax_music3_dit_Q4_0.gguf",
-        "repo": "molbal/Minimax-Music3-GGUF",
-        "repo_path": "minimax_music3_dit_Q4_0.gguf",
-        "expected_bytes": 1490267392,
-        "comfy_dirs": ["unet", "diffusion_models"],
-    },
-    {
-        "filename": "minimax_music3_text_encoder_pruned_Q4_0.gguf",
-        "repo": "molbal/Minimax-Music3-GGUF",
-        "repo_path": "minimax_music3_text_encoder_pruned_Q4_0.gguf",
-        "expected_bytes": 5774253216,
-        "comfy_dirs": ["clip", "text_encoders"],
-    },
-    {
-        "filename": "minimax_music3_dav.safetensors",
-        "repo": "Comfy-Org/MiniMax-Music-3",
-        "repo_path": "vae/minimax_music3_dav.safetensors",
-        "expected_bytes": 216696128,
-        "comfy_dirs": ["vae"],
-    },
-]
+MODEL_SPECS = [{'filename': 'minimax_music3_dit_Q4_0.gguf', 'repo': 'molbal/Minimax-Music3-GGUF', 'repo_path': 'minimax_music3_dit_Q4_0.gguf', 'expected_bytes': 1490267392, 'comfy_dirs': ['unet', 'diffusion_models'], 'revision': 'd6ab7b871d22a050aa734e8669f25427fbdae153', 'sha256': '808010c9e35f5fe1996fda2469d56969d2977517e820ca7a3c0a6b47b5042062'}, {'filename': 'minimax_music3_text_encoder_pruned_Q4_0.gguf', 'repo': 'molbal/Minimax-Music3-GGUF', 'repo_path': 'minimax_music3_text_encoder_pruned_Q4_0.gguf', 'expected_bytes': 5774253216, 'comfy_dirs': ['clip', 'text_encoders'], 'revision': 'd6ab7b871d22a050aa734e8669f25427fbdae153', 'sha256': '5aca4e32e105ac2aeabf4c1014b7a484cb5effe4c50a00283279fd0f910f193b'}, {'filename': 'minimax_music3_dav.safetensors', 'repo': 'Comfy-Org/MiniMax-Music-3', 'repo_path': 'vae/minimax_music3_dav.safetensors', 'expected_bytes': 216696128, 'comfy_dirs': ['vae'], 'revision': '9e364ccd290a401561091fb441ed19cd7de92550', 'sha256': '2a32155b769be01445fcc2a8663b910fc9e1751e18dc1c3ec528064512d9ef0c'}]
 
 WORK_ROOT = "/kaggle/working"
 TMP_ROOT = "/kaggle/tmp" if os.path.isdir("/kaggle/tmp") else "/tmp/vibely_store"
@@ -134,63 +112,16 @@ def try_download_from_kaggle_dataset():
     return False
 
 def ensure_models() -> dict:
-    STATE["stage"] = "resolving_persistent_models"
-    resolved = {}
-    # First check attached /kaggle/input or persistent /kaggle/working
-    missing = []
+    # Private account-owned CPU-published cache only. No GPU-time HF fallback.
+    resolved={}
     for spec in MODEL_SPECS:
-        fn = spec["filename"]
-        exp = spec["expected_bytes"]
-        inp = scan_kaggle_inputs(fn, exp)
-        if inp:
-            log(f"Persistent model mounted in /kaggle/input (no download needed): {inp}")
-            resolved[fn] = (inp, "kaggle_input_dataset")
-            STATE["dataset_cached"] = True
-            continue
-        wp = os.path.join(PERSIST_MODELS_DIR, fn)
-        if healthy_file(wp, exp):
-            log(f"Persistent model found in /kaggle/working (no download needed): {wp}")
-            resolved[fn] = (wp, "kaggle_working_persistent")
-            continue
-        tp = os.path.join(TMP_ROOT, "models", fn)
-        if healthy_file(tp, exp):
-            resolved[fn] = (tp, "local_tmp_cache")
-            continue
-        missing.append(spec)
-
-    if missing and check_dataset_exists_remote():
-        STATE["dataset_cached"] = True
-        if try_download_from_kaggle_dataset():
-            still_missing = []
-            for spec in missing:
-                wp = os.path.join(PERSIST_MODELS_DIR, spec["filename"])
-                if healthy_file(wp, spec["expected_bytes"]):
-                    resolved[spec["filename"]] = (wp, "kaggle_dataset_archive")
-                else:
-                    still_missing.append(spec)
-            missing = still_missing
-
-    for spec in missing:
-        fn = spec["filename"]
-        dest = os.path.join(PERSIST_MODELS_DIR, fn)
-        part = dest + ".part"
-        url = f"https://huggingface.co/{spec['repo']}/resolve/main/{spec['repo_path']}"
-        log(f"Downloading {fn} ({spec['expected_bytes']/1e9:.2f} GB) from {spec['repo']}...")
-        STATE["stage"] = f"downloading_{fn}"
-        cmd = [
-            "curl", "-fL", "--retry", "5", "--retry-delay", "3", "-C", "-",
-            "-H", f"Authorization: Bearer {HF_TOKEN}",
-            "-o", part, url
-        ]
-        res = subprocess.run(cmd, capture_output=True, text=True)
-        if res.returncode != 0 or not healthy_file(part, spec["expected_bytes"]):
-            raise RuntimeError(f"Failed downloading {fn}: rc={res.returncode} stderr={res.stderr[-300:]}")
-        os.replace(part, dest)
-        log(f"Verified {fn} ({os.path.getsize(dest)} bytes)")
-        resolved[fn] = (dest, "huggingface_initial_bootstrap")
-
-    STATE["storage_sources"] = {k: v[1] for k, v in resolved.items()}
-    return {k: v[0] for k, v in resolved.items()}
+        src=scan_kaggle_inputs(spec['filename'],spec['expected_bytes'])
+        if not src or os.path.getsize(src)!=spec['expected_bytes']:
+            raise RuntimeError('Required Joshbond123 model cache asset missing: '+spec['filename'])
+        resolved[spec['filename']]=src
+    STATE['storage_sources']={name:'joshbond123_private_mounted_cache' for name in resolved}
+    STATE['dataset_cached']=True
+    return resolved
 
 def publish_persistent_dataset_bg(model_paths: dict):
     def _worker():
@@ -270,7 +201,11 @@ def setup_comfyui(model_paths: dict):
             if shutil.disk_usage(nvme_stage_dir).free > sz + 2_000_000_000:
                 t_s = time.time()
                 with open(src, "rb", buffering=16 * 1024 * 1024) as rf, open(dst_nvme, "wb", buffering=16 * 1024 * 1024) as wf:
-                    shutil.copyfileobj(rf, wf, length=16 * 1024 * 1024)
+                    digest=hashlib.sha256()
+                    for block in iter(lambda:rf.read(16*1024*1024),b''):
+                        digest.update(block);wf.write(block)
+                    if digest.hexdigest()!=spec['sha256']:
+                        raise RuntimeError('Music cache SHA-256 mismatch: '+fn)
                 dt = max(0.01, time.time() - t_s)
                 log(f"Staged {fn} ({sz/1e9:.2f} GB) from /kaggle/input -> local NVMe in {dt:.1f}s ({(sz/1e6)/dt:.0f} MB/s)")
                 return fn, dst_nvme
@@ -607,14 +542,14 @@ def start_cloudflared_and_heartbeat():
             with open(os.path.join(ep_dir, "dataset-metadata.json"), "w") as mf:
                 json.dump({
                     "title": "VIBELY Music3 Live Endpoint",
-                    "id": "happink/vibely-music3-live-endpoint",
+                    "id": "joshbond123/vibely-music3-live-endpoint",
                     "licenses": [{"name": "other"}],
                 }, mf)
             os.makedirs("/tmp/.kaggle_ep", exist_ok=True)
             with open("/tmp/.kaggle_ep/kaggle.json", "w") as kf:
-                json.dump({"username": "happink", "key": KAGGLE_API_TOKEN}, kf)
+                json.dump({"username": "joshbond123", "key": KAGGLE_API_TOKEN}, kf)
             os.chmod("/tmp/.kaggle_ep/kaggle.json", 0o600)
-            env = dict(os.environ, KAGGLE_USERNAME="happink", KAGGLE_KEY=KAGGLE_API_TOKEN, KAGGLE_API_TOKEN=KAGGLE_API_TOKEN, KAGGLE_CONFIG_DIR="/tmp/.kaggle_ep")
+            env = dict(os.environ, KAGGLE_USERNAME="joshbond123", KAGGLE_KEY=KAGGLE_API_TOKEN, KAGGLE_API_TOKEN=KAGGLE_API_TOKEN, KAGGLE_CONFIG_DIR="/tmp/.kaggle_ep")
             subprocess.run([sys.executable, "-m", "pip", "install", "-q", "kaggle"], check=False)
             c = subprocess.run(["kaggle", "datasets", "create", "-p", ep_dir, "--dir-mode", "skip", "-q"], env=env, capture_output=True, text=True)
             if c.returncode != 0:
@@ -662,6 +597,13 @@ def start_cloudflared_and_heartbeat():
     threading.Thread(target=_hb_loop, daemon=True).start()
 
 def main():
+    def _bounded_session():
+        while not SHUTDOWN_REQUESTED.wait(5):
+            elapsed=time.time()-STATE['started_at']
+            if (not STATE['comfyui_ready'] and elapsed>18*60) or elapsed>2*3600:
+                if COMFY_PROC is not None and COMFY_PROC.poll() is None: COMFY_PROC.kill()
+                os._exit(1)
+    threading.Thread(target=_bounded_session,daemon=True).start()
     try:
         gpu_q = subprocess.run(["nvidia-smi", "--query-gpu=name,memory.total", "--format=csv,noheader"], capture_output=True, text=True)
         STATE["gpu_name"] = (gpu_q.stdout or "Kaggle GPU").strip()
@@ -816,13 +758,19 @@ def main():
 
     try:
         paths = ensure_models()
-        publish_persistent_dataset_bg(paths)
+        # Cache was published and verified by the CPU-only installer.
         setup_comfyui(paths)
         start_comfyui()
     except Exception as e:
         STATE["last_error"] = str(e)
         STATE["stage"] = "error"
         log(f"FATAL SETUP ERROR: {e}\n{traceback.format_exc()}")
+        try:
+            payload=json.dumps({'service_id':'minimax_music_3','attempt_started_at':STATE['started_at'],'error':str(e)}).encode()
+            urllib.request.urlopen(urllib.request.Request(VIBELY_BACKEND_URL+'/api/gpu/startup-failed',data=payload,headers={'Content-Type':'application/json','X-Registry-Secret':REGISTRY_SECRET}),timeout=10).close()
+        except Exception: pass
+        SHUTDOWN_REQUESTED.set()
+
 
     # Keep session alive up to 11.5 hours
     t0=time.time()
@@ -831,7 +779,9 @@ def main():
         if SHUTDOWN_REQUESTED.is_set():break
         with JOBS_LOCK:
             busy=any(j.get('status') in ('queued','running') or (j.get('status')=='completed' and not j.get('persisted_receipt')) for j in JOBS.values())
-        if busy:idle_since=time.time()
+        if busy:
+            idle_since=time.time()
+            if any(j.get('status')=='completed' and not j.get('persisted_receipt') and time.time()-j.get('completed_at',time.time())>600 for j in JOBS.values()):break
         elif time.time()-idle_since>30:
             try:
                 req=urllib.request.Request(VIBELY_BACKEND_URL+'/api/gpu/leases?service_id=minimax_music_3',headers={'X-Registry-Secret':REGISTRY_SECRET})

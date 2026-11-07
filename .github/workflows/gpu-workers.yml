@@ -5,12 +5,12 @@ on:
       worker:
         description: Worker to replace (ensure old jobs finished first)
         type: choice
-        options: [music]
+        options: [music, video]
         default: music
 permissions:
   contents: read
 concurrency:
-  group: gpu-worker-deployment
+  group: gpu-worker-${{ inputs.worker }}
   cancel-in-progress: false
 jobs:
   deploy:
@@ -25,7 +25,9 @@ jobs:
       - name: Deploy private Kaggle kernels
         run: python workers/deploy.py "${{ inputs.worker }}"
         env:
-          KAGGLE_HAPPINK_TOKEN: ${{ secrets.KAGGLE_HAPPINK_TOKEN }}
+          KAGGLE_JOSHBOND_TOKEN: ${{ secrets.KAGGLE_JOSHBOND_TOKEN }}
+          KAGGLE_TEMILOLO_TOKEN: ${{ secrets.KAGGLE_TEMILOLO_TOKEN }}
+          LTX_VIDEO_API_KEY: ${{ secrets.LTX_VIDEO_API_KEY }}
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
           MINIMAX_MUSIC3_API_KEY: ${{ secrets.MINIMAX_MUSIC3_API_KEY }}
           VIBELY_MODEL_REGISTRY_SECRET: ${{ secrets.VIBELY_MODEL_REGISTRY_SECRET }}

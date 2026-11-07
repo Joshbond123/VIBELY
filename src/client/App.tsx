@@ -722,7 +722,7 @@ export default function App() {
                     </div>
                     <div className="p-3 rounded-xl bg-zinc-950/70 border border-zinc-800/80">
                       <div className="font-semibold text-zinc-200">Video Engine</div>
-                      <div>NVIDIA Cosmos3 Nano</div><div className="text-xs text-amber-300">{healthInfo?.nvidia_video?.status || "API access unverified"} · no video GPU fallback</div>
+                      <div>LTX-2.3 Distilled GGUF Q4</div><div className="text-xs text-amber-300">{healthInfo?.video_engine?.status || "Runtime not verified"} · Temilolo · GPU starts on demand</div>
                     </div>
                   </div>
                 </div>

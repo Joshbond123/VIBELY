@@ -3,20 +3,21 @@ Secrets are injected at deployment time; never commit rendered worker files.
 """
 import ast, json, os, pathlib, subprocess, tempfile, sys, time, urllib.request, urllib.error
 SPECS={
- 'music':('happink','vibely-music-gpu-worker',['happink/minimax-music-3-q4-0-gguf-cache'],'KAGGLE_HAPPINK_TOKEN','MINIMAX_MUSIC3_API_KEY')}
+ 'music':('joshbond123','vibely-music-gpu-worker',['joshbond123/minimax-music-3-q4-0-gguf-cache'],'KAGGLE_JOSHBOND_TOKEN','MINIMAX_MUSIC3_API_KEY'),
+ 'video':('temilolo','vibely-ltx-video-gpu-worker',['temilolo/ltx-23-distilled-q4-cache','temilolo/ltx-23-gemma-q4-cache'],'KAGGLE_TEMILOLO_TOKEN','LTX_VIDEO_API_KEY')}
 probe=False
-if len(sys.argv)>1 and sys.argv[1] not in ('all','music'):raise SystemExit('Only music GPU deployment is supported')
+if len(sys.argv)>1 and sys.argv[1] not in ('all','music','video'):raise SystemExit('Only the two dedicated video/music workers are supported')
 for kind in ([sys.argv[1]] if len(sys.argv)>1 and sys.argv[1]!='all' else SPECS):
  attempt_started_at=time.time()
  user,slug,datasets,token_var,api_var=SPECS[kind]
  source=pathlib.Path(__file__).with_name(kind+'_worker.py').read_text()
- values={'KAGGLE_API_TOKEN':os.environ[token_var],'WORKER_API_KEY':os.environ[api_var],'HF_TOKEN':os.environ['HF_TOKEN'],'VIBELY_MODEL_REGISTRY_SECRET':os.environ['VIBELY_MODEL_REGISTRY_SECRET'],'VIBELY_BACKEND_URL':'https://aivideo.aivideo.blitz.cloud'}
+ values={'KAGGLE_API_TOKEN':os.environ[token_var],'WORKER_API_KEY':os.environ[api_var],'HF_TOKEN':os.environ.get('HF_TOKEN',''),'VIBELY_MODEL_REGISTRY_SECRET':os.environ['VIBELY_MODEL_REGISTRY_SECRET'],'VIBELY_BACKEND_URL':'https://aivideo.aivideo.blitz.cloud'}
  # Replace only explicit deployment placeholders, not arbitrary source strings.
  for key,value in values.items(): source=source.replace('os.environ['+repr(key)+']',repr(value))
  compile(source,slug,'exec')
  with tempfile.TemporaryDirectory() as temp:
   p=pathlib.Path(temp);(p/'server.py').write_text(source)
-  metadata={'id':user+'/'+slug,'title':'VIBELY music GPU worker','code_file':'server.py','language':'python','kernel_type':'script','is_private':'true','enable_gpu':'true','enable_internet':'true','enable_tpu':'false','dataset_sources':datasets,'competition_sources':[],'kernel_sources':[],'model_sources':[]}
+  metadata={'id':user+'/'+slug,'title':'VIBELY '+kind+' GPU worker','code_file':'server.py','language':'python','kernel_type':'script','is_private':True,'enable_gpu':True,'enable_internet':True,'enable_tpu':False,'dataset_sources':datasets,'competition_sources':[],'kernel_sources':[],'model_sources':[]}
   # Resolve numeric identity before saving, so changing a title cannot fork/rename another worker.
   for candidate in [slug,'vibely-'+kind+'-gpu-worker']:
    try:
@@ -33,7 +34,7 @@ for kind in ([sys.argv[1]] if len(sys.argv)>1 and sys.argv[1]!='all' else SPECS)
   api=KaggleApi();api.authenticate()
   for attempt in range(5):
    try:
-    result=api.kernels_push(temp)
+    result=api.kernels_push(temp, acc='NvidiaTeslaT4')
     if result is None:raise RuntimeError('Kaggle SaveKernel returned no result')
     error=getattr(result,'error',None)
     if error:raise RuntimeError('Kaggle rejected worker startup: '+str(error))
@@ -43,13 +44,14 @@ for kind in ([sys.argv[1]] if len(sys.argv)>1 and sys.argv[1]!='all' else SPECS)
     break
    except Exception as e:
     message=str(e)
-    for value in values.values():message=message.replace(value,'[REDACTED]')
+    for value in values.values():
+     if value:message=message.replace(value,'[REDACTED]')
     if attempt<4 and ('409' in message or 'Conflict' in message):time.sleep(30);continue
     if not probe:
      # An accepted GitHub dispatch is not a successfully allocated GPU. Report
      # quota/SaveKernel errors immediately rather than leaving a 20-minute spinner.
      try:
-      payload=json.dumps({'service_id':'minimax_music_3','attempt_started_at':attempt_started_at,'error':message[:1000]}).encode()
+      payload=json.dumps({'service_id':'minimax_music_3' if kind=='music' else 'ltx_2_3_distilled_gguf_q4','attempt_started_at':attempt_started_at,'error':message[:1000]}).encode()
       req=urllib.request.Request(values['VIBELY_BACKEND_URL']+'/api/gpu/startup-failed',data=payload,headers={'Content-Type':'application/json','X-Registry-Secret':values['VIBELY_MODEL_REGISTRY_SECRET']})
       urllib.request.urlopen(req,timeout=15).close()
      except Exception:pass

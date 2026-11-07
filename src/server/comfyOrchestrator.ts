@@ -48,11 +48,11 @@ export async function syncKaggleEndpointsAndHealth():Promise<ModelEndpointRecord
   if(!syncingEndpoints){
     syncingEndpoints=true;
     try{
-      const current=await query<ModelEndpointRecord>("SELECT * FROM model_endpoints WHERE service_id='minimax_music_3'");
+      const current=await query<ModelEndpointRecord>("SELECT * FROM model_endpoints WHERE service_id IN ('minimax_music_3','ltx_2_3_distilled_gguf_q4')");
       await Promise.all(current.filter(ep=>ep.endpoint_url && ep.comfyui_ready).map(ep=>probeWorkerHealth(ep.service_id,ep.endpoint_url)));
     }finally{syncingEndpoints=false;}
   }
-  return query<ModelEndpointRecord>("SELECT * FROM model_endpoints WHERE service_id='minimax_music_3'");
+  return query<ModelEndpointRecord>("SELECT * FROM model_endpoints WHERE service_id IN ('minimax_music_3','ltx_2_3_distilled_gguf_q4')");
 }
 
 export async function probeWorkerHealth(serviceId: string, baseUrl: string): Promise<boolean> {
@@ -97,8 +97,8 @@ export async function probeWorkerHealth(serviceId: string, baseUrl: string): Pro
   }
 }
 
-async function getReadyEndpoint(serviceId:string,jobId:string):Promise<ModelEndpointRecord> {
-  if(serviceId!=='minimax_music_3')throw new Error('Only the music GPU is supported');
+export async function getReadyEndpoint(serviceId:string,jobId:string):Promise<ModelEndpointRecord> {
+  if(!['minimax_music_3','ltx_2_3_distilled_gguf_q4'].includes(serviceId))throw new Error('Unsupported video/music service');
   await acquireGpu(serviceId,jobId);
   const start=Date.now();
   while(Date.now()-start<20*60000) {

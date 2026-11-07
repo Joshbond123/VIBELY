@@ -1,7 +1,7 @@
-import {nvidiaVideoStatus} from './nvidiaVideoProvider.js';
-import {launchVideoGenerationPipeline} from './nvidiaVideoPipeline.js';
+import {ltxVideoStatus} from './ltxVideoProvider.js';
+import {launchVideoGenerationPipeline} from './ltxVideoPipeline.js';
 import {gpuFleetDashboard} from './gpuUsage.js';
-import {NVIDIA_VIDEO_SPEC,validateRequestedVideoEngine,redactStartupError} from './videoEnginePolicy.js';
+import {LTX_VIDEO_SPEC,validateRequestedVideoEngine,redactStartupError} from './videoEnginePolicy.js';
 import crypto from 'crypto';
 import { gpuDashboard, acceptGpuHeartbeat } from './gpuLifecycle.js';
 import { generateSocialMetadata } from './socialMetadata.js';
@@ -61,7 +61,7 @@ app.get('/api/health', async (_req, res) => {
       app: 'VIBELY',
       timestamp: new Date().toISOString(),
       database: { connected: dbConnected, error: dbError || null },
-      nvidia_video: {...NVIDIA_VIDEO_SPEC,...(dbConnected?await nvidiaVideoStatus():{status:"database_unavailable"})},
+      video_engine: {...LTX_VIDEO_SPEC,...(dbConnected?await ltxVideoStatus():{status:"database_unavailable"})},
       nvidia_reasoning: {
         configured: Boolean(process.env.NVIDIA_API_KEY),
         primary_model: 'nvidia/nemotron-3.5-super-vl-120b-a12b',
@@ -138,12 +138,12 @@ app.get('/api/gpu', async (_req,res)=>{
   catch(e:any){res.status(500).json({ok:false,error:e.message});}
 });
 app.get('/api/video-engine/readiness',async(_req,res)=>{
-  try{res.json({ok:true,current_engine:NVIDIA_VIDEO_SPEC.id,provider:NVIDIA_VIDEO_SPEC,availability:await nvidiaVideoStatus(),fallback:null});}catch{res.status(503).json({ok:false,error:'Video provider status temporarily unavailable'});}
+  try{res.json({ok:true,current_engine:LTX_VIDEO_SPEC.id,provider:LTX_VIDEO_SPEC,availability:await ltxVideoStatus(),fallback:null});}catch{res.status(503).json({ok:false,error:'Video provider status temporarily unavailable'});}
 });
 app.post('/api/gpu/startup-failed',async(req,res)=>{
   if(!process.env.VIBELY_MODEL_REGISTRY_SECRET || req.header('X-Registry-Secret')!==process.env.VIBELY_MODEL_REGISTRY_SECRET){res.status(401).json({ok:false});return;}
   const service=String(req.body.service_id || '');const started=Number(req.body.attempt_started_at);
-  if(!['minimax_music_3'].includes(service) || !Number.isFinite(started) || Math.abs(Date.now()/1000-started)>1800){res.status(400).json({ok:false,error:'Invalid or expired startup failure'});return;}
+  if(!['minimax_music_3','ltx_2_3_distilled_gguf_q4'].includes(service) || !Number.isFinite(started) || Math.abs(Date.now()/1000-started)>1800){res.status(400).json({ok:false,error:'Invalid or expired startup failure'});return;}
   const error=redactStartupError(req.body.error);
   const rows=await query<any>(`UPDATE gpu_sessions SET state='ERROR',error=$2,telemetry=NULL,telemetry_at=NULL
     WHERE service_id=$1 AND state IN ('STARTING','INITIALIZING') AND requested_at<=to_timestamp($3)
@@ -164,11 +164,13 @@ app.get('/api/gpu/leases',async(req,res)=>{
 
 // Model Endpoint Heartbeat Registration (called by Kaggle GPU workers)
 app.post('/api/models/register', async (req, res) => {
-  if(req.body?.service!=='minimax_music_3'){res.status(410).json({ok:false,error:'Only the existing music GPU may register. Video is NVIDIA hosted only.'});return;}
+  if(!['minimax_music_3','ltx_2_3_distilled_gguf_q4'].includes(req.body?.service)){res.status(410).json({ok:false,error:'Retired video/music service'});return;}
+  const expectedOwner=req.body.service==='minimax_music_3'?'joshbond123':'temilolo';
+  if(String(req.body.username||'').toLowerCase()!==expectedOwner){res.status(403).json({ok:false,error:'Wrong dedicated service account'});return;}
   try {
     const secret = req.header('X-Registry-Secret') || '';
     const expected = process.env.VIBELY_MODEL_REGISTRY_SECRET || '';
-    if (expected && secret !== expected) {
+    if (!expected || secret !== expected) {
       res.status(401).json({ ok: false, error: 'Invalid registry secret' });
       return;
     }
@@ -198,6 +200,8 @@ app.post('/api/models/register', async (req, res) => {
         (service_id, username, model_name, endpoint_url, api_key, status, comfyui_ready, dataset_cached, storage_sources, gpu_name, extra_meta, last_heartbeat_at, updated_at)
        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9::jsonb,$10,$11::jsonb,NOW(),NOW())
        ON CONFLICT (service_id) DO UPDATE SET
+         username = EXCLUDED.username,
+         model_name = EXCLUDED.model_name,
          endpoint_url = EXCLUDED.endpoint_url,
          api_key = CASE WHEN EXCLUDED.api_key != '' THEN EXCLUDED.api_key ELSE model_endpoints.api_key END,
          status = EXCLUDED.status,
@@ -544,7 +548,7 @@ app.get('/api/history', async (_req, res) => {
     const musicWorkflow = JSON.parse(
       fs.readFileSync(path.join(REPO_ROOT, 'comfyui_workflows', 'minimax_music3_q4_0_gguf.json'), 'utf8')
     );
-    const videoWorkflow = NVIDIA_VIDEO_SPEC;
+    const videoWorkflow = LTX_VIDEO_SPEC;
     res.json({
       ok: true,
       history: rows.map(formatVideoRow),

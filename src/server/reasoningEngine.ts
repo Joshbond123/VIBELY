@@ -182,7 +182,7 @@ export async function generateFullVideoProductionPlan(options?: {
 
   while (attempts < 3) {
     attempts++;
-    const systemPrompt = `You are VIBELY Layer-1 Creative Director & AI Cinematographer coordinating ComfyUI, MiniMax Music 3 Q4_0 GGUF, and NVIDIA Cosmos3 Nano hosted video.
+    const systemPrompt = `You are VIBELY Layer-1 Creative Director & AI Cinematographer coordinating ComfyUI, MiniMax Music 3 Q4_0 GGUF, and LTX-2.3 Distilled GGUF Q4 video.
 You MUST obey Scarlett Monroe's Permanent Identity Directive strictly:
 ${SCARLETT_PERMANENT_IDENTITY_PROMPT}
 

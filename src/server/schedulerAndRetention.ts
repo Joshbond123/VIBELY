@@ -1,4 +1,4 @@
-import {launchVideoGenerationPipeline,recoverNvidiaGenerations} from './nvidiaVideoPipeline.js';
+import {launchVideoGenerationPipeline,recoverLtxGenerations} from './ltxVideoPipeline.js';
 import fs from 'fs';
 import path from 'path';
 import cron from 'node-cron';
@@ -229,14 +229,14 @@ export function startBackgroundDaemons(dataDir: string): void {
   cron.schedule('* * * * *', () => {
     syncKaggleEndpointsAndHealth().catch(() => {});
     recoverInFlightGenerations(dataDir).catch(() => {});
-    recoverNvidiaGenerations(dataDir).catch(() => {});
+    recoverLtxGenerations(dataDir).catch(() => {});
   });
 
   // Immediate startup check
   setTimeout(() => {
     syncKaggleEndpointsAndHealth().catch(() => {});
     recoverInFlightGenerations(dataDir).catch(() => {});
-    recoverNvidiaGenerations(dataDir).catch(() => {});
+    recoverLtxGenerations(dataDir).catch(() => {});
     runDueSchedulesTick(dataDir).catch(() => {});
     runAutomaticVideoDeletionSweep(dataDir).catch(() => {});
   }, 3000);
