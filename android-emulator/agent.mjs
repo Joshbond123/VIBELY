@@ -1912,6 +1912,19 @@ function startEmulatorSupervisor() {
       }
       const deadSec = Math.round((Date.now() - lastAdbHealthyAt) / 1000);
       if (deadSec < 40) return;
+      // A busy guest (Play downloads, an install, a heavy app launch) can stall adb
+      // for minutes while the phone is completely fine. Relaunching qemu there
+      // destroys a healthy phone and costs 10+ minutes of blank screen -- measured:
+      // opening the Play Store tripped 'play_download_service', adb stalled, the
+      // supervisor relaunched the emulator and the user lost the phone for ~12 min.
+      // Only relaunch when the guest is NOT busy, and give it a much longer grace.
+      if (deadSec < 600) {
+        const busy = await isGuestBusyForPersist().catch(() => '');
+        if (busy) {
+          log(`SUPERVISOR: adb stalled for ${deadSec}s but the guest is busy (${busy}) - waiting instead of relaunching.`);
+          return;
+        }
+      }
       // Give a compiling guest a chance: adb can stall while dex2oat owns every
       // vCPU, and relaunching restarts the compile from scratch (the old endless
       // blank-screen loop). Only escalate after the storm window.
