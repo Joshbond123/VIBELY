@@ -17,6 +17,7 @@ const GATEWAY_SECRET = (process.env.EMULATOR_GATEWAY_SECRET || '').trim();
 const COORDINATOR_FILE = path.join(DATA_DIR, 'coordinator.json');
 const ROTATION_LOG_FILE = path.join(DATA_DIR, 'rotation-history.json');
 const SNAPSHOT_FILE = path.join(PERSIST_DIR, 'latest-state.tar.zst');
+const GATEWAY_BUILD = process.env.GATEWAY_BUILD || 'dev';
 const MANIFEST_FILE = path.join(PERSIST_DIR, 'manifest.json');
 const IDENTITY_FILE = path.join(PERSIST_DIR, 'device-identity.json');
 
@@ -338,6 +339,10 @@ app.get('/api/public/health', (_req: Request, res: Response) => {
   res.json({
     ok: true,
     service: 'vibely-android-remote-gateway',
+    // Build stamp of the code actually running in this container. Without it the
+    // deploy step had no way to tell a freshly-built image from a stale one that
+    // had been running for days, so gateway fixes were silently never deployed.
+    build: GATEWAY_BUILD,
     active_emulator_connected: Boolean(active) && !isSessionGuestDegraded(active!),
     active_guest_degraded: Boolean(active) && isSessionGuestDegraded(active!),
     active_session_id: active ? active.sessionId : null,
