@@ -22,7 +22,10 @@ def log(s):
  with (WORK/'vibely_ltx.log').open('a') as f:f.write(time.strftime('%H:%M:%S')+' '+str(s)+'\n')
 def http(url,data=None,headers=None,timeout=20):
  req=urllib.request.Request(url,data=None if data is None else json.dumps(data).encode(),headers={'Content-Type':'application/json',**(headers or {})})
- with urllib.request.urlopen(req,timeout=timeout) as r:return json.load(r)
+ with urllib.request.urlopen(req,timeout=timeout) as r:
+  body=r.read()
+  # Comfy /free, /history and /interrupt succeed with an empty HTTP 200.
+  return json.loads(body) if body.strip() else {}
 def backend(route,payload=None):return http(BACKEND+route,payload,{'X-Registry-Secret':REGISTRY_SECRET},10)
 def command(args,cwd=None,timeout=600):
  subprocess.run(args,cwd=cwd,check=True,timeout=timeout)

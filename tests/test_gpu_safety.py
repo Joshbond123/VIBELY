@@ -15,5 +15,5 @@ class SafetyTests(unittest.TestCase):
   s=(ROOT/'src/server/gpuLifecycle.ts').read_text().split('export async function gpuDashboard()')[1]
   self.assertNotIn('acquireGpu(',s);self.assertNotIn('dispatchWorker(',s)
  def test_shutdown_is_confirmed_not_assumed(self):
-  s=(ROOT/'src/server/gpuLifecycle.ts').read_text();self.assertIn('SESSION_TERMINATED',s);self.assertIn('kernels/status',s);self.assertIn("SET state='STOPPING'",s)
+  s=(ROOT/'src/server/gpuLifecycle.ts').read_text();self.assertIn('SESSION_TERMINATED',s);self.assertIn('notebookStatus(profile)',s);self.assertIn('get_notebook_session_status',(ROOT/'src/server/kaggleRuntime.ts').read_text());self.assertIn("SET state='STOPPING'",s)
 if __name__=='__main__':unittest.main()

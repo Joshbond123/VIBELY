@@ -45,6 +45,8 @@ export async function resumeFailedLtxVideo(id:string,dataDir:string):Promise<str
  for(const [key,value] of Object.entries(old.ltx_segments||{})){
   const item=value as any;
   const file=path.join(dataDir,'videos','ltx-originals',id,`segment_${key}.mp4`);
+  if(item.persisted&&(!fs.existsSync(file)||fs.statSync(file).size===0))
+   throw Error('A previously persisted segment is missing; restore it before resuming to avoid replacing an acknowledged output');
   if(/^\d+$/.test(key)&&item.persisted&&fs.existsSync(file)&&fs.statSync(file).size>0)kept[key]=item;
   else unfinished.push(key);
  }
