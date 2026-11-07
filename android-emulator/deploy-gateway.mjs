@@ -107,17 +107,42 @@ async function main() {
     const appDetails = JSON.parse(appDetailsRes.texts[0] || '{}');
     const url = appDetails.url || 'https://android.aivideo.blitz.cloud';
     console.log(`[deploy-gateway] Found existing Blitz app ${existingApp.id} at ${url} (status=${appDetails.status})`);
-    if (appDetails.asleep) {
-      await mcp('apps_resume', { app: existingApp.id });
-      await sleep(12000);
+    // ROOT CAUSE of whole-day phone outages: the Blitz container sleeps after ~15
+    // minutes without traffic. Its API reports status="sleeping" but the payload's
+    // `asleep` flag was not set, so the old code skipped the resume entirely and
+    // threw - the emulator job then failed BEFORE the phone ever started, which the
+    // user sees as a dead/blank phone for hours. Detect by status too, resume
+    // persistently, and only give up after ~90s of retries.
+    const statusText = String(appDetails.status || '').toLowerCase();
+    const looksAsleep = Boolean(appDetails.asleep) ||
+      /sleep|asleep|hibernat|suspend|paus|stopped/.test(statusText);
+
+    const healthy = async () => {
+      if (await checkGatewayHealth(url)) {
+        console.log(`[deploy-gateway] Gateway at ${url} is healthy and online!`);
+        appendGithubOutput('gateway_url', url);
+        appendGithubOutput('blitz_app_id', existingApp.id);
+        return true;
+      }
+      return false;
+    };
+
+    if (looksAsleep) {
+      for (let attempt = 1; attempt <= 3; attempt++) {
+        console.log(`[deploy-gateway] Gateway status="${appDetails.status}" - resuming container (attempt ${attempt}/3)`);
+        try {
+          await mcp('apps_resume', { app: existingApp.id });
+        } catch (e) {
+          console.log(`[deploy-gateway] resume call failed: ${e.message}`);
+        }
+        for (let i = 0; i < 6; i++) {
+          await sleep(15000);
+          if (await healthy()) return;
+        }
+      }
     }
-    if (await checkGatewayHealth(url)) {
-      console.log(`[deploy-gateway] Gateway at ${url} is healthy and online!`);
-      appendGithubOutput('gateway_url', url);
-      appendGithubOutput('blitz_app_id', existingApp.id);
-      return;
-    }
-    throw new Error('Existing gateway is temporarily unreachable; refusing an implicit redeploy that would disconnect the live phone. Retry or explicitly request force_gateway_redeploy.');
+    if (await healthy()) return;
+    throw new Error('Existing gateway is temporarily unreachable after 3 resume attempts; refusing an implicit redeploy that would disconnect the live phone. Retry or explicitly request force_gateway_redeploy.');
   }
 
   // 2. Check if GHCR image is anonymously pullable; otherwise use public Node 20 Alpine carrier + volume bootstrap
