@@ -47,6 +47,7 @@ def prepare():
  import torch
  if not torch.cuda.is_available():raise RuntimeError('Kaggle did not allocate a working CUDA GPU')
  STATE['gpu_name']=', '.join(torch.cuda.get_device_name(i) for i in range(torch.cuda.device_count()))
+ log('Allocated CUDA devices: '+STATE['gpu_name'])
  # Explicitly place text/VAE on the second device when real T4x2 hardware exists.
  if torch.cuda.device_count()>1:
   file=COMFY/'comfy'/'model_management.py';s=file.read_text()

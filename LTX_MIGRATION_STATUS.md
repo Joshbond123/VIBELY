@@ -1,30 +1,17 @@
-# LTX / Music migration — draft, not deployed
+# Temilolo LTX / black797 Music3 migration
 
-Target: LTX-2.3 Distilled Q4_K_M on Temilolo; existing MiniMax Music3 Q4_0 on black797. No account rotation, runtime weight downloads, mock output, or Android changes.
+Active targets are Temilolo for LTX-2.3 Distilled GGUF Q4_K_M and black797 for the existing MiniMax Music3 Q4_0 model. Joshbond123 is no longer a video/music profile. Android and unrelated persistent data remain unchanged.
 
-## Verified locally
-- Client/server production build succeeds.
-- Worker sources compile; static LTX graph checks pass. These are **not** GPU/UI acceptance tests.
-- LTX artifact paths, pinned revisions, byte counts and SHA-256 were checked against public upstream metadata; standalone VAE/connector tensor headers were inspected.
-- Private CPU publishers perform full artifact SHA-256 verification before upload.
+Verified:
+- Production source is on GitHub main; client/server builds and static graph checks pass.
+- Both credentials are active and owner-matched; provider quotas were checked separately, not pooled or rotated.
+- Temilolo's two private model datasets contain all five pinned assets (25.76 GB total).
+- black797's existing private music dataset was mounted in a CPU-only, internet-disabled verifier. All three file sizes and full SHA-256 hashes match the pinned model manifest.
+- A real video request was submitted through the website UI. The first Kaggle GPU session verified/staged LTX files and initialized the pinned real ComfyUI node graph, but no endpoint registered and no video was produced. That attempt was explicitly failed, its lease released, and the provider subsequently confirmed the session COMPLETE / GPU OFF.
 
-## Blocking / incomplete
-- The supplied black797 token initially worked but subsequently became inactive according to Kaggle token introspection; quota, private cache and notebook access now fail. Refresh securely before any migration/deployment.
-- The first Temilolo CPU publisher exceeded the notebook's 20 GB working filesystem. Corrected CPU-only publishers now split main/audio/video assets (18.46 GB) and Gemma (7.30 GB) into separate private datasets. Their publication/mounting must still be independently verified.
-- black797 CPU publisher returned a completed log and upload proof for all three verified music files before credential failure. Actual owned-dataset availability has NOT been independently verified afterward.
-- No new GPU worker started, real render submitted, website UI tested, production migration deployed, old model removed, or retired account connection cleaned up.
-- GPU allocation, VRAM fit, model compatibility, visual/identity quality, output playback, cancellation and provider-confirmed automatic shutdown remain unverified.
+In progress:
+- Tunnel transport correction, diagnostic logging and retry through the actual UI.
+- Actual model inference, saved playable output, visual/identity review and successful shutdown after output persistence remain unverified.
+- The old Temilolo video dataset is retained until replacement validation; unrelated datasets must not be deleted.
 
-## Cache mounts required
-- `temilolo/ltx-23-distilled-q4-cache`
-- `temilolo/ltx-23-gemma-q4-cache`
-- `black797/minimax-music-3-q4-0-gguf-cache`
-
-## Before production deployment
-1. Verify active owner-bound credentials and dataset visibility/file inventories using the official provider APIs.
-2. Review the migration diff and real hardware constraints; preserve current persistent data, three Scarlett reference files and unrelated resources.
-3. Configure only the two dedicated server/GitHub credentials and an LTX worker API key. Never put secrets in source.
-4. Deploy from GitHub, submit via the actual website UI, inspect real progress/model logs and saved playable media, and independently confirm each batch session terminates.
-5. Only after replacement validation, remove the old Temilolo video-model dataset and retire only video/music connections. Do not alter Android or unrelated resources.
-
-This branch is preparation, not a completion claim.
+No mock output, simulated generation or completion claim is used. A ready node graph or cache verification is not an end-to-end render test.
