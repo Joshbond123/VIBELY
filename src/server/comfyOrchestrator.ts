@@ -110,7 +110,7 @@ export async function getReadyEndpoint(serviceId:string,jobId:string):Promise<Mo
     if(session?.state==='OFF' && session?.error) throw new Error(session.error);
     if(session?.state==='OFF') await acquireGpu(serviceId,jobId);
     if(session?.state==='ERROR') throw new Error(session.error || 'GPU startup failed');
-    if(ep?.comfyui_ready && ep.extra_meta?.worker_version==='lifecycle-v3' && session?.state==='ON') return ep;
+    if(ep?.comfyui_ready && ep.extra_meta?.worker_version==='lifecycle-v3' && session?.state==='ON' && ep.last_heartbeat_at && Date.now()-new Date(ep.last_heartbeat_at).getTime()<45000) return ep;
 
     await new Promise(r=>setTimeout(r,2000));
   }

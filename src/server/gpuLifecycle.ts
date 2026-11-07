@@ -31,8 +31,24 @@ export async function acquireGpu(service:string,jobId:string) {
     await client.query('INSERT INTO gpu_sessions(service_id) VALUES($1) ON CONFLICT DO NOTHING',[service]);
     await client.query('INSERT INTO gpu_leases(service_id,job_id) VALUES($1,$2) ON CONFLICT DO NOTHING',[service,jobId]);
     const {rows:[row]}=await client.query('SELECT * FROM gpu_sessions WHERE service_id=$1 FOR UPDATE',[service]);
+    if(row.state==='ON') {
+      const {rows:[endpoint]}=await client.query('SELECT last_heartbeat_at FROM model_endpoints WHERE service_id=$1',[service]);
+      const age=Date.now()-new Date(endpoint?.last_heartbeat_at||0).getTime();
+      if(!Number.isFinite(age)||age>45000){
+        // Generation must reconcile stale state itself, not depend on a prior
+        // dashboard visit. A cached ON flag is not proof of live hardware.
+        const profile=GPU_PROFILES.find(p=>p.desired_engine===service)!;
+        const actual=await notebookStatus(profile);
+        const terminal=String(actual.status||'').toLowerCase();
+        if(['complete','completed','cancelacknowledged','canceled','cancelled','error','failed'].includes(terminal)){
+          await client.query("UPDATE gpu_sessions SET state='OFF',session_status=$2,telemetry=NULL,telemetry_at=NULL WHERE service_id=$1",[service,terminal]);
+          await client.query("UPDATE model_endpoints SET status='off',comfyui_ready=FALSE WHERE service_id=$1",[service]);
+          row.state='OFF';
+        }
+      }
+    }
     if(['OFF','ERROR'].includes(row.state)) {
-      start=true;await client.query("UPDATE gpu_sessions SET state='STARTING',requested_at=NOW(),error=NULL,telemetry=NULL,telemetry_at=NULL WHERE service_id=$1",[service]);
+      start=true;await client.query("UPDATE gpu_sessions SET state='STARTING',requested_at=NOW(),started_at=NULL,error=NULL,telemetry=NULL,telemetry_at=NULL WHERE service_id=$1",[service]);
     }
     await client.query('COMMIT');
   } catch(e) {await client.query('ROLLBACK');throw e;} finally {client.release();}
