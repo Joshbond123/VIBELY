@@ -1841,12 +1841,31 @@ function startEmulatorSupervisor() {
           lastDisplayGuardAt = Date.now();
           await keepDisplayAlive('supervisor').catch(() => {});
           const bytes = await screenProbeBytes();
-          if (bytes > 0 && bytes < 45000) {
+          // ROOT CAUSE of the endless 'blank / stuck / restarting' phone:
+          // this used to call the screen BLANK whenever the JPEG was smaller than
+          // 45 KB. A healthy 1080x2400 launcher with a dark wallpaper compresses to
+          // ~27 KB (measured: 27079, 27138, 27145 B), so a perfectly good phone was
+          // declared blank on EVERY 20s tick. The agent then injected
+          // `input keyevent 224; wm dismiss-keyguard` every tick and tore down and
+          // rebuilt the whole scrcpy channel every third tick. That reproduced
+          // precisely the user's symptoms on a guest whose loadavg was 0.2:
+          //   am_anr: com.google.android.apps.nexuslauncher,
+          //     Input dispatching timed out (Application does not have a focused window)
+          //   adb: device offline
+          //   frozen/blank panel, then a self-restart.
+          // A genuinely black frame is only a few KB, and only a logically asleep
+          // panel should ever be woken.
+          if (bytes > 0 && bytes < 8000) {
             blankFrameStreak += 1;
-            log(`Supervisor: blank screen detected (${bytes}B probe, streak ${blankFrameStreak}).`);
-            await adbShell('input keyevent 224; wm dismiss-keyguard', 12000).catch(() => {});
+            const awake = /mWakefulness=Awake/i.test(
+              (await adbShell("dumpsys power | grep -m1 'mWakefulness='", 10000).catch(() => ({ stdout: '' }))).stdout
+            );
+            log(`Supervisor: black frame detected (${bytes}B probe, streak ${blankFrameStreak}, awake=${awake}).`);
+            if (!awake && blankFrameStreak >= 2) {
+              await adbShell('input keyevent 224', 10000).catch(() => {});
+            }
             if (blankFrameStreak >= 3 && !liveAttachInFlight) {
-              log('Supervisor: screen still blank - re-attaching the display channel.');
+              log('Supervisor: screen still black (real black frame, not a dark wallpaper) - re-attaching the display channel.');
               ensureLiveAttached('blank-screen').catch(() => {});
               blankFrameStreak = 0;
             }
