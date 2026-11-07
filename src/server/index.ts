@@ -165,7 +165,7 @@ app.get('/api/gpu/leases',async(req,res)=>{
 // Model Endpoint Heartbeat Registration (called by Kaggle GPU workers)
 app.post('/api/models/register', async (req, res) => {
   if(!['minimax_music_3','ltx_2_3_distilled_gguf_q4'].includes(req.body?.service)){res.status(410).json({ok:false,error:'Retired video/music service'});return;}
-  const expectedOwner=req.body.service==='minimax_music_3'?'joshbond123':'temilolo';
+  const expectedOwner=req.body.service==='minimax_music_3'?'black797':'temilolo';
   if(String(req.body.username||'').toLowerCase()!==expectedOwner){res.status(403).json({ok:false,error:'Wrong dedicated service account'});return;}
   try {
     const secret = req.header('X-Registry-Secret') || '';

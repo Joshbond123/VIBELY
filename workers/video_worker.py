@@ -60,7 +60,7 @@ def prepare():
    d=COMFY/'models'/directory;d.mkdir(exist_ok=True,parents=True);(d/spec['filename']).symlink_to(staged/spec['filename'])
  STATE['stage']='starting_comfyui'
  out=(WORK/'comfyui_ltx.log').open('a')
- COMFY_PROC=subprocess.Popen([sys.executable,'main.py','--listen','127.0.0.1','--port','8188','--disable-auto-launch','--lowvram'],cwd=COMFY,stdout=out,stderr=subprocess.STDOUT)
+ COMFY_PROC=subprocess.Popen([sys.executable,'main.py','--listen','127.0.0.1','--port','8188','--disable-auto-launch','--lowvram','--fp16-unet','--fp32-vae'],cwd=COMFY,stdout=out,stderr=subprocess.STDOUT)
  required=['UnetLoaderGGUF','DualCLIPLoaderGGUF','LTXVImgToVideoInplace','LTXVEmptyLatentAudio','LTXVAudioVAELoader','LTXVConcatAVLatent','LTXVSeparateAVLatent','LTXVConditioning','ManualSigmas','SamplerCustomAdvanced','SaveVideo']
  end=time.time()+360
  while time.time()<end:

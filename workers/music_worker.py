@@ -14,13 +14,13 @@ import urllib.error
 import urllib.request
 import uuid
 
-KAGGLE_USERNAME = "joshbond123"
+KAGGLE_USERNAME = "black797"
 KAGGLE_API_TOKEN = os.environ['KAGGLE_API_TOKEN']
 HF_TOKEN = os.environ['HF_TOKEN']
 API_KEY = os.environ['WORKER_API_KEY']
 REGISTRY_SECRET = os.environ['VIBELY_MODEL_REGISTRY_SECRET']
 VIBELY_BACKEND_URL = os.environ['VIBELY_BACKEND_URL']
-CACHE_DATASET_SLUG = "joshbond123/minimax-music-3-q4-0-gguf-cache"
+CACHE_DATASET_SLUG = "black797/minimax-music-3-q4-0-gguf-cache"
 CACHE_DATASET_TITLE = "MiniMax Music 3 Q4_0 GGUF Persistent Cache"
 
 MODEL_SPECS = [{'filename': 'minimax_music3_dit_Q4_0.gguf', 'repo': 'molbal/Minimax-Music3-GGUF', 'repo_path': 'minimax_music3_dit_Q4_0.gguf', 'expected_bytes': 1490267392, 'comfy_dirs': ['unet', 'diffusion_models'], 'revision': 'd6ab7b871d22a050aa734e8669f25427fbdae153', 'sha256': '808010c9e35f5fe1996fda2469d56969d2977517e820ca7a3c0a6b47b5042062'}, {'filename': 'minimax_music3_text_encoder_pruned_Q4_0.gguf', 'repo': 'molbal/Minimax-Music3-GGUF', 'repo_path': 'minimax_music3_text_encoder_pruned_Q4_0.gguf', 'expected_bytes': 5774253216, 'comfy_dirs': ['clip', 'text_encoders'], 'revision': 'd6ab7b871d22a050aa734e8669f25427fbdae153', 'sha256': '5aca4e32e105ac2aeabf4c1014b7a484cb5effe4c50a00283279fd0f910f193b'}, {'filename': 'minimax_music3_dav.safetensors', 'repo': 'Comfy-Org/MiniMax-Music-3', 'repo_path': 'vae/minimax_music3_dav.safetensors', 'expected_bytes': 216696128, 'comfy_dirs': ['vae'], 'revision': '9e364ccd290a401561091fb441ed19cd7de92550', 'sha256': '2a32155b769be01445fcc2a8663b910fc9e1751e18dc1c3ec528064512d9ef0c'}]
@@ -117,9 +117,9 @@ def ensure_models() -> dict:
     for spec in MODEL_SPECS:
         src=scan_kaggle_inputs(spec['filename'],spec['expected_bytes'])
         if not src or os.path.getsize(src)!=spec['expected_bytes']:
-            raise RuntimeError('Required Joshbond123 model cache asset missing: '+spec['filename'])
+            raise RuntimeError('Required black797 model cache asset missing: '+spec['filename'])
         resolved[spec['filename']]=src
-    STATE['storage_sources']={name:'joshbond123_private_mounted_cache' for name in resolved}
+    STATE['storage_sources']={name:'black797_private_mounted_cache' for name in resolved}
     STATE['dataset_cached']=True
     return resolved
 
@@ -542,14 +542,14 @@ def start_cloudflared_and_heartbeat():
             with open(os.path.join(ep_dir, "dataset-metadata.json"), "w") as mf:
                 json.dump({
                     "title": "VIBELY Music3 Live Endpoint",
-                    "id": "joshbond123/vibely-music3-live-endpoint",
+                    "id": "black797/vibely-music3-live-endpoint",
                     "licenses": [{"name": "other"}],
                 }, mf)
             os.makedirs("/tmp/.kaggle_ep", exist_ok=True)
             with open("/tmp/.kaggle_ep/kaggle.json", "w") as kf:
-                json.dump({"username": "joshbond123", "key": KAGGLE_API_TOKEN}, kf)
+                json.dump({"username": "black797", "key": KAGGLE_API_TOKEN}, kf)
             os.chmod("/tmp/.kaggle_ep/kaggle.json", 0o600)
-            env = dict(os.environ, KAGGLE_USERNAME="joshbond123", KAGGLE_KEY=KAGGLE_API_TOKEN, KAGGLE_API_TOKEN=KAGGLE_API_TOKEN, KAGGLE_CONFIG_DIR="/tmp/.kaggle_ep")
+            env = dict(os.environ, KAGGLE_USERNAME="black797", KAGGLE_KEY=KAGGLE_API_TOKEN, KAGGLE_API_TOKEN=KAGGLE_API_TOKEN, KAGGLE_CONFIG_DIR="/tmp/.kaggle_ep")
             subprocess.run([sys.executable, "-m", "pip", "install", "-q", "kaggle"], check=False)
             c = subprocess.run(["kaggle", "datasets", "create", "-p", ep_dir, "--dir-mode", "skip", "-q"], env=env, capture_output=True, text=True)
             if c.returncode != 0:

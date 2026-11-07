@@ -209,15 +209,15 @@ async function runMigrations(client: pg.PoolClient): Promise<void> {
   await client.query("DELETE FROM gpu_sessions WHERE service_id='minimax_h3_ref2va'");
   await client.query("DELETE FROM model_endpoints WHERE service_id='minimax_h3_ref2va'");
   await client.query(`UPDATE gpu_sessions SET state='OFF',telemetry=NULL,telemetry_at=NULL,worker_started_at=0,error=NULL,session_status='not_started_on_new_account'
-    WHERE service_id='minimax_music_3' AND EXISTS(SELECT 1 FROM model_endpoints WHERE service_id='minimax_music_3' AND lower(username)<>'joshbond123')`);
-  await client.query(`UPDATE model_endpoints SET username='joshbond123',endpoint_url='',api_key='',status='off',comfyui_ready=FALSE,gpu_name='',extra_meta='{}'::jsonb WHERE service_id='minimax_music_3' AND lower(username)<>'joshbond123'`);
+    WHERE service_id='minimax_music_3' AND EXISTS(SELECT 1 FROM model_endpoints WHERE service_id='minimax_music_3' AND lower(username)<>'black797')`);
+  await client.query(`UPDATE model_endpoints SET username='black797',endpoint_url='',api_key='',status='off',comfyui_ready=FALSE,gpu_name='',extra_meta='{}'::jsonb WHERE service_id='minimax_music_3' AND lower(username)<>'black797'`);
   await client.query(`INSERT INTO model_endpoints(service_id,username,model_name,status) VALUES('ltx_2_3_distilled_gguf_q4','temilolo','LTX-2.3 Distilled GGUF Q4_K_M','off') ON CONFLICT DO NOTHING`);
   // Migrate only the music endpoint ownership. No user/media/reference data is removed.
   await client.query(
     `
     INSERT INTO model_endpoints (service_id, username, model_name, api_key, status)
     VALUES
-      ('minimax_music_3', 'joshbond123', 'MiniMax Music 3 Q4_0 GGUF', $1, 'off')
+      ('minimax_music_3', 'black797', 'MiniMax Music 3 Q4_0 GGUF', $1, 'off')
     ON CONFLICT (service_id) DO NOTHING;
   `,
     [process.env.MINIMAX_MUSIC3_API_KEY || '']

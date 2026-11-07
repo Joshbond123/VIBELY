@@ -25,7 +25,7 @@ jobs:
       - name: Deploy private Kaggle kernels
         run: python workers/deploy.py "${{ inputs.worker }}"
         env:
-          KAGGLE_JOSHBOND_TOKEN: ${{ secrets.KAGGLE_JOSHBOND_TOKEN }}
+          KAGGLE_BLACK797_TOKEN: ${{ secrets.KAGGLE_BLACK797_TOKEN }}
           KAGGLE_TEMILOLO_TOKEN: ${{ secrets.KAGGLE_TEMILOLO_TOKEN }}
           LTX_VIDEO_API_KEY: ${{ secrets.LTX_VIDEO_API_KEY }}
           HF_TOKEN: ${{ secrets.HF_TOKEN }}

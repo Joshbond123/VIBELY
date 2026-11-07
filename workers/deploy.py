@@ -3,7 +3,7 @@ Secrets are injected at deployment time; never commit rendered worker files.
 """
 import ast, json, os, pathlib, subprocess, tempfile, sys, time, urllib.request, urllib.error
 SPECS={
- 'music':('joshbond123','vibely-music-gpu-worker',['joshbond123/minimax-music-3-q4-0-gguf-cache'],'KAGGLE_JOSHBOND_TOKEN','MINIMAX_MUSIC3_API_KEY'),
+ 'music':('black797','vibely-music-gpu-worker',['black797/minimax-music-3-q4-0-gguf-cache'],'KAGGLE_BLACK797_TOKEN','MINIMAX_MUSIC3_API_KEY'),
  'video':('temilolo','vibely-ltx-video-gpu-worker',['temilolo/ltx-23-distilled-q4-cache','temilolo/ltx-23-gemma-q4-cache'],'KAGGLE_TEMILOLO_TOKEN','LTX_VIDEO_API_KEY')}
 probe=False
 if len(sys.argv)>1 and sys.argv[1] not in ('all','music','video'):raise SystemExit('Only the two dedicated video/music workers are supported')
@@ -32,6 +32,7 @@ for kind in ([sys.argv[1]] if len(sys.argv)>1 and sys.argv[1]!='all' else SPECS)
   os.environ.update({'KAGGLE_USERNAME':user,'KAGGLE_KEY':values['KAGGLE_API_TOKEN'],'KAGGLE_API_TOKEN':values['KAGGLE_API_TOKEN']})
   from kaggle.api.kaggle_api_extended import KaggleApi
   api=KaggleApi();api.authenticate()
+  if str(api.config_values.get(api.CONFIG_NAME_USER,'')).lower()!=user:raise RuntimeError('Kaggle authenticated owner mismatch')
   for attempt in range(5):
    try:
     result=api.kernels_push(temp, acc='NvidiaTeslaT4')
