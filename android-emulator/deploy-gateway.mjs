@@ -226,6 +226,11 @@ async function main() {
   await mcp('env_set', { app: appId, name: 'PORT', value: '8080' });
   await mcp('env_set', { app: appId, name: 'DATA_DIR', value: '/app/data' });
   await mcp('env_set', { app: appId, name: 'EMULATOR_ACCESS_TOKEN', value: ACCESS_TOKEN });
+  // Stamp the bundle so /api/public/health can prove which code is running. The
+  // gateway here is a JS bundle uploaded into /app/data, so a plain container
+  // restart keeps serving the OLD bundle forever; without this stamp nothing could
+  // detect that.
+  await mcp('env_set', { app: appId, name: 'GATEWAY_BUILD', value: String(process.env.GATEWAY_BUILD || 'dev') });
   await mcp('env_set', { app: appId, name: 'EMULATOR_GATEWAY_SECRET', value: GATEWAY_SECRET });
 
   // 5. If GHCR defaulted package visibility to private, upload compiled gateway bundle into /app/data/gateway & activate via NODE_OPTIONS
