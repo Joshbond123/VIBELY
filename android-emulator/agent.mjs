@@ -811,13 +811,31 @@ async function keepDisplayAlive(where = 'guard') {
   if (tmo !== '2147483647') {
     await adbShell('settings put system screen_off_timeout 2147483647', 10000).catch(() => {});
   }
+  // A dialog that stole focus (ANR / crash / "System UI isn't responding") shows as
+  // the current focus window. Clear it, otherwise the phone accepts no input at all.
+  const focus = (await adbShell("dumpsys window | grep -m1 mCurrentFocus", 12000).catch(() => ({ stdout: '' }))).stdout.trim();
+  if (/not responding|application error|has stopped/i.test(focus)) {
+    log(`Display guard (${where}): ANR/crash dialog owns the screen (${focus.slice(0, 90)}) - dismissing it so the phone stays usable.`);
+    await adbShell('input keyevent 4', 8000).catch(() => {});      // BACK dismisses the dialog
+    await sleep(900);
+    await adbShell('input keyevent 3', 8000).catch(() => {});      // HOME refocuses the launcher
+    await sleep(600);
+  }
   const power = (await adbShell("dumpsys power | grep -m1 'mWakefulness='", 12000).catch(() => ({ stdout: '' }))).stdout;
   if (/Asleep|Dozing|Shutting\s*down/i.test(power)) {
     log(`Display guard (${where}): panel was asleep (${power.trim().slice(0, 40)}) - waking it.`);
-    await adbShell('input keyevent 224', 10000).catch(() => {});   // KEYCODE_WAKEUP
-    await sleep(1200);
-    await adbShell('wm dismiss-keyguard', 10000).catch(() => {});
-    await adbShell('input keyevent 82', 8000).catch(() => {});     // MENU = unblank
+    await adbShell('input keyevent 224', 10000).catch(() => {});   // KEYCODE_WAKEUP (focus-independent)
+    await sleep(1500);
+    // Only inject keyguard/MENU input once Android actually has a focused window.
+    // Injecting into a window-less guest is precisely what produced
+    // 'Input dispatching timed out (Application does not have a focused window)'.
+    const ready = (await adbShell("dumpsys window | grep -m1 mCurrentFocus", 12000).catch(() => ({ stdout: '' }))).stdout;
+    if (/mCurrentFocus=(?!null)/.test(ready)) {
+      await adbShell('wm dismiss-keyguard', 10000).catch(() => {});
+      await adbShell('input keyevent 82', 8000).catch(() => {});   // MENU = unblank
+    } else {
+      log(`Display guard (${where}): woke the panel but no window has focus yet - skipping key injection.`);
+    }
   }
   // NOTE: `grep -c dex2oat` matches its OWN command line, so it always returned 1
   // and pinned compileStormUntil permanently. The bracket keeps grep from
@@ -841,6 +859,7 @@ async function keepDisplayAlive(where = 'guard') {
       'cmd appops set com.android.vending RUN_ANY_IN_BACKGROUND ignore; ' +
       'cmd appops set com.zhiliaoapp.musically RUN_ANY_IN_BACKGROUND ignore; ' +
       'cmd appops set com.facebook.vibes RUN_ANY_IN_BACKGROUND ignore; ' +
+      'settings put global hide_error_dialogs 1; ' +
       'setprop pm.dexopt.bg-dexopt verify',
       20000
     ).catch(() => {});
@@ -918,6 +937,15 @@ async function suppressBackgroundChurn(where = 'boot') {
     'cmd appops set com.facebook.vibes RUN_ANY_IN_BACKGROUND ignore',
     'am force-stop com.zhiliaoapp.musically',
     'am force-stop com.facebook.vibes',
+    // An ANR/crash dialog is drawn ON TOP of the phone and eats every tap: the
+    // user sees a phone that is 'stuck' and often goes black when the launcher is
+    // restarted underneath. Real cause measured on this guest:
+    //   am_anr: com.google.android.apps.nexuslauncher,
+    //   Input dispatching timed out (Application does not have a focused window)
+    // It sat on screen for 34 minutes and made the phone unusable. Never show
+    // these dialogs at all.
+    'settings put global hide_error_dialogs 1',
+    'settings put secure anr_show_background 0',
     // Keep the panel awake no matter the power state.
     'settings put system screen_off_timeout 2147483647',
     'settings put global stay_on_while_plugged_in 7',
