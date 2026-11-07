@@ -9,11 +9,12 @@ export async function ltxVideoStatus(){
  return {status:row?.state||'UNKNOWN',account:'temilolo',on_demand:true,configured:Boolean(process.env.KAGGLE_TEMILOLO_TOKEN&&process.env.GH_PAT),error:row?.error||null,visual_acceptance:'not_verified'};
 }
 export async function renderLtxSegment(id:string,index:number,prompt:string,image:string,frames:number,dest:string,progress:(label:string)=>Promise<void>){
- const ep=await getReadyEndpoint(LTX_SERVICE,id),jid=`${id}_s${index}`;
- const headers={Authorization:`Bearer ${ep.api_key}`,'Content-Type':'application/json'};
+ const jid=`${id}_s${index}`;
  const record=await query<any>('SELECT comfyui_workflow FROM video_generations WHERE id=$1',[id]);
  const known=record[0]?.comfyui_workflow?.ltx_segments?.[String(index)];
  if(known?.persisted&&fs.existsSync(dest))return;
+ const ep=await getReadyEndpoint(LTX_SERVICE,id);
+ const headers={Authorization:`Bearer ${ep.api_key}`,'Content-Type':'application/json'};
  // Write an intention before submitting. Unknown POST outcomes are never retried.
  if(!known){
   await query(`UPDATE video_generations SET comfyui_workflow=jsonb_set(comfyui_workflow,'{ltx_segments}',COALESCE(comfyui_workflow->'ltx_segments','{}'::jsonb)||jsonb_build_object($2::text,$3::jsonb),true) WHERE id=$1`,[id,String(index),JSON.stringify({job_id:jid,endpoint:ep.endpoint_url,submitted_at:new Date().toISOString()})]);

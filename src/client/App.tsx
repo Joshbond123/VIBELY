@@ -227,6 +227,19 @@ export default function App() {
     }
   };
 
+  const handleResumeVideo = async (id: string) => {
+    if (!window.confirm('Keep saved LTX segments and retry unfinished segments? This starts the video GPU on demand. The previous GPU must already be stopped.')) return;
+    setGeneratingVideo(true);
+    try {
+      const result = await api.resumeVideo(id);
+      setActiveGenId(result.generation_id);
+      setSection('generate');
+      notify('ok', 'Resuming saved segments; retrying unfinished work');
+      await refreshAll();
+    } catch (err: any) { notify('err', err.message || 'Unable to resume generation'); }
+    finally { setGeneratingVideo(false); }
+  };
+
   const handleDeleteVideo = async (id: string) => {
     try {
       await api.deleteVideo(id);
@@ -1168,6 +1181,12 @@ export default function App() {
                             )}
                           </div>
 
+                          {v.can_resume_ltx && (
+                            <button disabled={generatingVideo} onClick={() => handleResumeVideo(v.id)}
+                              className="w-full py-2 px-3 rounded-lg bg-amber-950 hover:bg-amber-900 text-amber-200 text-xs disabled:opacity-50">
+                              Resume saved video (retry unfinished segments)
+                            </button>
+                          )}
                           <div className="space-y-2 pt-2 border-t border-zinc-800/80 text-xs">
                             <div className="flex items-center justify-between text-zinc-400">
                               <span>Duration: {v.duration_seconds ? `${v.duration_seconds.toFixed(1)}s` : '—'}</span>

@@ -38,6 +38,7 @@ export interface SceneSegment {
 }
 
 export interface VideoGeneration {
+  can_resume_ltx?: boolean;
   social_caption: string;
   hashtags: string[];
   caption_status: string;

@@ -1,5 +1,5 @@
 import {ltxVideoStatus} from './ltxVideoProvider.js';
-import {launchVideoGenerationPipeline} from './ltxVideoPipeline.js';
+import {launchVideoGenerationPipeline,resumeFailedLtxVideo} from './ltxVideoPipeline.js';
 import {gpuFleetDashboard} from './gpuUsage.js';
 import {LTX_VIDEO_SPEC,validateRequestedVideoEngine,redactStartupError} from './videoEnginePolicy.js';
 import crypto from 'crypto';
@@ -291,6 +291,13 @@ app.post('/api/videos/generate', async (req, res) => {
   } catch (err: any) {
     res.status(500).json({ ok: false, error: err?.message || String(err) });
   }
+});
+
+app.post('/api/videos/:id/resume', async(req,res)=>{
+ try {
+  const id=await resumeFailedLtxVideo(req.params.id,DATA_DIR);
+  res.json({ok:true,generation_id:id});
+ }catch(e:any){res.status(409).json({ok:false,error:redactStartupError(e.message)});}
 });
 
 app.post('/api/videos/:id/social-metadata', async (req,res) => {
@@ -666,6 +673,7 @@ function formatVideoRow(r: any) {
     : [];
   return {
     ...r,
+    can_resume_ltx: r.status==='failed' && r.comfyui_workflow?.engine===LTX_VIDEO_SPEC.id && !!r.comfyui_workflow?.production_plan && !r.comfyui_workflow?.music_starting && !r.comfyui_workflow?.remote_music_job_id,
     visual_concept: r.video_concept || r.visual_concept || '',
     storyline: r.script || r.storyline || '',
     script_summary: r.script || '',

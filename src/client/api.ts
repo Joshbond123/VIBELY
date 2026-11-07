@@ -24,6 +24,7 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({ series_id: series_id || 'weighted_random' }),
     }),
+  resumeVideo: (id: string) => request(`/api/videos/${id}/resume`, { method: 'POST' }),
   deleteVideo: (id: string) => request(`/api/videos/${id}`, { method: 'DELETE' }),
 
   getMusic: () => request('/api/music'),

@@ -65,7 +65,7 @@ def prepare():
    d=COMFY/'models'/directory;d.mkdir(exist_ok=True,parents=True);(d/spec['filename']).symlink_to(staged/spec['filename'])
  STATE['stage']='starting_comfyui'
  out=(WORK/'comfyui_ltx.log').open('a')
- COMFY_PROC=subprocess.Popen([sys.executable,'main.py','--listen','127.0.0.1','--port','8188','--disable-auto-launch','--lowvram','--fp16-unet','--fp32-vae'],cwd=COMFY,stdout=out,stderr=subprocess.STDOUT)
+ COMFY_PROC=subprocess.Popen([sys.executable,'main.py','--listen','127.0.0.1','--port','8188','--disable-auto-launch','--lowvram','--fp16-unet','--fp32-vae','--reserve-vram','2.5','--cache-none','--disable-smart-memory'],cwd=COMFY,stdout=out,stderr=subprocess.STDOUT)
  required=['UnetLoaderGGUF','DualCLIPLoaderGGUF','LTXVImgToVideoInplace','LTXVEmptyLatentAudio','LTXVAudioVAELoader','LTXVConcatAVLatent','LTXVSeparateAVLatent','LTXVConditioning','ManualSigmas','SamplerCustomAdvanced','SaveVideo']
  end=time.time()+360
  while time.time()<end:
@@ -121,6 +121,10 @@ def run_job(jid,payload):
    data=base64.b64decode(payload['reference_base64'],validate=True)
    if len(data)>20*1024*1024:raise ValueError('Reference too large')
    image.write_bytes(data)
+   # Do not retain prior segment models/latents across sequential jobs.
+   # Memory policy only: native resolution, frames, sigmas and steps are unchanged.
+   http('http://127.0.0.1:8188/free',{'unload_models':True,'free_memory':True})
+   http('http://127.0.0.1:8188/history',{'clear':True})
    w=workflow(job,image.name);client=str(uuid.uuid4());result=http('http://127.0.0.1:8188/prompt',{'prompt':w,'client_id':client})
    pid=result.get('prompt_id')
    if not pid:raise RuntimeError('Comfy rejected LTX graph: '+json.dumps(result.get('node_errors',{}))[:2000])
@@ -134,7 +138,7 @@ def run_job(jid,payload):
       try:m=json.loads(ws.recv())
       except (ValueError,TypeError,websocket.WebSocketTimeoutException):continue
       d=m.get('data',{})
-      if m.get('type')=='progress':job.update(stage='sampling',sampling_step=d.get('value'),sampling_steps=d.get('max'))
+      if m.get('type')=='progress' and str(d.get('node','19'))=='19':job.update(stage='sampling',sampling_step=d.get('value'),sampling_steps=d.get('max'))
      ws.close()
     except Exception:pass
    threading.Thread(target=progress,daemon=True).start()

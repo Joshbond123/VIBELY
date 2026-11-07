@@ -4,6 +4,8 @@ import crypto from 'node:crypto';
 import {execFile} from 'node:child_process';
 import {promisify} from 'node:util';
 import {query} from './db.js';
+import {notebookStatus} from './kaggleRuntime.js';
+import {GPU_PROFILES} from './gpuFleetPolicy.js';
 import {generateFullVideoProductionPlan,FullProductionPlan} from './reasoningEngine.js';
 import {executeMusicGenerationOnComfyUI} from './comfyOrchestrator.js';
 import {releaseGpuJob,releaseGpuLease} from './gpuLifecycle.js';
@@ -26,6 +28,36 @@ export async function launchVideoGenerationPipeline(params:{dataDir:string;trigg
  const [setting]=await query<any>("SELECT value FROM app_settings WHERE key='auto_delete'");
  await query("INSERT INTO video_generations(id,trigger_type,schedule_id,status,current_stage,progress,content_series,series_id,width,height,auto_delete_enabled,min_duration_sec) VALUES($1,$2,$3,'reasoning','Planning the production',5,'Selecting weighted series','pending',720,1280,$4,25)",[id,params.triggerType,params.scheduleId||null,setting?.value?.enabled!==false]);
  background(id,params.dataDir,params.forceSeriesId);return id;
+}
+/** Explicit UI-requested retry only. Never automatically rerun ambiguous work. */
+export async function resumeFailedLtxVideo(id:string,dataDir:string):Promise<string>{
+ if(active.has(id))throw Error('This generation is still active');
+ const [row]=await query<any>('SELECT * FROM video_generations WHERE id=$1 AND deleted_at IS NULL',[id]);
+ const old=row?.comfyui_workflow;
+ if(row?.status!=='failed'||old?.engine!==LTX_VIDEO_SPEC.id||!old?.production_plan)
+  throw Error('Only failed LTX productions with a saved plan can be resumed');
+ if(old.music_starting||old.remote_music_job_id)
+  throw Error('Music may already have started; refusing an ambiguous duplicate music request');
+ const runtime=await notebookStatus(GPU_PROFILES[0]);
+ if(!['COMPLETE','ERROR','CANCELLED','CANCELED'].includes(String(runtime.status||'').toUpperCase()))
+  throw Error('Previous video GPU session is not confirmed stopped; retry after provider shutdown');
+ const kept:Record<string,any>={},unfinished:string[]=[];
+ for(const [key,value] of Object.entries(old.ltx_segments||{})){
+  const item=value as any;
+  const file=path.join(dataDir,'videos','ltx-originals',id,`segment_${key}.mp4`);
+  if(/^\d+$/.test(key)&&item.persisted&&fs.existsSync(file)&&fs.statSync(file).size>0)kept[key]=item;
+  else unfinished.push(key);
+ }
+ const workflow={...old,ltx_segments:kept,retry_history:[...(old.retry_history||[]),{
+  requested_at:new Date().toISOString(),user_initiated:true,previous_error:row.error_message,
+  retained_segments:Object.keys(kept),retry_unpersisted_segments:unfinished,
+  previous_runtime_status:runtime.status}]};
+ // Compare-and-set makes simultaneous clicks safe across application instances.
+ const updated=await query<any>(`UPDATE video_generations SET status='generating_video',
+  current_stage='Resuming saved LTX segments; unfinished segments will be retried',error_message=NULL,
+  comfyui_workflow=$2::jsonb,last_activity_at=NOW() WHERE id=$1 AND status='failed' RETURNING id`,[id,JSON.stringify(workflow)]);
+ if(!updated.length)throw Error('Another request already resumed this generation');
+ background(id,dataDir);return id;
 }
 async function run(id:string,dataDir:string,forceSeriesId?:string){
  let [row]=await query<any>('SELECT * FROM video_generations WHERE id=$1',[id]);

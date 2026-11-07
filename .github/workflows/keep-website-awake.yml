@@ -1,0 +1,28 @@
+name: Keep VIBELY Website Awake
+
+on:
+  schedule:
+    - cron: '*/10 * * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# Independent of the phone workflow: neither job can cancel the other.
+concurrency:
+  group: vibely-website-keep-awake
+  cancel-in-progress: false
+
+jobs:
+  wake-website:
+    runs-on: ubuntu-latest
+    timeout-minutes: 6
+    env:
+      WEBSITE_PRIMARY: https://aivideo.aivideo.prod.page
+      WEBSITE_FALLBACK: https://aivideo.aivideo.blitz.cloud
+      BLITZ_API_KEY: ${{ secrets.BLITZ_WEBSITE_API_KEY }}
+      BLITZ_WEBSITE_APP: ${{ secrets.BLITZ_WEBSITE_APP }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Resume website and verify persistent application health
+        run: python3 tools/keep_website_awake.py
