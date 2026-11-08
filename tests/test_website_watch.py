@@ -1,11 +1,14 @@
 """External watch/handoff control-flow tests, not live hosting acceptance."""
 import os
+import io
+import json
 import pathlib
 import sys
 import unittest
 from unittest.mock import patch
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / 'tools'))
 import watch_website
+import keep_website_awake
 
 
 class Response:
@@ -38,4 +41,32 @@ class WatchTests(unittest.TestCase):
         self.assertNotIn('android', requests[0].full_url)
 
 
+class ResumeTests(unittest.TestCase):
+    def test_running_starting_capacity_states_are_not_restarted(self):
+        for status in ['online', 'starting', 'attention']:
+            self.check_state(status, False, False)
+        self.check_state('sleeping', True, True)
+
+    def check_state(self, status, asleep, expected):
+        calls = []
+        class RpcResponse(io.BytesIO):
+            headers = {}
+        def open_url(request, timeout):
+            message = json.loads(request.data)
+            if message['method'] == 'tools/call':
+                name = message['params']['name']
+                calls.append(name)
+                self.assertEqual(message['params']['arguments']['app'], keep_website_awake.WEBSITE_APP)
+                if name == 'apps_get':
+                    state = {'status': status, 'asleep': asleep}
+                    return RpcResponse(json.dumps({'result': {'content': [{'type': 'text', 'text': json.dumps(state)}]}}).encode())
+            return RpcResponse(b'{"result":{}}')
+        with patch.object(keep_website_awake.urllib.request, 'urlopen', open_url):
+            result = keep_website_awake.resume_website('unit-only', keep_website_awake.WEBSITE_APP)
+        self.assertEqual(result, expected)
+        self.assertEqual('apps_resume' in calls, expected)
+
+
 if __name__ == '__main__': unittest.main()
+
+# Native resume gating is deliberately tested separately from HTTP health.

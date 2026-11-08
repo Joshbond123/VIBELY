@@ -41,9 +41,25 @@ def resume_website(key, app):
 
     rpc("initialize", {"protocolVersion": "2024-11-05", "capabilities": {},
         "clientInfo": {"name": "vibely-website-keep-awake", "version": "1"}}, 1)
-    # Resume only after a failed website probe. An already-live app must not
-    # be disrupted by control-plane resumption. The phone is never targeted.
-    rpc("tools/call", {"name": "apps_resume", "arguments": {"app": app}}, 2)
+    # Do not reset a cold-starting/running app just because its HTTP route
+    # has not become ready. Capacity exhaustion cannot be repaired by restart.
+    envelope = rpc("tools/call", {"name": "apps_get", "arguments": {"app": app}}, 2)
+    state = None
+    for item in envelope.get("result", {}).get("content", []):
+        if item.get("type") == "text":
+            try:
+                candidate = json.loads(item.get("text", ""))
+                if isinstance(candidate, dict) and "status" in candidate:
+                    state = candidate
+                    break
+            except ValueError:
+                pass
+    if state is None:
+        raise RuntimeError("Cannot verify website host state; refusing blind resume")
+    if not state.get("asleep") and state.get("status") in ("online", "starting", "attention", "updating"):
+        return False
+    rpc("tools/call", {"name": "apps_resume", "arguments": {"app": app}}, 3)
+    return True
 
 
 def main():
@@ -83,8 +99,10 @@ def main():
         if not resumed:
             resumed = True
             try:
-                resume_website(key, app)
-                print("Unreachable website: website-only resume request accepted.")
+                if resume_website(key, app):
+                    print("Sleeping website: website-only resume request accepted.")
+                else:
+                    print("Website host already running/starting or waiting for capacity; no restart requested.")
             except Exception as error:
                 print("Website resume check:", type(error).__name__)
         if attempt < 5:
