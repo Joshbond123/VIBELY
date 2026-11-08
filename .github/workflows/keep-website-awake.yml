@@ -4,25 +4,36 @@ on:
   schedule:
     - cron: '3-59/5 * * * *'
   workflow_dispatch:
+    inputs:
+      watch_minutes:
+        description: Bounded watch length; one minute verifies the successor handoff
+        type: choice
+        options: ['50', '1']
+        default: '50'
 
 permissions:
   contents: read
+  actions: write
 
-# Independent of the phone workflow: neither job can cancel the other.
+# Independent of the phone workflow. Never cancel an active website watch.
+# A watch queues its successor; cron is a backstop rather than the only timer.
 concurrency:
   group: vibely-website-keep-awake
   cancel-in-progress: false
 
 jobs:
   wake-website:
+    if: ${{ vars.WEBSITE_KEEP_AWAKE_ENABLED != 'false' }}
     runs-on: ubuntu-latest
-    timeout-minutes: 6
+    timeout-minutes: 60
     env:
       WEBSITE_PRIMARY: https://aivideo.aivideo.prod.page
       WEBSITE_FALLBACK: https://aivideo.aivideo.blitz.cloud
       BLITZ_API_KEY: ${{ secrets.BLITZ_WEBSITE_API_KEY }}
       BLITZ_WEBSITE_APP: ${{ secrets.BLITZ_WEBSITE_APP }}
+      GITHUB_TOKEN: ${{ github.token }}
+      WATCH_MINUTES: ${{ inputs.watch_minutes || '50' }}
     steps:
       - uses: actions/checkout@v4
-      - name: Resume website and verify persistent application health
-        run: python3 tools/keep_website_awake.py
+      - name: External website health watch and bounded handoff
+        run: python3 -u tools/watch_website.py
