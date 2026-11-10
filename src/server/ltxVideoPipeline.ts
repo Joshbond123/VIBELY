@@ -19,8 +19,8 @@ async function stage(id:string,status:string,label:string,progress:number){await
 function background(id:string,dataDir:string,forceSeriesId?:string){
  if(active.has(id))return;active.add(id);
  run(id,dataDir,forceSeriesId).catch(async e=>{
-  await query("UPDATE video_generations SET status='failed',current_stage='Generation stopped — see provider error',error_message=$2,last_activity_at=NOW() WHERE id=$1",[id,redactStartupError(e.message)]);
-  await query('UPDATE automation_schedules SET failed_count=failed_count+1,updated_at=NOW() WHERE id=(SELECT schedule_id FROM video_generations WHERE id=$1)',[id]);
+  const failed=await query<any>("UPDATE video_generations SET status='failed',current_stage='Generation stopped — see provider error',error_message=$2,last_activity_at=NOW() WHERE id=$1 AND status<>'completed' RETURNING id",[id,redactStartupError(e.message)]);
+  if(failed.length)await query('UPDATE automation_schedules SET failed_count=failed_count+1,updated_at=NOW() WHERE id=(SELECT schedule_id FROM video_generations WHERE id=$1)',[id]);
  }).finally(async()=>{await releaseGpuJob(id).catch(()=>{});active.delete(id);});
 }
 export async function launchVideoGenerationPipeline(params:{dataDir:string;triggerType:'manual'|'scheduled';scheduleId?:string|null;forceSeriesId?:string}):Promise<string>{
@@ -111,8 +111,14 @@ async function run(id:string,dataDir:string,forceSeriesId?:string){
  await exec('ffmpeg',['-v','error','-i',final,'-f','null','-'],{timeout:120000});
  const {stdout}=await exec('ffprobe',['-v','error','-show_entries','format=duration','-of','csv=p=0',final]);const duration=assertActualVideoDuration(Number(stdout.trim()));
  await exec('ffmpeg',['-y','-v','error','-i',final,'-frames:v','1',path.join(dataDir,'videos',thumbnail)],{timeout:60000});
- await query("UPDATE video_generations SET status='completed',current_stage='Completed — visual quality requires review',progress=100,video_file_name=$2,thumbnail_file_name=$3,duration_sec=$4,completed_at=NOW(),last_activity_at=NOW(),expires_at=CASE WHEN auto_delete_enabled THEN NOW()+INTERVAL '72 hours' ELSE NULL END,error_message=NULL WHERE id=$1",[id,finalName,thumbnail,duration]);
- await query('UPDATE automation_schedules SET success_count=success_count+1,updated_at=NOW() WHERE id=(SELECT schedule_id FROM video_generations WHERE id=$1)',[id]);
+ // Completion and its schedule counter are one atomic database statement.
+ await query(`WITH finished AS (
+  UPDATE video_generations SET status='completed',current_stage='Completed — visual quality requires review',
+  progress=100,video_file_name=$2,thumbnail_file_name=$3,duration_sec=$4,completed_at=NOW(),last_activity_at=NOW(),
+  expires_at=CASE WHEN auto_delete_enabled THEN NOW()+INTERVAL '72 hours' ELSE NULL END,error_message=NULL
+  WHERE id=$1 AND status<>'completed' RETURNING schedule_id
+ ) UPDATE automation_schedules SET completed_count=completed_count+1,updated_at=NOW()
+ WHERE id IN (SELECT schedule_id FROM finished WHERE schedule_id IS NOT NULL)`,[id,finalName,thumbnail,duration]);
  await generateSocialMetadata(id,dataDir).catch(()=>{});
 }
 export async function recoverLtxGenerations(dataDir:string){
